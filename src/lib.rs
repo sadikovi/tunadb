@@ -4,8 +4,8 @@
 // - if directory exists, has a marker file and no lock file -> existing database, open it
 // - if directory exists, has a marker file, and has a lock file -> existing database, cannot open
 
-mod btree;
-mod page;
+// mod btree;
+// mod page;
 
 #[cfg(test)]
 mod tests {
