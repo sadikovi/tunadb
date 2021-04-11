@@ -17,4 +17,7 @@ fn main() {
 
   println!("{}", u16::MAX);
   println!("{}", 1 << 16);
+
+  println!("pointer size: {}", std::mem::size_of_val(&u16::MAX));
+  println!("pointer size: {}", std::mem::size_of_val(&Box::new(1)));
 }
