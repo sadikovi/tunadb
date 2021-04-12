@@ -115,6 +115,15 @@ fn split_internal(from: &mut Node, to: &mut Node) -> i32 {
   key
 }
 
+fn delete_leaf(node: &mut Node, i: usize) {
+  for k in i..node.len {
+    node.keys[k] = node.keys[k + 1];
+    node.values[k] = node.values[k + 1];
+  }
+  node.len -= 1; // deleted a key
+  println!(" deleted {}", node);
+}
+
 #[derive(Clone, Debug)]
 struct BTree {
   nodes: Vec<Node>,
@@ -132,6 +141,31 @@ impl BTree {
     self.nodes.len()
   }
 
+  // Deletes the key and returns the value for that key
+  pub fn find(&mut self, key: i32) -> Option<i32> {
+    let mut curr = self.root;
+    loop {
+      // Check if the page is a leaf, if so, terminate the search
+      let node = &self.nodes[curr];
+      if node.is_leaf {
+        break;
+      }
+      // Search for the pointer to the next page, i < node.len + 1
+      let (exists, i) = search(&node.keys[0..node.len], key);
+      let next = if exists { node.pointers[i + 1] } else { node.pointers[i] };
+      curr = next;
+    }
+
+    // Current node is a leaf node, delete the key
+    let node = &self.nodes[curr];
+    let (exists, i) = search(&node.keys[0..node.len], key);
+    if exists {
+      Some(node.values[i])
+    } else {
+      None
+    }
+  }
+
   pub fn insert(&mut self, key: i32, value: i32) {
     let mut curr = self.root;
     let mut stack = Vec::new();
@@ -142,8 +176,8 @@ impl BTree {
         break;
       }
       // Search for the pointer to the next page, i < node.len + 1
-      let (_, i) = search(&node.keys[0..node.len], key);
-      let next = node.pointers[i];
+      let (exists, i) = search(&node.keys[0..node.len], key);
+      let next = if exists { node.pointers[i + 1] } else { node.pointers[i] };
       // Push onto stack
       stack.push((curr, i));
       curr = next;
@@ -193,6 +227,32 @@ impl BTree {
     self.root = new_root.id;
     self.nodes.push(new_root);
   }
+
+  // Deletes the key and returns the value for that key
+  pub fn delete(&mut self, key: i32) {
+    let mut curr = self.root;
+    let mut stack = Vec::new();
+    loop {
+      // Check if the page is a leaf, if so, terminate the search
+      let node = &self.nodes[curr];
+      if node.is_leaf {
+        break;
+      }
+      // Search for the pointer to the next page, i < node.len + 1
+      let (exists, i) = search(&node.keys[0..node.len], key);
+      let next = if exists { node.pointers[i + 1] } else { node.pointers[i] };
+      // Push onto stack
+      stack.push((curr, i));
+      curr = next;
+    }
+
+    // Current node is a leaf node, delete the key
+    let node = &mut self.nodes[curr];
+    let (exists, i) = search(&node.keys[0..node.len], key);
+    if exists {
+      delete_leaf(node, i);
+    }
+  }
 }
 
 impl fmt::Display for BTree {
@@ -216,12 +276,26 @@ impl fmt::Display for BTree {
 
 fn main() {
   let mut btree = BTree::new();
-  for i in vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63] {
-  // for i in 1..100 {
+  let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
+
+  // Check insert
+  for i in &arr {
     println!("Inserting key = {}, value = {}", i, i);
-    btree.insert(i, i);
-    // println!();
-    // println!("{}", btree);
+    btree.insert(*i, *i);
+  }
+  println!();
+  println!("{}", btree);
+
+  // Check search
+  for i in &arr {
+    assert_eq!(btree.find(*i), Some(*i));
+  }
+  println!("Search: OK");
+
+  // Check delete
+  for i in 4..10 {
+    println!("Deleting key = {}", i);
+    btree.delete(i);
   }
   println!();
   println!("{}", btree);
