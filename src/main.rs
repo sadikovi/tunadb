@@ -116,12 +116,35 @@ fn split_internal(from: &mut Node, to: &mut Node) -> i32 {
 }
 
 fn delete_leaf(node: &mut Node, i: usize) {
-  for k in i..node.len {
+  for k in i..node.len - 1 {
     node.keys[k] = node.keys[k + 1];
     node.values[k] = node.values[k + 1];
   }
   node.len -= 1; // deleted a key
-  println!(" deleted {}", node);
+  println!("  deleted {}", node);
+}
+
+fn merge_leaf(from: &Node, to: &mut Node) {
+  for i in 0..from.len {
+    to.keys[i + to.len] = from.keys[i];
+    to.values[i + to.len] = from.values[i];
+  }
+  to.len += from.len;
+}
+
+fn merge_internal(from: &Node, to: &mut Node) {
+}
+
+fn demote_key(node: &mut Node, off: usize) {
+  // Remove pointer "off" and key "off - 1"
+  // "off" cannot be zero
+  for i in off - 1..node.len {
+    node.keys[i] = node.keys[i + 1];
+  }
+  for i in off..node.len {
+    node.pointers[i] = node.pointers[i + 1];
+  }
+  node.len -= 1;
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +190,7 @@ impl BTree {
   }
 
   pub fn insert(&mut self, key: i32, value: i32) {
+    // TODO: split the node before inserting otherwise there could be no room to insert
     let mut curr = self.root;
     let mut stack = Vec::new();
     loop {
@@ -251,6 +275,53 @@ impl BTree {
     let (exists, i) = search(&node.keys[0..node.len], key);
     if exists {
       delete_leaf(node, i);
+      self.merge(stack, curr);
+    }
+  }
+
+  fn merge(&mut self, mut stack: Vec<(usize, usize)>, curr: usize) {
+    println!("{:?}, curr: {}", stack, curr);
+    while let Some((id, off)) = stack.pop() {
+      // Find two neighbouring nodes to merge:
+      // off - 1, off, off + 1
+      let node = &self.nodes[id];
+      let mid = &self.nodes[node.pointers[off]];
+      let is_leaf = mid.is_leaf;
+      let left_opt = if off > 0 { Some(&self.nodes[node.pointers[off - 1]]) } else { None };
+      let right_opt = if off < node.len { Some(&self.nodes[node.pointers[off + 1]]) } else { None };
+
+      // Figure out the lengths of the neighbouring nodes
+      let left_len = left_opt.map(|n| n.len).unwrap_or(MAX_VALUES);
+      let right_len = right_opt.map(|n| n.len).unwrap_or(MAX_VALUES);
+
+      if left_len + mid.len <= MAX_VALUES || right_len + mid.len <= MAX_VALUES {
+        let (from, to_mut, ptr_off) = if left_len + mid.len <= right_len + mid.len {
+          let left_id = node.pointers[off - 1];
+          // merge left + mid
+          println!("{} <> {} | {}", left_len, mid.len, right_len);
+          (mid.clone(), &mut self.nodes[left_id], off)
+        } else {
+          let right_id = node.pointers[off + 1];
+          // merge mid + right
+          println!("{} | {} <> {}", left_len, mid.len, right_len);
+          (self.nodes[right_id].clone(), &mut self.nodes[off], off + 1)
+        };
+
+        println!("from: {}, to: {}", from, to_mut);
+
+        if is_leaf {
+          merge_leaf(&from, to_mut);
+        } else {
+          merge_internal(&from, to_mut);
+        }
+
+        // Update the parent node
+        println!("demote ptr_off: {}", ptr_off);
+        demote_key(&mut self.nodes[id], ptr_off);
+      } else {
+        // Cannot perform the merge
+        return;
+      }
     }
   }
 }
@@ -276,7 +347,10 @@ impl fmt::Display for BTree {
 
 fn main() {
   let mut btree = BTree::new();
-  let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
+  // let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
+  // let arr = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  // let arr = vec![1, 100, 2, 10, 3, 4, 5, 6, 7, 8];
+  let arr = vec![1, 2, 3, 4, 5];
 
   // Check insert
   for i in &arr {
@@ -287,16 +361,16 @@ fn main() {
   println!("{}", btree);
 
   // Check search
-  for i in &arr {
-    assert_eq!(btree.find(*i), Some(*i));
-  }
-  println!("Search: OK");
+  // for i in &arr {
+  //   assert_eq!(btree.find(*i), Some(*i));
+  // }
+  // println!("Search: OK");
 
   // Check delete
-  for i in 4..10 {
+  for i in 2..4 {
     println!("Deleting key = {}", i);
     btree.delete(i);
+    println!();
+    println!("{}", btree);
   }
-  println!();
-  println!("{}", btree);
 }
