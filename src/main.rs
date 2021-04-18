@@ -611,6 +611,8 @@ fn test_insert_find_delete(keys: &mut [i32]) -> Result<(), String> {
 
   // Check negative search
   test_find(&btree, &keys, false)?;
+  // Check empty range
+  test_range(&btree, &[])?;
 
   if format!("{}", btree) != format!("{}", BTree::new()) {
     Err(format!("BTree was not empty after delete: {}", btree))
