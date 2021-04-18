@@ -1,14 +1,15 @@
 use std::fmt;
 
-const MAX_VALUES: usize = 5;
+const MIN_KEYS: usize = 2;
+const MAX_KEYS: usize = 5;
 
 #[derive(Clone, Debug)]
 struct Node {
   id: usize,
   is_leaf: bool,
-  keys: [i32; MAX_VALUES],
-  values: [i32; MAX_VALUES],
-  pointers: [usize; MAX_VALUES + 1],
+  keys: [i32; MAX_KEYS],
+  values: [i32; MAX_KEYS],
+  pointers: [usize; MAX_KEYS + 1],
   len: usize, // number of keys in the node
 }
 
@@ -18,9 +19,9 @@ impl Node {
     Self {
       id: id,
       is_leaf: is_leaf,
-      keys: [0; MAX_VALUES],
-      values: [0; MAX_VALUES],
-      pointers: [0; MAX_VALUES + 1],
+      keys: [0; MAX_KEYS],
+      values: [0; MAX_KEYS],
+      pointers: [0; MAX_KEYS + 1],
       len: 0,
     }
   }
@@ -115,38 +116,6 @@ fn split_internal(from: &mut Node, to: &mut Node) -> i32 {
   key
 }
 
-fn delete_leaf(node: &mut Node, i: usize) {
-  for k in i..node.len - 1 {
-    node.keys[k] = node.keys[k + 1];
-    node.values[k] = node.values[k + 1];
-  }
-  node.len -= 1; // deleted a key
-  println!("  deleted {}", node);
-}
-
-fn merge_leaf(from: &Node, to: &mut Node) {
-  for i in 0..from.len {
-    to.keys[i + to.len] = from.keys[i];
-    to.values[i + to.len] = from.values[i];
-  }
-  to.len += from.len;
-}
-
-fn merge_internal(from: &Node, to: &mut Node) {
-}
-
-fn demote_key(node: &mut Node, off: usize) {
-  // Remove pointer "off" and key "off - 1"
-  // "off" cannot be zero
-  for i in off - 1..node.len {
-    node.keys[i] = node.keys[i + 1];
-  }
-  for i in off..node.len {
-    node.pointers[i] = node.pointers[i + 1];
-  }
-  node.len -= 1;
-}
-
 #[derive(Clone, Debug)]
 struct BTree {
   nodes: Vec<Node>,
@@ -155,9 +124,7 @@ struct BTree {
 
 impl BTree {
   pub fn new() -> Self {
-    // Create a new btree root as leaf
-    let nodes = vec![Node::new(0, true)];
-    Self { nodes: nodes, root: 0 }
+    Self { nodes: vec![Node::new(0, true)], root: 0 }
   }
 
   fn next_id(&self) -> usize {
@@ -213,7 +180,7 @@ impl BTree {
     insert_leaf(node, exists, i, key, value);
 
     // Split the leaf node
-    if node.len == MAX_VALUES {
+    if node.len == MAX_KEYS {
       let next_id = self.next_id();
       let mut new_node = Node::new(next_id, true);
       let sp_key = split_leaf(&mut self.nodes[curr], &mut new_node);
@@ -227,7 +194,7 @@ impl BTree {
     while let Some((id, sp)) = stack.pop() {
       insert_internal(&mut self.nodes[id], sp, key, left_id, right_id);
       // Internal node is full, split it
-      if self.nodes[id].len == MAX_VALUES {
+      if self.nodes[id].len == MAX_KEYS {
         let next_id = self.next_id();
         let mut new_node = Node::new(next_id, false);
         let sp_key = split_internal(&mut self.nodes[id], &mut new_node);
@@ -264,65 +231,218 @@ impl BTree {
       }
       // Search for the pointer to the next page, i < node.len + 1
       let (exists, i) = search(&node.keys[0..node.len], key);
-      let next = if exists { node.pointers[i + 1] } else { node.pointers[i] };
+      let ptr = if exists { i + 1 } else { i };
+      let next = node.pointers[ptr];
       // Push onto stack
-      stack.push((curr, i));
+      stack.push((curr, ptr));
       curr = next;
     }
 
     // Current node is a leaf node, delete the key
-    let node = &mut self.nodes[curr];
+    let node = &self.nodes[curr];
     let (exists, i) = search(&node.keys[0..node.len], key);
     if exists {
-      delete_leaf(node, i);
-      self.merge(stack, curr);
+      let mut node = &mut self.nodes[curr];
+      for k in i..node.len - 1 {
+        node.keys[k] = node.keys[k + 1];
+        node.values[k] = node.values[k + 1];
+      }
+      node.len -= 1; // deleted a key
+      println!("  deleted key: {} in leaf: {}", key, node);
+    }
+
+    let node = &self.nodes[curr];
+    if exists {
+      if i == 0 {
+        if node.len == 0 {
+          // Node is empty, remove the key from the parent
+          println!("  node is empty, cannot fix parent links");
+        } else {
+          // Fix parent links because we are deleting the smallest key
+          let next_smallest_key = node.keys[0];
+          println!("  fix parent links with the next key: {}", next_smallest_key);
+          for k in (0..stack.len()).rev() {
+            let (parent, pos) = stack[k];
+            let mut parent = &mut self.nodes[parent];
+            if parent.keys[pos] == key {
+              parent.keys[pos] = next_smallest_key;
+            }
+          }
+        }
+      }
+
+      self.repair_after_delete(curr, stack);
     }
   }
 
-  fn merge(&mut self, mut stack: Vec<(usize, usize)>, curr: usize) {
-    println!("{:?}, curr: {}", stack, curr);
-    while let Some((id, off)) = stack.pop() {
-      // Find two neighbouring nodes to merge:
-      // off - 1, off, off + 1
-      let node = &self.nodes[id];
-      let mid = &self.nodes[node.pointers[off]];
-      let is_leaf = mid.is_leaf;
-      let left_opt = if off > 0 { Some(&self.nodes[node.pointers[off - 1]]) } else { None };
-      let right_opt = if off < node.len { Some(&self.nodes[node.pointers[off + 1]]) } else { None };
+  fn repair_after_delete(&mut self, mut curr: usize, mut stack: Vec<(usize, usize)>) {
+    println!("  repair after delete, stack: {:?}", stack);
+    while let Some((parent_index, ptr)) = stack.pop() {
+      let parent = &self.nodes[parent_index];
+      let node = &self.nodes[parent.pointers[ptr]];
+      curr = node.id;
 
-      // Figure out the lengths of the neighbouring nodes
-      let left_len = left_opt.map(|n| n.len).unwrap_or(MAX_VALUES);
-      let right_len = right_opt.map(|n| n.len).unwrap_or(MAX_VALUES);
+      println!("    reparing node: {}, parent: {}, ptr: {}", node, parent, ptr);
 
-      if left_len + mid.len <= MAX_VALUES || right_len + mid.len <= MAX_VALUES {
-        let (from, to_mut, ptr_off) = if left_len + mid.len <= right_len + mid.len {
-          let left_id = node.pointers[off - 1];
-          // merge left + mid
-          println!("{} <> {} | {}", left_len, mid.len, right_len);
-          (mid.clone(), &mut self.nodes[left_id], off)
-        } else {
-          let right_id = node.pointers[off + 1];
-          // merge mid + right
-          println!("{} | {} <> {}", left_len, mid.len, right_len);
-          (self.nodes[right_id].clone(), &mut self.nodes[off], off + 1)
-        };
-
-        println!("from: {}, to: {}", from, to_mut);
-
-        if is_leaf {
-          merge_leaf(&from, to_mut);
-        } else {
-          merge_internal(&from, to_mut);
-        }
-
-        // Update the parent node
-        println!("demote ptr_off: {}", ptr_off);
-        demote_key(&mut self.nodes[id], ptr_off);
-      } else {
-        // Cannot perform the merge
+      if node.len >= MIN_KEYS {
         return;
       }
+
+      println!("    parent: {}, ptr: {}, node.len: {}", parent, ptr, node.len);
+      if ptr > 0 && self.nodes[parent.pointers[ptr - 1]].len > MIN_KEYS {
+        println!("    steal from the left sibling");
+        self.steal_from_left(curr, parent_index, ptr);
+        return;
+      } else if ptr < parent.len && self.nodes[parent.pointers[ptr + 1]].len > MIN_KEYS {
+        println!("    steal from the right sibling");
+        self.steal_from_right(curr, parent_index, ptr);
+        return;
+      } else if ptr == 0 {
+        println!("    merge with the right sibling");
+        self.merge_right(parent_index, ptr);
+      } else {
+        println!("    merge with the left sibling");
+        self.merge_right(parent_index, ptr - 1);
+      }
     }
+
+    // At this point we have reached the parent node
+
+    println!("    reached parent: {} with curr: {}", self.root, curr);
+    let root = &mut self.nodes[self.root];
+    if root.len == 0 {
+      self.root = root.pointers[0];
+    }
+  }
+
+  fn steal_from_left(&mut self, curr: usize, parent_index: usize, ptr: usize) {
+    let mut node = self.nodes[curr].clone();
+    let mut parent = self.nodes[parent_index].clone();
+    let left_id = parent.pointers[ptr - 1];
+    let mut left = self.nodes[left_id].clone();
+
+    assert!(node.is_leaf == left.is_leaf);
+
+    println!("      before; left: {}, node: {}, parent: {}", left, node, parent);
+
+    node.len += 1;
+
+    if node.is_leaf {
+      // Update keys and values
+      for i in (0..node.len - 1).rev() {
+        node.keys[i + 1] = node.keys[i];
+        node.values[i + 1] = node.values[i];
+      }
+      node.keys[0] = left.keys[left.len - 1];
+      node.values[0] = left.values[left.len - 1];
+      parent.keys[ptr - 1] = left.keys[left.len - 1];
+    } else {
+      // Update keys
+      for i in (0..node.len - 1).rev() {
+        node.keys[i + 1] = node.keys[i];
+      }
+      node.keys[0] = parent.keys[ptr - 1];
+      parent.keys[ptr - 1] = left.keys[left.len - 1];
+
+      // Update pointers
+      for i in (0..node.len).rev() {
+        node.pointers[i + 1] = node.pointers[i];
+      }
+      node.pointers[0] = left.pointers[left.len];
+    }
+
+    left.len -= 1;
+
+    println!("      after; left: {}, node: {}, parent: {}", left, node, parent);
+
+    self.nodes[curr] = node;
+    self.nodes[parent_index] = parent;
+    self.nodes[left_id] = left;
+  }
+
+  fn steal_from_right(&mut self, curr: usize, parent_index: usize, ptr: usize) {
+    let mut node = self.nodes[curr].clone();
+    let mut parent = self.nodes[parent_index].clone();
+    let right_id = parent.pointers[ptr + 1];
+    let mut right = self.nodes[right_id].clone();
+
+    assert!(node.is_leaf == right.is_leaf);
+
+    println!("      before; node: {}, right: {}, parent: {}", node, right, parent);
+
+    node.len += 1;
+
+    if node.is_leaf {
+      node.keys[node.len - 1] = right.keys[0];
+      node.values[node.len - 1] = right.values[0];
+      parent.keys[ptr] = right.keys[1];
+
+      for i in 0..right.len - 1 {
+        right.keys[i] = right.keys[i + 1];
+        right.values[i] = right.values[i + 1];
+      }
+    } else {
+      node.keys[node.len - 1] = parent.keys[ptr];
+      parent.keys[ptr] = right.keys[0];
+      node.pointers[node.len] = right.pointers[0];
+
+      for i in 0..right.len - 1 {
+        right.keys[i] = right.keys[i + 1];
+      }
+      for i in 0..right.len {
+        right.pointers[i] = right.pointers[i + 1];
+      }
+    }
+
+    right.len -= 1;
+
+    println!("      after; node: {}, right: {}, parent: {}", node, right, parent);
+
+    self.nodes[curr] = node;
+    self.nodes[parent_index] = parent;
+    self.nodes[right_id] = right;
+  }
+
+  fn merge_right(&mut self, parent_index: usize, ptr: usize) {
+    let mut parent = self.nodes[parent_index].clone();
+    let curr = parent.pointers[ptr];
+    let mut node = self.nodes[curr].clone();
+    let right_id = parent.pointers[ptr + 1];
+    let right = &self.nodes[right_id];
+
+    println!("      want to merge node: {}, right: {}, parent: {}", node, right, parent);
+    assert!(node.is_leaf == right.is_leaf);
+
+    let is_leaf = node.is_leaf;
+
+    if node.is_leaf {
+      for i in 0..right.len {
+        node.keys[node.len + i] = right.keys[i];
+        node.values[node.len + i] = right.values[i];
+      }
+      node.len += right.len;
+    } else {
+      node.keys[node.len] = parent.keys[ptr];
+      for i in 0..right.len {
+        node.keys[node.len + 1 + i] = right.keys[i];
+      }
+      for i in 0..right.len + 1 {
+        node.pointers[node.len + 1 + i] = right.pointers[i];
+      }
+      node.len += right.len + 1;
+    }
+
+    for i in ptr + 1..parent.len {
+      parent.keys[i - 1] = parent.keys[i];
+      parent.pointers[i] = parent.pointers[i + 1];
+    }
+    parent.len -= 1;
+
+    println!("      merged node: {}, right: {}, parent: {}", node, right, parent);
+
+    self.nodes[curr] = node;
+    self.nodes[parent_index] = parent;
+    self.nodes[right_id] = Node::new(99999999, is_leaf);
   }
 }
 
@@ -347,10 +467,10 @@ impl fmt::Display for BTree {
 
 fn main() {
   let mut btree = BTree::new();
-  // let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
+  let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
   // let arr = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   // let arr = vec![1, 100, 2, 10, 3, 4, 5, 6, 7, 8];
-  let arr = vec![1, 2, 3, 4, 5];
+  // let arr = vec![1, 2, 3, 4, 5];
 
   // Check insert
   for i in &arr {
@@ -361,16 +481,19 @@ fn main() {
   println!("{}", btree);
 
   // Check search
-  // for i in &arr {
-  //   assert_eq!(btree.find(*i), Some(*i));
-  // }
-  // println!("Search: OK");
+  for i in &arr {
+    assert_eq!(btree.find(*i), Some(*i));
+  }
+  println!("Search: OK");
 
   // Check delete
-  for i in 2..4 {
+  for i in &arr {
     println!("Deleting key = {}", i);
-    btree.delete(i);
+    btree.delete(*i);
     println!();
     println!("{}", btree);
+    // if *i == 82 {
+    //   break;
+    // }
   }
 }
