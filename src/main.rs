@@ -12,6 +12,7 @@ struct Node {
   values: [i32; MAX_KEYS],
   pointers: [usize; MAX_KEYS + 1],
   len: usize, // number of keys in the node
+  next: Option<usize>, // pointer to the next leaf node, only set in a leaf
 }
 
 impl Node {
@@ -24,6 +25,7 @@ impl Node {
       values: [0; MAX_KEYS],
       pointers: [0; MAX_KEYS + 1],
       len: 0,
+      next: None,
     }
   }
 }
@@ -31,7 +33,7 @@ impl Node {
 impl fmt::Display for Node {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if self.is_leaf {
-      write!(f, "L ({}) {:?} {:?}", self.id, &self.keys[0..self.len], &self.values[0..self.len])
+      write!(f, "L ({}) {:?} {:?} *{:?}", self.id, &self.keys[0..self.len], &self.values[0..self.len], self.next)
     } else {
       write!(f, "I ({}) {:?} {:?}", self.id, &self.keys[0..self.len], &self.pointers[0..self.len + 1])
     }
@@ -157,6 +159,19 @@ impl BTree {
     }
   }
 
+  // Returns an iterator with all of the leaves
+  // Used for testing only
+  pub fn range(&self) -> BTreeIter {
+    // Find the leftmost leaf node to start range query
+    let mut curr = self.root;
+    let mut node = &self.nodes[curr];
+    while !node.is_leaf {
+      curr = node.pointers[0];
+      node = &self.nodes[curr];
+    }
+    BTreeIter::new(&self, Some(curr))
+  }
+
   pub fn insert(&mut self, key: i32, value: i32) {
     // TODO: split the node before inserting otherwise there could be no room to insert
     let mut curr = self.root;
@@ -185,6 +200,9 @@ impl BTree {
       let next_id = self.next_id();
       let mut new_node = Node::new(next_id, true);
       let sp_key = split_leaf(&mut self.nodes[curr], &mut new_node);
+      // Update next pointers
+      new_node.next = self.nodes[curr].next;
+      self.nodes[curr].next = Some(next_id);
       self.nodes.push(new_node);
 
       self.split(stack, sp_key, curr, next_id);
@@ -422,6 +440,9 @@ impl BTree {
         node.values[node.len + i] = right.values[i];
       }
       node.len += right.len;
+
+      // Update next pointers
+      node.next = right.next;
     } else {
       node.keys[node.len] = parent.keys[ptr];
       for i in 0..right.len {
@@ -443,7 +464,7 @@ impl BTree {
 
     self.nodes[curr] = node;
     self.nodes[parent_index] = parent;
-    self.nodes[right_id] = Node::new(99999999, is_leaf);
+    self.nodes[right_id] = Node::new(99999999, is_leaf); // a test value to detect errors
   }
 }
 
@@ -466,9 +487,50 @@ impl fmt::Display for BTree {
   }
 }
 
+// Simple iterator for leaf nodes.
+// Used for testing to ensure all operations are performed correctly.
+struct BTreeIter<'a> {
+  start: Option<usize>,
+  pos: usize,
+  btree: &'a BTree,
+}
+
+impl<'a> BTreeIter<'a> {
+  pub fn new(btree: &'a BTree, start: Option<usize>) -> Self {
+    Self { start: start, pos: 0, btree: btree }
+  }
+}
+
+impl<'a> Iterator for BTreeIter<'a> {
+  type Item = i32;
+  fn next(&mut self) -> Option<Self::Item> {
+    let mut cnt = 0;
+    loop {
+      if cnt > 1 {
+        println!("WARN: It took {} iterations to find a value", cnt);
+      }
+      cnt += 1;
+
+      if let Some(id) = self.start {
+        let node = &self.btree.nodes[id];
+        if self.pos >= node.len {
+          self.pos = 0;
+          self.start = node.next;
+        } else {
+          let key = node.keys[self.pos];
+          self.pos += 1;
+          return Some(key);
+        }
+      } else {
+        return None;
+      }
+    }
+  }
+}
+
 // Testing functions
 
-fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) -> Result<(), String>{
+fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) -> Result<(), String> {
   for &key in keys {
     if assert_match {
       if btree.find(key) != Some(key) {
@@ -483,6 +545,18 @@ fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) -> Result<(), Stri
   Ok(())
 }
 
+fn test_range(btree: &BTree, keys: &[i32]) -> Result<(), String> {
+  let mut expected = keys.to_vec();
+  expected.sort();
+  let leaf_values: Vec<i32> = btree.range().collect();
+  if expected != leaf_values {
+    println!("{:?} != {:?}", expected, leaf_values);
+    Err(format!("Range query did not match the sorted input"))
+  } else {
+    Ok(())
+  }
+}
+
 fn test_insert(btree: &mut BTree, keys: &[i32]) -> Result<(), String> {
   for i in 0..keys.len() {
     let key = keys[i];
@@ -491,6 +565,8 @@ fn test_insert(btree: &mut BTree, keys: &[i32]) -> Result<(), String> {
     // Perform search on a subset
     test_find(btree, &keys[0..i + 1], true)?;
     test_find(btree, &keys[i + 1..], false)?;
+    // Check range
+    test_range(btree, &keys[0..i + 1])?;
   }
   Ok(())
 }
@@ -503,6 +579,8 @@ fn test_delete(btree: &mut BTree, keys: &[i32]) -> Result<(), String> {
     // Perform search on a subset
     test_find(btree, &keys[0..i + 1], false)?;
     test_find(btree, &keys[i + 1..], true)?;
+    // Check range
+    test_range(btree, &keys[i + 1..])?;
   }
   Ok(())
 }
@@ -521,6 +599,8 @@ fn test_insert_find_delete(keys: &mut [i32]) -> Result<(), String> {
 
   // Check positive search
   test_find(&btree, &keys, true)?;
+  // Check range
+  test_range(&btree, &keys)?;
 
   // Check delete
   keys.shuffle(&mut rng);
