@@ -132,7 +132,7 @@ impl BTree {
   }
 
   // Deletes the key and returns the value for that key
-  pub fn find(&mut self, key: i32) -> Option<i32> {
+  pub fn find(&self, key: i32) -> Option<i32> {
     let mut curr = self.root;
     loop {
       // Check if the page is a leaf, if so, terminate the search
@@ -465,35 +465,68 @@ impl fmt::Display for BTree {
   }
 }
 
+// Testing functions
+
+fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) {
+  for &key in keys {
+    if assert_match {
+      assert_eq!(btree.find(key), Some(key), "Failed to find {}", key);
+    } else {
+      assert_eq!(btree.find(key), None, "Failed, the key {} existed", key);
+    }
+  }
+  println!("Search: OK");
+}
+
+fn test_insert(btree: &mut BTree, keys: &[i32]) {
+  for i in 0..keys.len() {
+    let key = keys[i];
+    println!("Inserting key = {}, value = {}", key, key);
+    btree.insert(key, key);
+    // Perform search on a subset
+    test_find(btree, &keys[0..i + 1], true);
+    test_find(btree, &keys[i + 1..], false);
+  }
+}
+
+fn test_delete(btree: &mut BTree, keys: &[i32]) {
+  for i in 0..keys.len() {
+    let key = keys[i];
+    println!("Deleting key = {}", key);
+    btree.delete(key);
+    // Perform search on a subset
+    test_find(btree, &keys[0..i + 1], false);
+    test_find(btree, &keys[i + 1..], true);
+
+    println!("{}", btree);
+  }
+}
+
 fn main() {
-  let mut btree = BTree::new();
   let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
+  // let arr = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99];
+  // let arr = vec![99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
   // let arr = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   // let arr = vec![1, 100, 2, 10, 3, 4, 5, 6, 7, 8];
   // let arr = vec![1, 2, 3, 4, 5];
 
+  let mut btree = BTree::new();
+
   // Check insert
-  for i in &arr {
-    println!("Inserting key = {}, value = {}", i, i);
-    btree.insert(*i, *i);
-  }
+  test_insert(&mut btree, &arr);
   println!();
   println!("{}", btree);
 
-  // Check search
-  for i in &arr {
-    assert_eq!(btree.find(*i), Some(*i));
-  }
-  println!("Search: OK");
+  // Check positive search
+  test_find(&btree, &arr, true);
 
   // Check delete
-  for i in &arr {
-    println!("Deleting key = {}", i);
-    btree.delete(*i);
-    println!();
-    println!("{}", btree);
-    // if *i == 82 {
-    //   break;
-    // }
-  }
+  test_delete(&mut btree, &arr);
+  println!();
+  println!("{}", btree);
+
+  // Check negative search
+  test_find(&btree, &arr, false);
+
+  assert_eq!(format!("{}", btree), format!("{}", BTree::new()))
 }
