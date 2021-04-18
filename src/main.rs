@@ -1,4 +1,5 @@
 use std::fmt;
+use rand::prelude::*;
 
 const MIN_KEYS: usize = 2;
 const MAX_KEYS: usize = 5;
@@ -248,7 +249,7 @@ impl BTree {
         node.values[k] = node.values[k + 1];
       }
       node.len -= 1; // deleted a key
-      println!("  deleted key: {} in leaf: {}", key, node);
+      // println!("  deleted key: {} in leaf: {}", key, node);
     }
 
     let node = &self.nodes[curr];
@@ -256,11 +257,11 @@ impl BTree {
       if i == 0 {
         if node.len == 0 {
           // Node is empty, remove the key from the parent
-          println!("  node is empty, cannot fix parent links");
+          // println!("  node is empty, cannot fix parent links");
         } else {
           // Fix parent links because we are deleting the smallest key
           let next_smallest_key = node.keys[0];
-          println!("  fix parent links with the next key: {}", next_smallest_key);
+          // println!("  fix parent links with the next key: {}", next_smallest_key);
           for k in (0..stack.len()).rev() {
             let (parent, pos) = stack[k];
             let mut parent = &mut self.nodes[parent];
@@ -276,39 +277,39 @@ impl BTree {
   }
 
   fn repair_after_delete(&mut self, mut curr: usize, mut stack: Vec<(usize, usize)>) {
-    println!("  repair after delete, stack: {:?}", stack);
+    // println!("  repair after delete, stack: {:?}", stack);
     while let Some((parent_index, ptr)) = stack.pop() {
       let parent = &self.nodes[parent_index];
       let node = &self.nodes[parent.pointers[ptr]];
       curr = node.id;
 
-      println!("    reparing node: {}, parent: {}, ptr: {}", node, parent, ptr);
+      // println!("    reparing node: {}, parent: {}, ptr: {}", node, parent, ptr);
 
       if node.len >= MIN_KEYS {
         return;
       }
 
-      println!("    parent: {}, ptr: {}, node.len: {}", parent, ptr, node.len);
+      // println!("    parent: {}, ptr: {}, node.len: {}", parent, ptr, node.len);
       if ptr > 0 && self.nodes[parent.pointers[ptr - 1]].len > MIN_KEYS {
-        println!("    steal from the left sibling");
+        // println!("    steal from the left sibling");
         self.steal_from_left(curr, parent_index, ptr);
         return;
       } else if ptr < parent.len && self.nodes[parent.pointers[ptr + 1]].len > MIN_KEYS {
-        println!("    steal from the right sibling");
+        // println!("    steal from the right sibling");
         self.steal_from_right(curr, parent_index, ptr);
         return;
       } else if ptr == 0 {
-        println!("    merge with the right sibling");
+        // println!("    merge with the right sibling");
         self.merge_right(parent_index, ptr);
       } else {
-        println!("    merge with the left sibling");
+        // println!("    merge with the left sibling");
         self.merge_right(parent_index, ptr - 1);
       }
     }
 
     // At this point we have reached the parent node
 
-    println!("    reached parent: {} with curr: {}", self.root, curr);
+    // println!("    reached parent: {} with curr: {}", self.root, curr);
     let root = &mut self.nodes[self.root];
     if root.len == 0 {
       self.root = root.pointers[0];
@@ -323,7 +324,7 @@ impl BTree {
 
     assert!(node.is_leaf == left.is_leaf);
 
-    println!("      before; left: {}, node: {}, parent: {}", left, node, parent);
+    // println!("      before; left: {}, node: {}, parent: {}", left, node, parent);
 
     node.len += 1;
 
@@ -353,7 +354,7 @@ impl BTree {
 
     left.len -= 1;
 
-    println!("      after; left: {}, node: {}, parent: {}", left, node, parent);
+    // println!("      after; left: {}, node: {}, parent: {}", left, node, parent);
 
     self.nodes[curr] = node;
     self.nodes[parent_index] = parent;
@@ -368,7 +369,7 @@ impl BTree {
 
     assert!(node.is_leaf == right.is_leaf);
 
-    println!("      before; node: {}, right: {}, parent: {}", node, right, parent);
+    // println!("      before; node: {}, right: {}, parent: {}", node, right, parent);
 
     node.len += 1;
 
@@ -396,7 +397,7 @@ impl BTree {
 
     right.len -= 1;
 
-    println!("      after; node: {}, right: {}, parent: {}", node, right, parent);
+    // println!("      after; node: {}, right: {}, parent: {}", node, right, parent);
 
     self.nodes[curr] = node;
     self.nodes[parent_index] = parent;
@@ -410,7 +411,7 @@ impl BTree {
     let right_id = parent.pointers[ptr + 1];
     let right = &self.nodes[right_id];
 
-    println!("      want to merge node: {}, right: {}, parent: {}", node, right, parent);
+    // println!("      want to merge node: {}, right: {}, parent: {}", node, right, parent);
     assert!(node.is_leaf == right.is_leaf);
 
     let is_leaf = node.is_leaf;
@@ -438,7 +439,7 @@ impl BTree {
     }
     parent.len -= 1;
 
-    println!("      merged node: {}, right: {}, parent: {}", node, right, parent);
+    // println!("      merged node: {}, right: {}, parent: {}", node, right, parent);
 
     self.nodes[curr] = node;
     self.nodes[parent_index] = parent;
@@ -467,66 +468,90 @@ impl fmt::Display for BTree {
 
 // Testing functions
 
-fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) {
+fn test_find(btree: &BTree, keys: &[i32], assert_match: bool) -> Result<(), String>{
   for &key in keys {
     if assert_match {
-      assert_eq!(btree.find(key), Some(key), "Failed to find {}", key);
+      if btree.find(key) != Some(key) {
+        return Err(format!("Failed to find {}", key));
+      }
     } else {
-      assert_eq!(btree.find(key), None, "Failed, the key {} existed", key);
+      if btree.find(key) != None {
+        return Err(format!("Failed, the key {} existed", key));
+      }
     }
   }
-  println!("Search: OK");
+  Ok(())
 }
 
-fn test_insert(btree: &mut BTree, keys: &[i32]) {
+fn test_insert(btree: &mut BTree, keys: &[i32]) -> Result<(), String> {
   for i in 0..keys.len() {
     let key = keys[i];
-    println!("Inserting key = {}, value = {}", key, key);
+    // println!("Inserting key = {}, value = {}", key, key);
     btree.insert(key, key);
     // Perform search on a subset
-    test_find(btree, &keys[0..i + 1], true);
-    test_find(btree, &keys[i + 1..], false);
+    test_find(btree, &keys[0..i + 1], true)?;
+    test_find(btree, &keys[i + 1..], false)?;
   }
+  Ok(())
 }
 
-fn test_delete(btree: &mut BTree, keys: &[i32]) {
+fn test_delete(btree: &mut BTree, keys: &[i32]) -> Result<(), String> {
   for i in 0..keys.len() {
     let key = keys[i];
-    println!("Deleting key = {}", key);
+    // println!("Deleting key = {}", key);
     btree.delete(key);
     // Perform search on a subset
-    test_find(btree, &keys[0..i + 1], false);
-    test_find(btree, &keys[i + 1..], true);
-
-    println!("{}", btree);
+    test_find(btree, &keys[0..i + 1], false)?;
+    test_find(btree, &keys[i + 1..], true)?;
   }
+  Ok(())
 }
 
-fn main() {
-  let arr = vec![13, 32, 50, 16, 39, 95, 34, 55, 41, 84, 35, 18, 53, 67, 38, 54, 71, 40, 4, 79, 64, 33, 94, 17, 59, 98, 68, 31, 22, 25, 23, 85, 48, 75, 36, 83, 26, 46, 56, 14, 80, 20, 60, 58, 78, 82, 37, 47, 88, 28, 81, 5, 8, 77, 45, 87, 42, 61, 15, 74, 51, 69, 76, 86, 93, 10, 57, 19, 99, 49, 2, 70, 43, 90, 91, 7, 72, 9, 73, 89, 30, 12, 27, 66, 44, 92, 1, 62, 52, 65, 96, 29, 6, 11, 24, 3, 21, 97, 63];
-  // let arr = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99];
-  // let arr = vec![99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
-  // let arr = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  // let arr = vec![1, 100, 2, 10, 3, 4, 5, 6, 7, 8];
-  // let arr = vec![1, 2, 3, 4, 5];
+fn test_insert_find_delete(keys: &mut [i32]) -> Result<(), String> {
+  let mut rng = thread_rng();
 
   let mut btree = BTree::new();
 
   // Check insert
-  test_insert(&mut btree, &arr);
-  println!();
-  println!("{}", btree);
+  keys.shuffle(&mut rng);
+
+  test_insert(&mut btree, &keys)?;
+  // println!();
+  // println!("{}", btree);
 
   // Check positive search
-  test_find(&btree, &arr, true);
+  test_find(&btree, &keys, true)?;
 
   // Check delete
-  test_delete(&mut btree, &arr);
-  println!();
-  println!("{}", btree);
+  keys.shuffle(&mut rng);
+
+  test_delete(&mut btree, &keys)?;
+  // println!();
+  // println!("{}", btree);
 
   // Check negative search
-  test_find(&btree, &arr, false);
+  test_find(&btree, &keys, false)?;
 
-  assert_eq!(format!("{}", btree), format!("{}", BTree::new()))
+  if format!("{}", btree) != format!("{}", BTree::new()) {
+    Err(format!("BTree was not empty after delete: {}", btree))
+  } else {
+    Ok(())
+  }
+}
+
+fn main() {
+  let mut arr = vec![0i32; 1000];
+  for i in 0..arr.len() {
+    arr[i] = i as i32;
+  }
+
+  for i in 0..10 {
+    println!("Iteration {}", i);
+    let res = test_insert_find_delete(&mut arr);
+    if res.is_err() {
+      println!("ERROR!!!");
+      println!("Keys: {:?}", arr);
+    }
+    res.unwrap();
+  }
 }
