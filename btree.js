@@ -349,6 +349,5 @@ function BTreeNode(id) {
   this.numKeys = 1;
   this.keys = [];
   this.children = [];
-  // Could use children for next pointer, but I got lazy ...
   this.next = null;
 }
