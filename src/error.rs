@@ -30,6 +30,12 @@ impl From<std::io::Error> for Error {
   }
 }
 
+impl<T> From<std::sync::PoisonError<T>> for Error {
+  fn from(err: std::sync::PoisonError<T>) -> Self {
+    Self { msg: format!("Lock Error: {}", err.to_string()) }
+  }
+}
+
 macro_rules! err {
   ($fmt:expr) => (crate::error::Error::from($fmt.to_owned()));
   ($fmt:expr, $($args:expr),*) => (crate::error::Error::from(format!($fmt, $($args),*)));
