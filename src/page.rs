@@ -5,6 +5,7 @@ use crate::error::Res;
 
 type PageID = u32;
 
+#[derive(Clone)]
 pub struct Page {
   id: PageID,
   is_dirty: bool,
@@ -16,6 +17,18 @@ pub trait PageManager {
   fn read_page(&mut self, page_id: PageID) -> Res<Page>;
   fn write_page(&mut self, page: Page) -> Res<()>;
   fn free_page(&mut self, page_id: PageID) -> Res<()>;
+}
+
+macro_rules! read_acq {
+  ($cache_func:expr) => {
+    $cache_func.unwrap().try_read().unwrap()
+  };
+}
+
+macro_rules! write_acq {
+  ($cache_func:expr) => {
+    $cache_func.unwrap().try_write().unwrap()
+  };
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +66,17 @@ impl<'a> PageCache<'a> {
     self.entries.len()
   }
 
+  pub fn alloc(&mut self) -> Res<&RwLock<Page>> {
+    while self.entries.len() >= self.capacity {
+      self.evict()?;
+    }
+    let page = self.page_mngr.alloc_page()?;
+    let page_id = page.id;
+    // Insert the new page and update LRU for the page
+    self.insert(page)?;
+    self.get(page_id)
+  }
+
   pub fn get(&mut self, page_id: PageID) -> Res<&RwLock<Page>> {
     let lru_opt = match self.entries.get(&page_id) {
       Some(entry) => Some(entry.lru),
@@ -73,17 +97,8 @@ impl<'a> PageCache<'a> {
         }
         // Extract a new page
         let page = self.page_mngr.read_page(page_id)?;
-        // Update LRU for the page
-        let mut lru = LRU { id: page_id, prev: None, next: None };
-        self.link(&mut lru)?;
-        // Insert the new page and LRU
-        self.entries.insert(
-          page_id,
-          CacheEntry {
-            page: RwLock::new(page),
-            lru: lru,
-          }
-        );
+        // Insert the new page and update LRU for the page
+        self.insert(page)?;
       },
     }
 
@@ -95,8 +110,23 @@ impl<'a> PageCache<'a> {
     let entry_opt = self.entries.remove(&page_id);
     if let Some(mut entry) = entry_opt {
       self.unlink(&mut entry.lru)?;
-      self.page_mngr.free_page(page_id)?;
     }
+    self.page_mngr.free_page(page_id)
+  }
+
+  fn insert(&mut self, page: Page) -> Res<()> {
+    let page_id = page.id;
+    // Update LRU for the page
+    let mut lru = LRU { id: page_id, prev: None, next: None };
+    self.link(&mut lru)?;
+    // Insert the new page and LRU
+    self.entries.insert(
+      page_id,
+      CacheEntry {
+        page: RwLock::new(page),
+        lru: lru,
+      }
+    );
     Ok(())
   }
 
@@ -140,7 +170,12 @@ impl<'a> PageCache<'a> {
   }
 
   fn link(&mut self, lru: &mut LRU) -> Res<()> {
-    lru.next = self.head;
+    if let Some(head_id) = self.head {
+      let mut head = self.entries.get_mut(&head_id)
+        .ok_or(err!["Page {} not found", head_id])?;
+      head.lru.prev = Some(lru.id);
+      lru.next = self.head;
+    }
     self.head = Some(lru.id);
     if self.tail.is_none() {
       self.tail = self.head;
@@ -178,5 +213,209 @@ impl<'a> Iterator for PageCacheIter<'a> {
     } else {
       None
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  struct MemPageManager {
+    pages: Vec<Page>,
+    deleted: Vec<PageID>,
+  }
+
+  impl MemPageManager {
+    fn new() -> Self {
+      Self { pages: Vec::new(), deleted: Vec::new() }
+    }
+
+    fn check_deleted(&self, page_id: PageID) -> Res<()> {
+      for id in &self.deleted {
+        if *id == page_id {
+          return Err(err!("Page {} is deleted", page_id));
+        }
+      }
+      Ok(())
+    }
+  }
+
+  impl PageManager for MemPageManager {
+    fn alloc_page(&mut self) -> Res<Page> {
+      let id = self.pages.len() as u32;
+      let page = Page { id: id, is_dirty: false };
+      self.pages.push(page.clone());
+      Ok(page)
+    }
+
+    fn read_page(&mut self, page_id: PageID) -> Res<Page> {
+      self.check_deleted(page_id)?;
+      Ok(self.pages[page_id as usize].clone())
+    }
+
+    fn write_page(&mut self, page: Page) -> Res<()> {
+      let page_id = page.id;
+      self.check_deleted(page_id)?;
+      self.pages[page_id as usize] = page;
+      Ok(())
+    }
+
+    fn free_page(&mut self, page_id: PageID) -> Res<()> {
+      self.deleted.push(page_id);
+      Ok(())
+    }
+  }
+
+  // Helper function to collect page ids into a vector
+  fn collect_iter(iter: &mut PageCacheIter) -> Vec<PageID> {
+    iter.map(|res| res.try_read().unwrap().id).collect()
+  }
+
+  fn test_lru_direct<'a>(cache: &'a PageCache<'a>, exp: Vec<PageID>) {
+    assert_eq!(collect_iter(&mut PageCacheIter::new(cache, true)), exp, "Direct LRU");
+  }
+
+  fn test_lru_reverse<'a>(cache: &'a PageCache<'a>, exp: Vec<PageID>) {
+    assert_eq!(collect_iter(&mut PageCacheIter::new(cache, false)), exp, "Direct LRU");
+  }
+
+  #[test]
+  fn test_page_cache_empty() {
+    let mut mngr = MemPageManager::new();
+    let cache = PageCache::new(10, &mut mngr);
+    assert_eq!(cache.len(), 0);
+
+    let mut iter = PageCacheIter::new(&cache, true);
+    assert!(iter.next().is_none());
+
+    let mut iter = PageCacheIter::new(&cache, false);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_page_cache_delete_empty() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(10, &mut mngr);
+
+    cache.delete(123).unwrap();
+
+    assert_eq!(cache.len(), 0);
+    test_lru_direct(&cache, vec![]);
+    test_lru_reverse(&cache, vec![]);
+
+    // We still try to delete in page manager even if the page is not in the cache
+    assert_eq!(mngr.deleted, vec![123]);
+  }
+
+  #[test]
+  fn test_page_cache_alloc() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(10, &mut mngr);
+
+    {
+      let page = read_acq![cache.alloc()];
+      assert_eq!(page.id, 0);
+    }
+    {
+      let page = read_acq![cache.alloc()];
+      assert_eq!(page.id, 1);
+    }
+
+    assert_eq!(cache.len(), 2);
+
+    test_lru_direct(&cache, vec![1, 0]);
+    test_lru_reverse(&cache, vec![0, 1]);
+  }
+
+  #[test]
+  fn test_page_cache_alloc_delete() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(10, &mut mngr);
+
+    cache.alloc().unwrap();
+    cache.delete(0).unwrap();
+
+    assert_eq!(cache.len(), 0);
+
+    test_lru_direct(&cache, vec![]);
+    test_lru_reverse(&cache, vec![]);
+  }
+
+  #[test]
+  fn test_page_cache_alloc_get() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(10, &mut mngr);
+
+    // 2 -> 1 -> 0
+    {
+      cache.alloc().unwrap();
+      cache.alloc().unwrap();
+      cache.alloc().unwrap();
+      cache.get(0).unwrap();
+      cache.get(1).unwrap();
+    }
+
+    test_lru_direct(&cache, vec![1, 0, 2]);
+    test_lru_reverse(&cache, vec![2, 0, 1]);
+  }
+
+  #[test]
+  fn test_page_cache_alloc_get_evict() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut mngr);
+
+    for _ in 0..10 {
+      cache.alloc().unwrap();
+    }
+
+    assert_eq!(cache.len(), 5);
+
+    for i in (0..10).rev() {
+      cache.get(i).unwrap();
+    }
+
+    assert_eq!(cache.len(), 5);
+
+    test_lru_direct(&cache, vec![0, 1, 2, 3, 4]);
+    test_lru_reverse(&cache, vec![4, 3, 2, 1, 0]);
+  }
+
+  #[test]
+  fn test_page_cache_alloc_get_delete() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut mngr);
+
+    for _ in 0..10 {
+      cache.alloc().unwrap();
+    }
+
+    for i in 0..10 {
+      cache.delete(i).unwrap();
+    }
+
+    assert_eq!(cache.len(), 0);
+    test_lru_direct(&cache, vec![]);
+    test_lru_reverse(&cache, vec![]);
+
+    assert_eq!(mngr.deleted.len(), 10);
+  }
+
+  #[test]
+  fn test_page_cache_get_delete() {
+    let mut mngr = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut mngr);
+
+    for _ in 0..10 {
+      cache.alloc().unwrap();
+    }
+
+    cache.get(3).unwrap();
+    cache.delete(3).unwrap();
+
+    assert_eq!(cache.len(), 4);
+    test_lru_direct(&cache, vec![9, 8, 7, 6]);
+    test_lru_reverse(&cache, vec![6, 7, 8, 9]);
+
+    assert_eq!(mngr.deleted, vec![3]);
   }
 }
