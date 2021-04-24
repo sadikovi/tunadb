@@ -15,9 +15,13 @@ pub struct Page {
 
 /// Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
+  /// Creates new page and returns the page or a copy.
   fn alloc_page(&mut self) -> Res<Page>;
+  /// Returns a copy of the page for the page id.
   fn read_page(&mut self, page_id: PageID) -> Res<Page>;
+  /// Updates the page.
   fn write_page(&mut self, page: Page) -> Res<()>;
+  /// Deletes the page for the page id.
   fn free_page(&mut self, page_id: PageID) -> Res<()>;
 }
 
