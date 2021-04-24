@@ -7,6 +7,7 @@ type PageID = u32;
 
 pub struct Page {
   id: PageID,
+  is_dirty: bool,
 }
 
 /// Page manager that maintains pages on disk or in memory
@@ -48,6 +49,10 @@ impl<'a> PageCache<'a> {
     }
   }
 
+  pub fn len(&self) -> usize {
+    self.entries.len()
+  }
+
   pub fn get(&mut self, page_id: PageID) -> Res<&RwLock<Page>> {
     let lru_opt = match self.entries.get(&page_id) {
       Some(entry) => Some(entry.lru),
@@ -63,7 +68,7 @@ impl<'a> PageCache<'a> {
       },
       None => {
         // evict the entry if the map is full
-        if self.entries.len() == self.capacity {
+        while self.entries.len() >= self.capacity {
           self.evict()?;
         }
         // Extract a new page
@@ -95,17 +100,14 @@ impl<'a> PageCache<'a> {
     Ok(())
   }
 
-  pub fn len(&self) -> usize {
-    self.entries.len()
-  }
-
   fn evict(&mut self) -> Res<()> {
     if let Some(page_id) = self.tail {
       let mut entry = self.entries.remove(&page_id).ok_or(err!("Page {} not found", page_id))?;
       self.unlink(&mut entry.lru)?;
-      self.page_mngr.write_page(
-        entry.page.into_inner()?
-      )?;
+      let page = entry.page.into_inner()?;
+      if page.is_dirty {
+        self.page_mngr.write_page(page)?;
+      }
     }
     Ok(())
   }
