@@ -3,15 +3,17 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use crate::error::Res;
 
+/// Page id alias.
 type PageID = u32;
 
+/// Page is a fundamental unit of data in memory and on disk.
 #[derive(Clone)]
 pub struct Page {
   id: PageID,
   is_dirty: bool,
 }
 
-/// Page manager that maintains pages on disk or in memory
+/// Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
   fn alloc_page(&mut self) -> Res<Page>;
   fn read_page(&mut self, page_id: PageID) -> Res<Page>;
@@ -19,18 +21,20 @@ pub trait PageManager {
   fn free_page(&mut self, page_id: PageID) -> Res<()>;
 }
 
+// "Read lock acquire"
 macro_rules! read_acq {
   ($cache_func:expr) => {
     $cache_func.unwrap().try_read().unwrap()
   };
 }
-
+// "Write lock acquire"
 macro_rules! write_acq {
   ($cache_func:expr) => {
     $cache_func.unwrap().try_write().unwrap()
   };
 }
 
+/// LRU entry for quick and easy update.
 #[derive(Clone, Copy)]
 struct LRU {
   id: PageID,
@@ -38,11 +42,14 @@ struct LRU {
   next: Option<PageID>,
 }
 
+/// Cache entry for internal cache.
 struct CacheEntry {
   page: RwLock<Page>,
   lru: LRU,
 }
 
+/// Page cache, i.e. buffer pool, is a single threaded cache of pages in memory.
+/// Currently implements the basic API that is needed to manage pages.
 pub struct PageCache<'a> {
   capacity: usize,
   entries: HashMap<PageID, CacheEntry>,
@@ -52,6 +59,7 @@ pub struct PageCache<'a> {
 }
 
 impl<'a> PageCache<'a> {
+  /// Creates a new page cache with capacity and page manager.
   pub fn new(capacity: usize, page_mngr: &'a mut dyn PageManager) -> Self {
     Self {
       capacity: capacity,
@@ -62,11 +70,14 @@ impl<'a> PageCache<'a> {
     }
   }
 
+  /// Returns the length of the entries in the cache.
   pub fn len(&self) -> usize {
     self.entries.len()
   }
 
+  /// Creates a new page using page manager and puts it in the cache.
   pub fn alloc(&mut self) -> Res<&RwLock<Page>> {
+    // Free space for the new page in the cache
     while self.entries.len() >= self.capacity {
       self.evict()?;
     }
@@ -77,6 +88,8 @@ impl<'a> PageCache<'a> {
     self.get(page_id)
   }
 
+  /// Returns a page that is in the cache or loads it from disk and stores in the cache.
+  /// LRU entries are updated on each access.
   pub fn get(&mut self, page_id: PageID) -> Res<&RwLock<Page>> {
     let lru_opt = match self.entries.get(&page_id) {
       Some(entry) => Some(entry.lru),
@@ -91,7 +104,7 @@ impl<'a> PageCache<'a> {
         entry.lru = lru;
       },
       None => {
-        // evict the entry if the map is full
+        // Evict the entry if the map is full
         while self.entries.len() >= self.capacity {
           self.evict()?;
         }
@@ -106,6 +119,8 @@ impl<'a> PageCache<'a> {
       .ok_or(err!("Page {} not found", page_id))
   }
 
+  /// Deletes page from the cache and on disk.
+  /// If page is not in the cache, page manager still removes the page.
   pub fn delete(&mut self, page_id: PageID) -> Res<()> {
     let entry_opt = self.entries.remove(&page_id);
     if let Some(mut entry) = entry_opt {
@@ -132,7 +147,8 @@ impl<'a> PageCache<'a> {
 
   fn evict(&mut self) -> Res<()> {
     if let Some(page_id) = self.tail {
-      let mut entry = self.entries.remove(&page_id).ok_or(err!("Page {} not found", page_id))?;
+      let mut entry = self.entries.remove(&page_id)
+        .ok_or(err!("Page {} not found", page_id))?;
       self.unlink(&mut entry.lru)?;
       let page = entry.page.into_inner()?;
       if page.is_dirty {
@@ -149,7 +165,7 @@ impl<'a> PageCache<'a> {
         .ok_or(err!["Page {} not found", prev_id])?;
       prev.lru.next = lru.next;
     } else {
-      // entry is the head
+      // Entry is the head
       self.head = lru.next;
     }
 
@@ -159,7 +175,7 @@ impl<'a> PageCache<'a> {
         .ok_or(err!["Page {} not found", next_id])?;
       next.lru.prev = lru.prev;
     } else {
-      // entry is the tail
+      // Entry is the tail
       self.tail = lru.prev;
     }
 
@@ -184,6 +200,7 @@ impl<'a> PageCache<'a> {
   }
 }
 
+/// Simple LRU iterator that is used mainly for testing.
 pub struct PageCacheIter<'a> {
   cache: &'a PageCache<'a>,
   ptr: Option<PageID>,
@@ -191,6 +208,9 @@ pub struct PageCacheIter<'a> {
 }
 
 impl<'a> PageCacheIter<'a> {
+  /// Creates a new LRU iterator with the direction.
+  /// If `direct` is true, then the entries are returned from most recently used to least recently
+  /// used. Otherwise, all entries are returned in least recently used order.
   pub fn new(cache: &'a PageCache<'a>, direct: bool) -> Self {
     Self {
       cache: cache,
@@ -220,6 +240,7 @@ impl<'a> Iterator for PageCacheIter<'a> {
 mod tests {
   use super::*;
 
+  // Simple in-memory page manager that stores pages in a vector
   struct MemPageManager {
     pages: Vec<Page>,
     deleted: Vec<PageID>,
