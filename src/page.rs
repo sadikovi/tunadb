@@ -1,6 +1,5 @@
 //! Module for page definition.
 use std::collections::HashMap;
-use std::sync::RwLock;
 use crate::error::Res;
 
 /// Page id alias.
@@ -36,6 +35,7 @@ pub struct PageCache<'a> {
   capacity: usize,
   entries: HashMap<PageID, CacheEntry>,
   page_mngr: &'a mut dyn PageManager,
+  lru: LRU,
 }
 
 impl<'a> PageCache<'a> {
@@ -45,6 +45,7 @@ impl<'a> PageCache<'a> {
       capacity: capacity,
       entries: HashMap::with_capacity(capacity),
       page_mngr: page_mngr,
+      lru: LRU::new(),
     }
   }
 
@@ -55,8 +56,11 @@ impl<'a> PageCache<'a> {
 
   /// Creates a new page using page manager and puts it in the cache.
   pub fn alloc_page(&mut self) -> Res<Page> {
+    self.evict()?;
     let page = self.page_mngr.alloc_page()?;
     self.entries.insert(page.id, CacheEntry::Borrowed);
+    // LRU entry is not there but the operation is no-op
+    self.lru.remove(page.id);
     Ok(page)
   }
 
@@ -68,7 +72,11 @@ impl<'a> PageCache<'a> {
       // Check if the page is borrowed
       match self.entries.insert(page_id, CacheEntry::Borrowed) {
         // Borrow the page
-        Some(CacheEntry::Ref(page)) => Ok(page),
+        Some(CacheEntry::Ref(page)) => {
+          // Remove from LRU since the page is being borrowed
+          self.lru.remove(page_id);
+          Ok(page)
+        },
         // Page was already borrowed
         Some(CacheEntry::Borrowed) => Err(err!("Page {} was already borrowed", page_id)),
         // Page does not exist in the cache
@@ -76,8 +84,11 @@ impl<'a> PageCache<'a> {
       }
     } else {
       // Load from the disk and insert into the cache
+      self.evict()?;
       let page = self.page_mngr.read_page(page_id)?;
       self.entries.insert(page_id, CacheEntry::Borrowed);
+      // Remove from LRU since the page is being borrowed
+      self.lru.remove(page_id);
       Ok(page)
     }
   }
@@ -87,7 +98,11 @@ impl<'a> PageCache<'a> {
     let page_id = page.id;
     match self.entries.insert(page_id, CacheEntry::Ref(page)) {
       // Replaced the correct page
-      Some(CacheEntry::Borrowed) => Ok(()),
+      Some(CacheEntry::Borrowed) => {
+        // Put page id into the LRU cache
+        self.lru.add(page_id);
+        Ok(())
+      },
       _ => Err(err!("Page {} was replaced incorrectly", page_id)),
     }
   }
@@ -99,8 +114,33 @@ impl<'a> PageCache<'a> {
       // Page has been borrowed, we cannot delete it
       Some(CacheEntry::Borrowed) => Err(err!("Page {} was borrowed", page_id)),
       // It is okay to remove, it does not matter if the page is in the cache
-      _ => self.page_mngr.free_page(page_id),
+      _ => {
+        // Remove from LRU cache
+        self.lru.remove(page_id);
+        self.page_mngr.free_page(page_id)
+      },
     }
+  }
+
+  /// Evicts entries from the cache to make space for a new entry.
+  fn evict(&mut self) -> Res<()> {
+    while self.len() >= self.capacity {
+      if let Some(page_id) = self.lru.evict() {
+        match self.entries.remove(&page_id) {
+          Some(CacheEntry::Ref(page)) => {
+            if page.is_dirty {
+              self.page_mngr.write_page(page)?;
+            }
+          },
+          _ => {
+            return Err(err!("Fatal error: cannot evict page {}!", page_id));
+          },
+        }
+      } else {
+        return Err(err!("Cannot evict, len: {}, capacity: {}", self.len(), self.capacity));
+      }
+    }
+    Ok(())
   }
 }
 
