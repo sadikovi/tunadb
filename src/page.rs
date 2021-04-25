@@ -373,7 +373,7 @@ mod tests {
   }
 
   #[test]
-  fn test_page_cache_simple() {
+  fn test_page_cache_multiple_alloc() {
     let mut manager = MemPageManager::new();
     let mut cache = PageCache::new(5, &mut manager);
 
@@ -460,5 +460,37 @@ mod tests {
     assert!(cache.lru.is_empty());
     assert_eq!(cache.len(), 0);
     assert_eq!(&manager.deleted, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  }
+
+  #[test]
+  fn test_page_cache_multiple_get() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    for _ in 0..5 {
+      let page = cache.alloc_page().unwrap();
+      cache.put_page(page).unwrap();
+    }
+
+    let mut page1 = cache.get_page(1).unwrap();
+    let mut page2 = cache.get_page(2).unwrap();
+
+    assert_eq!(cache.len(), 5);
+
+    let iter = LRUIter::new(&cache.lru, true);
+    let res: Vec<PageID> = iter.collect();
+    assert_eq!(res, vec![4, 3, 0]);
+
+    page1.is_dirty = true;
+    page2.is_dirty = true;
+
+    cache.put_page(page1).unwrap();
+    cache.put_page(page2).unwrap();
+
+    assert_eq!(cache.len(), 5);
+
+    let iter = LRUIter::new(&cache.lru, true);
+    let res: Vec<PageID> = iter.collect();
+    assert_eq!(res, vec![2, 1, 4, 3, 0]);
   }
 }
