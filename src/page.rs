@@ -144,13 +144,16 @@ impl<'a> PageCache<'a> {
   }
 }
 
+/// LRU entry for page ids.
 struct LRUEntry {
   id: PageID,
   prev: Option<PageID>,
   next: Option<PageID>,
 }
 
-struct LRU {
+/// LRU cache for page ids.
+/// Used in page cache to keep track of pages.
+pub struct LRU {
   head: Option<PageID>,
   tail: Option<PageID>,
   entries: HashMap<PageID, LRUEntry>
@@ -168,8 +171,13 @@ impl LRU {
     self.head.is_none() && self.tail.is_none() && self.entries.len() == 0
   }
 
-  // Internal function to get LRUEntry from the map
-  fn get_lru(&mut self, id: PageID) -> &mut LRUEntry {
+  // Internal function to get LRUEntry reference
+  fn get_lru(&self, id: PageID) -> &LRUEntry {
+    self.entries.get(&id).expect(&format!("Entry {} is not found", id))
+  }
+
+  // Internal function to get mutable LRUEntry reference
+  fn get_lru_mut(&mut self, id: PageID) -> &mut LRUEntry {
     self.entries.get_mut(&id).expect(&format!("Entry {} is not found", id))
   }
 
@@ -179,7 +187,7 @@ impl LRU {
     // Update the entry to point to the current head
     if let Some(curr_id) = self.head {
       entry.next = Some(curr_id);
-      let curr = self.get_lru(curr_id);
+      let curr = self.get_lru_mut(curr_id);
       curr.prev = Some(id);
     }
     // Update the head to the new entry
@@ -201,7 +209,7 @@ impl LRU {
       // Update prev pointer for the entry
       match entry.prev {
         Some(prev_id) => {
-          let prev = self.get_lru(prev_id);
+          let prev = self.get_lru_mut(prev_id);
           prev.next = entry.next;
         },
         None => {
@@ -212,7 +220,7 @@ impl LRU {
       // Update next pointer for the entry
       match entry.next {
         Some(next_id) => {
-          let next = self.get_lru(next_id);
+          let next = self.get_lru_mut(next_id);
           next.prev = entry.prev;
         },
         None => {
@@ -227,6 +235,35 @@ impl LRU {
   pub fn evict(&mut self) -> Option<PageID> {
     if let Some(id) = self.tail {
       self.remove(id);
+      Some(id)
+    } else {
+      None
+    }
+  }
+}
+
+/// Iterator to traverse LRU entries.
+pub struct LRUIter<'a> {
+  lru: &'a LRU,
+  ptr: Option<PageID>,
+  direct: bool,
+}
+
+impl<'a> LRUIter<'a> {
+  /// Creates an iterator with direct traversal (most recently used first)
+  /// or with LRU order (least recently used first).
+  pub fn new(lru: &'a LRU, direct: bool) -> Self {
+    Self { lru: lru, ptr: if direct { lru.head } else { lru.tail }, direct: direct }
+  }
+}
+
+impl<'a> Iterator for LRUIter<'a> {
+  type Item = PageID;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if let Some(id) = self.ptr {
+      let entry = self.lru.get_lru(id);
+      self.ptr = if self.direct { entry.next } else { entry.prev };
       Some(id)
     } else {
       None
@@ -352,5 +389,76 @@ mod tests {
     cache.put_page(page2).unwrap();
 
     assert_eq!(cache.len(), 2);
+  }
+
+  #[test]
+  fn test_page_cache_alloc_error() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    for _ in 0..5 {
+      cache.alloc_page().unwrap();
+    }
+    assert!(cache.alloc_page().is_err());
+  }
+
+  #[test]
+  fn test_page_cache_get_error() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    for _ in 0..10 {
+      let page = cache.alloc_page().unwrap();
+      cache.put_page(page).unwrap();
+    }
+
+    for id in 0..5 {
+      cache.get_page(id).unwrap();
+    }
+
+    assert!(cache.get_page(6).is_err());
+  }
+
+  #[test]
+  fn test_page_cache_get_put() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    for _ in 0..10 {
+      let page = cache.alloc_page().unwrap();
+      cache.put_page(page).unwrap();
+    }
+
+    for id in (0..10).rev() {
+      let page = cache.get_page(id).unwrap();
+      cache.put_page(page).unwrap();
+    }
+
+    let iter = LRUIter::new(&cache.lru, false); // tail first
+    let res: Vec<PageID> = iter.collect();
+    assert_eq!(res, vec![4, 3, 2, 1, 0]);
+  }
+
+  #[test]
+  fn test_page_cache_free() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    for _ in 0..10 {
+      let page = cache.alloc_page().unwrap();
+      cache.put_page(page).unwrap();
+    }
+
+    for id in 0..10 {
+      cache.free_page(id).unwrap();
+    }
+
+    let iter = LRUIter::new(&cache.lru, true);
+    let res: Vec<PageID> = iter.collect();
+    assert_eq!(res, vec![]);
+
+    assert!(cache.lru.is_empty());
+    assert_eq!(cache.len(), 0);
+    assert_eq!(&manager.deleted, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   }
 }
