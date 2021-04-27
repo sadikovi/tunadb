@@ -1,13 +1,18 @@
 use crate::error::Res;
 
-/// Page id alias.
+// Page id alias.
 pub type PageID = u32;
 
-const PAGE_HEADER_SIZE: usize = 24;
+pub const PAGE_HEADER_SIZE: usize = 24;
+// Supported page sizes.
+pub const PAGE_SIZE_4KB: usize = 4 * 1024;
+pub const PAGE_SIZE_64KB: usize = 64 * 1024;
+// Special value to identify if the page id is set.
 const EMPTY_PAGE_ID: PageID = u32::max_value();
 
-/// Page type.
-/// Add new page types for index pages.
+
+// Page type.
+// Add new page types for index pages.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PageType {
   Leaf,
@@ -31,14 +36,14 @@ impl PageType {
   }
 }
 
-/// Returns a valid page id if page id is set, otherwise None.
+// Returns a valid page id if page id is set, otherwise None.
 fn read_page_id(buf: &[u8], pos: &mut usize) -> Option<PageID> {
   let id = u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
   *pos += 4;
   if id == EMPTY_PAGE_ID { None } else { Some(id) }
 }
 
-/// Writes a page id into the provided buffer.
+// Writes a page id into the provided buffer.
 fn write_page_id(id: Option<PageID>, buf: &mut [u8], pos: &mut usize) {
   let id = match id {
     Some(value) => value,
@@ -53,7 +58,13 @@ fn write_page_id(id: Option<PageID>, buf: &mut [u8], pos: &mut usize) {
   *pos += 4;
 }
 
-/// Page is a fundamental unit of data in memory and on disk.
+// Asserts page size.
+// Only certain page sizes are supported.
+fn assert_page_size(page_size: usize) {
+  assert!(page_size == PAGE_SIZE_4KB || page_size == PAGE_SIZE_64KB);
+}
+
+// Page is a fundamental unit of data in memory and on disk.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Page {
   // Page header
@@ -71,8 +82,8 @@ pub struct Page {
 }
 
 impl Page {
-  /// Creates a new in-memory page.
-  pub fn new(
+  // Creates a new in-memory page.
+  fn new(
     page_type: PageType,
     page_id: PageID,
     prev: Option<PageID>,
@@ -86,9 +97,10 @@ impl Page {
     Self { page_type, page_id, prev, next, overflow, count, free_space_ptr, data, is_dirty }
   }
 
-  /// Reads page from a provided vector of bytes.
+  // Reads page from a provided vector of bytes.
   pub fn from(data: Vec<u8>) -> Self {
     assert!(data.len() >= PAGE_HEADER_SIZE);
+    assert_page_size(data.len());
 
     let mut ptr = 0;
     // 1. Page type
@@ -116,7 +128,7 @@ impl Page {
     Self::new(page_type, page_id, prev, next, overflow, count, free_space_ptr, data, false)
   }
 
-  /// Writes all page data into a vector of bytes.
+  // Writes all page data into a vector of bytes.
   pub fn into(mut self) -> Vec<u8> {
     let mut ptr = 0;
     // 1. Page type
@@ -148,26 +160,26 @@ impl Page {
     self.data
   }
 
-  /// Creates a new empty page with id for testing.
-  pub fn empty(page_id: PageID) -> Self {
-    Self::new(PageType::Leaf, page_id, None, None, None, 0, 0, vec![0; PAGE_HEADER_SIZE], false)
+  // Creates a new empty page with id and page size.
+  pub fn empty(page_id: PageID, page_size: usize) -> Self {
+    Self::new(PageType::Leaf, page_id, None, None, None, 0, 0, vec![0; page_size], false)
   }
 
-  /// Returns page id.
+  // Returns page id.
   pub fn id(&self) -> PageID {
     self.page_id
   }
 }
 
-/// Page manager that maintains pages on disk or in memory.
+// Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
-  /// Creates new page and returns the page or a copy.
-  fn alloc_page(&mut self) -> Res<Page>;
-  /// Returns a copy of the page for the page id.
+  // Creates new page and returns the page or a copy.
+  fn alloc_page(&mut self, page_size: usize) -> Res<Page>;
+  // Returns a copy of the page for the page id.
   fn read_page(&mut self, page_id: PageID) -> Res<Page>;
-  /// Updates the page.
+  // Updates the page.
   fn write_page(&mut self, page: Page) -> Res<()>;
-  /// Deletes the page for the page id.
+  // Deletes the page for the page id.
   fn free_page(&mut self, page_id: PageID) -> Res<()>;
 }
 
@@ -185,15 +197,44 @@ mod tests {
 
   #[test]
   fn test_page_conversion_empty_buf() {
-    let page = Page::from(vec![0; 32]);
-    assert_eq!(page.into(), vec![0; 32]);
+    let page = Page::from(vec![0; PAGE_SIZE_4KB]);
+    assert_eq!(page.into(), vec![0; PAGE_SIZE_4KB]);
+  }
+
+  #[test]
+  fn test_page_empty() {
+    let page = Page::empty(1, PAGE_SIZE_4KB);
+    assert_eq!(page.page_type, PageType::Leaf);
+    assert_eq!(page.page_id, 1);
+    assert_eq!(page.prev, None);
+    assert_eq!(page.next, None);
+    assert_eq!(page.overflow, None);
+    assert_eq!(page.count, 0);
+    assert_eq!(page.free_space_ptr, 0);
+    assert_eq!(page.data.len(), PAGE_SIZE_4KB);
+    assert_eq!(page.is_dirty, false);
+  }
+
+  #[test]
+  fn test_page_new() {
+    let data = vec![0; PAGE_SIZE_4KB];
+    let page = Page::new(PageType::Internal, 1, Some(2), Some(3), None, 10, 11, data, true);
+    assert_eq!(page.page_type, PageType::Internal);
+    assert_eq!(page.page_id, 1);
+    assert_eq!(page.prev, Some(2));
+    assert_eq!(page.next, Some(3));
+    assert_eq!(page.overflow, None);
+    assert_eq!(page.count, 10);
+    assert_eq!(page.free_space_ptr, 11);
+    assert_eq!(page.data.len(), PAGE_SIZE_4KB);
+    assert_eq!(page.is_dirty, true);
   }
 
   #[test]
   fn test_page_conversion() {
-    for &is_dirty in &[true, false] {
-      let data = vec![0; 32];
-      let page1 = Page::new(PageType::Internal, 1, Some(2), Some(3), None, 10, 11, data, is_dirty);
+    for &dirty in &[true, false] {
+      let data = vec![0; PAGE_SIZE_4KB];
+      let page1 = Page::new(PageType::Internal, 1, Some(2), Some(3), None, 10, 11, data, dirty);
       let page2 = Page::from(page1.clone().into());
       assert_eq!(page1.page_type, page2.page_type);
       assert_eq!(page1.page_id, page2.page_id);

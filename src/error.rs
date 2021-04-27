@@ -1,6 +1,6 @@
 //! Module for various errors used in the project
 
-/// Generic error for the crate.
+// Generic error for the crate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Error {
   msg: String
@@ -44,5 +44,5 @@ macro_rules! err {
     (crate::error::Error::from(&format!($fmt, $($args),*), $e));
 }
 
-/// Internal type for the Result.
+// Internal type for the Result.
 pub type Res<T> = Result<T, Error>;

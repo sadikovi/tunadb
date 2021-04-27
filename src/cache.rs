@@ -7,8 +7,8 @@ enum CacheEntry {
   Ref(Page),
 }
 
-/// Page cache, i.e. buffer pool, is a single threaded cache of pages in memory.
-/// Currently implements the basic API that is needed to manage pages.
+// Page cache, i.e. buffer pool, is a single threaded cache of pages in memory.
+// Currently implements the basic API that is needed to manage pages.
 pub struct PageCache<'a> {
   capacity: usize,
   entries: HashMap<PageID, CacheEntry>,
@@ -17,7 +17,7 @@ pub struct PageCache<'a> {
 }
 
 impl<'a> PageCache<'a> {
-  /// Creates a new page cache with capacity and page manager.
+  // Creates a new page cache with capacity and page manager.
   pub fn new(capacity: usize, page_mngr: &'a mut dyn PageManager) -> Self {
     Self {
       capacity: capacity,
@@ -27,23 +27,23 @@ impl<'a> PageCache<'a> {
     }
   }
 
-  /// Returns the length of the entries in the cache.
+  // Returns the length of the entries in the cache.
   pub fn len(&self) -> usize {
     self.entries.len()
   }
 
-  /// Creates a new page using page manager and puts it in the cache.
-  pub fn alloc_page(&mut self) -> Res<Page> {
+  // Creates a new page using page manager and puts it in the cache.
+  pub fn alloc_page(&mut self, page_size: usize) -> Res<Page> {
     self.evict()?;
-    let page = self.page_mngr.alloc_page()?;
+    let page = self.page_mngr.alloc_page(page_size)?;
     self.entries.insert(page.id(), CacheEntry::Borrowed);
     // LRU entry is not there but the operation is no-op
     self.lru.remove(page.id());
     Ok(page)
   }
 
-  /// Returns a page that is in the cache or loads it from disk and stores in the cache.
-  /// LRU entries are updated on each access.
+  // Returns a page that is in the cache or loads it from disk and stores in the cache.
+  // LRU entries are updated on each access.
   pub fn get_page(&mut self, page_id: PageID) -> Res<Page> {
     let exists = self.entries.get(&page_id).is_some();
     if exists {
@@ -71,7 +71,7 @@ impl<'a> PageCache<'a> {
     }
   }
 
-  /// Returns page into the cache by replacing a default value.
+  // Returns page into the cache by replacing a default value.
   pub fn put_page(&mut self, page: Page) -> Res<()> {
     let page_id = page.id();
     match self.entries.insert(page_id, CacheEntry::Ref(page)) {
@@ -85,8 +85,8 @@ impl<'a> PageCache<'a> {
     }
   }
 
-  /// Deletes page from the cache and on disk.
-  /// If page is not in the cache, page manager still removes the page.
+  // Deletes page from the cache and on disk.
+  // If page is not in the cache, page manager still removes the page.
   pub fn free_page(&mut self, page_id: PageID) -> Res<()> {
     match self.entries.remove(&page_id) {
       // Page has been borrowed, we cannot delete it
@@ -100,7 +100,7 @@ impl<'a> PageCache<'a> {
     }
   }
 
-  /// Evicts entries from the cache to make space for a new entry.
+  // Evicts entries from the cache to make space for a new entry.
   fn evict(&mut self) -> Res<()> {
     while self.len() >= self.capacity {
       if let Some(page_id) = self.lru.evict() {
@@ -122,14 +122,14 @@ impl<'a> PageCache<'a> {
   }
 }
 
-/// LRU entry for page ids.
+// LRU entry for page ids.
 struct LRUEntry {
   prev: Option<PageID>,
   next: Option<PageID>,
 }
 
-/// LRU cache for page ids.
-/// Used in page cache to keep track of pages.
+// LRU cache for page ids.
+// Used in page cache to keep track of pages.
 pub struct LRU {
   head: Option<PageID>,
   tail: Option<PageID>,
@@ -137,13 +137,13 @@ pub struct LRU {
 }
 
 impl LRU {
-  /// Creates new LRU instance.
+  // Creates new LRU instance.
   pub fn new() -> Self {
     Self { head: None, tail: None, entries: HashMap::new() }
   }
 
-  /// Returns true if the LRU cache is empty.
-  /// Used mainly for testing.
+  // Returns true if the LRU cache is empty.
+  // Used mainly for testing.
   pub fn is_empty(&self) -> bool {
     self.head.is_none() && self.tail.is_none() && self.entries.len() == 0
   }
@@ -158,7 +158,7 @@ impl LRU {
     self.entries.get_mut(&id).expect(&format!("Entry {} is not found", id))
   }
 
-  /// Adds an item to the LRU cache.
+  // Adds an item to the LRU cache.
   pub fn add(&mut self, id: PageID) {
     let mut entry = LRUEntry { prev: None, next: None };
     // Update the entry to point to the current head
@@ -177,7 +177,7 @@ impl LRU {
     self.entries.insert(id, entry);
   }
 
-  /// Removes an item from the LRU cache.
+  // Removes an item from the LRU cache.
   pub fn remove(&mut self, id: PageID) {
     // Remove the entry from the map
     let entry_opt = self.entries.remove(&id);
@@ -208,7 +208,7 @@ impl LRU {
     }
   }
 
-  /// Evicts an item according to LRU policy.
+  // Evicts an item according to LRU policy.
   pub fn evict(&mut self) -> Option<PageID> {
     if let Some(id) = self.tail {
       self.remove(id);
@@ -219,7 +219,7 @@ impl LRU {
   }
 }
 
-/// Iterator to traverse LRU entries.
+// Iterator to traverse LRU entries.
 pub struct LRUIter<'a> {
   lru: &'a LRU,
   ptr: Option<PageID>,
@@ -227,8 +227,8 @@ pub struct LRUIter<'a> {
 }
 
 impl<'a> LRUIter<'a> {
-  /// Creates an iterator with direct traversal (most recently used first)
-  /// or with LRU order (least recently used first).
+  // Creates an iterator with direct traversal (most recently used first)
+  // or with LRU order (least recently used first).
   pub fn new(lru: &'a LRU, direct: bool) -> Self {
     Self { lru: lru, ptr: if direct { lru.head } else { lru.tail }, direct: direct }
   }
@@ -251,6 +251,7 @@ impl<'a> Iterator for LRUIter<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::page::PAGE_SIZE_4KB;
 
   #[test]
   fn test_page_lru_evict_empty() {
@@ -324,9 +325,9 @@ mod tests {
   }
 
   impl PageManager for MemPageManager {
-    fn alloc_page(&mut self) -> Res<Page> {
+    fn alloc_page(&mut self, page_size: usize) -> Res<Page> {
       let id = self.pages.len() as u32;
-      let page = Page::empty(id);
+      let page = Page::empty(id, page_size);
       self.pages.push(page.clone());
       Ok(page)
     }
@@ -354,8 +355,8 @@ mod tests {
     let mut manager = MemPageManager::new();
     let mut cache = PageCache::new(5, &mut manager);
 
-    let mut page1 = cache.alloc_page().unwrap();
-    let mut page2 = cache.alloc_page().unwrap();
+    let mut page1 = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+    let mut page2 = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
 
     assert_eq!(cache.len(), 2);
 
@@ -374,9 +375,9 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..5 {
-      cache.alloc_page().unwrap();
+      cache.alloc_page(PAGE_SIZE_4KB).unwrap();
     }
-    assert!(cache.alloc_page().is_err());
+    assert!(cache.alloc_page(PAGE_SIZE_4KB).is_err());
   }
 
   #[test]
@@ -385,7 +386,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
+      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -402,7 +403,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
+      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -422,7 +423,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
+      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -445,7 +446,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..5 {
-      let page = cache.alloc_page().unwrap();
+      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
