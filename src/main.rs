@@ -134,7 +134,7 @@ impl BTree {
     self.nodes.len()
   }
 
-  // Deletes the key and returns the value for that key
+  // Returns the value for the key if exists, None otherwise.
   pub fn find(&self, key: i32) -> Option<i32> {
     let mut curr = self.root;
     loop {
