@@ -1,15 +1,162 @@
-//! Module for page definition.
-use std::collections::HashMap;
 use crate::error::Res;
 
 /// Page id alias.
-type PageID = u32;
+pub type PageID = u32;
+
+const PAGE_HEADER_SIZE: usize = 24;
+const EMPTY_PAGE_ID: PageID = u32::max_value();
+
+/// Page type.
+/// Add new page types for index pages.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageType {
+  Leaf,
+  Internal,
+}
+
+impl PageType {
+  fn from(tpe: u8) -> Self {
+    match tpe {
+      0 => PageType::Leaf,
+      1 => PageType::Internal,
+      _ => panic!("Invalid page type {}", tpe),
+    }
+  }
+
+  fn into(self) -> u8 {
+    match self {
+      PageType::Leaf => 0,
+      PageType::Internal => 1,
+    }
+  }
+}
+
+/// Returns a valid page id if page id is set, otherwise None.
+fn read_page_id(buf: &[u8], pos: &mut usize) -> Option<PageID> {
+  let id = u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+  *pos += 4;
+  if id == EMPTY_PAGE_ID { None } else { Some(id) }
+}
+
+/// Writes a page id into the provided buffer.
+fn write_page_id(id: Option<PageID>, buf: &mut [u8], pos: &mut usize) {
+  let id = match id {
+    Some(value) => value,
+    None => EMPTY_PAGE_ID,
+  };
+
+  let bytes = id.to_le_bytes();
+  buf[*pos] = bytes[0];
+  buf[*pos + 1] = bytes[1];
+  buf[*pos + 2] = bytes[2];
+  buf[*pos + 3] = bytes[3];
+  *pos += 4;
+}
 
 /// Page is a fundamental unit of data in memory and on disk.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Page {
-  id: PageID,
-  is_dirty: bool,
+  // Page header
+  page_type: PageType,
+  page_id: PageID,
+  prev: Option<PageID>,
+  next: Option<PageID>,
+  overflow: Option<PageID>,
+  count: u16,
+  free_space_ptr: u16,
+  // Data
+  data: Vec<u8>,
+  // In-memory flags
+  pub is_dirty: bool,
+}
+
+impl Page {
+  /// Creates a new in-memory page.
+  pub fn new(
+    page_type: PageType,
+    page_id: PageID,
+    prev: Option<PageID>,
+    next: Option<PageID>,
+    overflow: Option<PageID>,
+    count: u16,
+    free_space_ptr: u16,
+    data: Vec<u8>,
+    is_dirty: bool,
+  ) -> Self {
+    Self { page_type, page_id, prev, next, overflow, count, free_space_ptr, data, is_dirty }
+  }
+
+  /// Reads page from a provided vector of bytes.
+  pub fn from(data: Vec<u8>) -> Self {
+    assert!(data.len() >= PAGE_HEADER_SIZE);
+
+    let mut ptr = 0;
+    // 1. Page type
+    let page_type = PageType::from(data[ptr]);
+    ptr += 1;
+    // 2. Reserved bytes
+    ptr += 3;
+    // 3. Page id
+    let page_id = read_page_id(&data, &mut ptr).expect(&format!("Page id was not set"));
+    // 4. Prev page
+    let prev = read_page_id(&data, &mut ptr);
+    // 5. Next page
+    let next = read_page_id(&data, &mut ptr);
+    // 6. Overflow page
+    let overflow = read_page_id(&data, &mut ptr);
+    // 7. Tuple count
+    let count = u16::from_le_bytes([data[ptr], data[ptr + 1]]);
+    ptr += 2;
+    // 8. Free space ptr
+    let free_space_ptr = u16::from_le_bytes([data[ptr], data[ptr + 1]]);
+    ptr += 2;
+
+    assert_eq!(ptr, PAGE_HEADER_SIZE);
+
+    Self::new(page_type, page_id, prev, next, overflow, count, free_space_ptr, data, false)
+  }
+
+  /// Writes all page data into a vector of bytes.
+  pub fn into(mut self) -> Vec<u8> {
+    let mut ptr = 0;
+    // 1. Page type
+    self.data[ptr] = self.page_type.into();
+    ptr += 1;
+    // 2. Reserved bytes
+    ptr += 3;
+    // 3. Page id
+    write_page_id(Some(self.page_id), &mut self.data, &mut ptr);
+    // 4. Prev page
+    write_page_id(self.prev, &mut self.data, &mut ptr);
+    // 5. Next page
+    write_page_id(self.next, &mut self.data, &mut ptr);
+    // 6. Overflow page
+    write_page_id(self.overflow, &mut self.data, &mut ptr);
+    // 7. Tuple count
+    let count_bytes = self.count.to_le_bytes();
+    self.data[ptr] = count_bytes[0];
+    self.data[ptr + 1] = count_bytes[1];
+    ptr += 2;
+    // 8. Free space ptr
+    let free_space_ptr_bytes = self.free_space_ptr.to_le_bytes();
+    self.data[ptr] = free_space_ptr_bytes[0];
+    self.data[ptr + 1] = free_space_ptr_bytes[1];
+    ptr += 2;
+
+    assert_eq!(ptr, PAGE_HEADER_SIZE);
+
+    self.data
+  }
+
+  /// Creates a new empty page with id for testing.
+  pub fn empty(page_id: PageID) -> Self {
+    Self::new(PageType::Leaf, page_id, None, None, None, 0, 0, vec![0; PAGE_HEADER_SIZE], false)
+  }
+
+  /// Returns page id.
+  pub fn id(&self) -> PageID {
+    self.page_id
+  }
 }
 
 /// Page manager that maintains pages on disk or in memory.
@@ -24,473 +171,37 @@ pub trait PageManager {
   fn free_page(&mut self, page_id: PageID) -> Res<()>;
 }
 
-enum CacheEntry {
-  Borrowed,
-  Ref(Page),
-}
-
-/// Page cache, i.e. buffer pool, is a single threaded cache of pages in memory.
-/// Currently implements the basic API that is needed to manage pages.
-pub struct PageCache<'a> {
-  capacity: usize,
-  entries: HashMap<PageID, CacheEntry>,
-  page_mngr: &'a mut dyn PageManager,
-  lru: LRU,
-}
-
-impl<'a> PageCache<'a> {
-  /// Creates a new page cache with capacity and page manager.
-  pub fn new(capacity: usize, page_mngr: &'a mut dyn PageManager) -> Self {
-    Self {
-      capacity: capacity,
-      entries: HashMap::with_capacity(capacity),
-      page_mngr: page_mngr,
-      lru: LRU::new(),
-    }
-  }
-
-  /// Returns the length of the entries in the cache.
-  pub fn len(&self) -> usize {
-    self.entries.len()
-  }
-
-  /// Creates a new page using page manager and puts it in the cache.
-  pub fn alloc_page(&mut self) -> Res<Page> {
-    self.evict()?;
-    let page = self.page_mngr.alloc_page()?;
-    self.entries.insert(page.id, CacheEntry::Borrowed);
-    // LRU entry is not there but the operation is no-op
-    self.lru.remove(page.id);
-    Ok(page)
-  }
-
-  /// Returns a page that is in the cache or loads it from disk and stores in the cache.
-  /// LRU entries are updated on each access.
-  pub fn get_page(&mut self, page_id: PageID) -> Res<Page> {
-    let exists = self.entries.get(&page_id).is_some();
-    if exists {
-      // Check if the page is borrowed
-      match self.entries.insert(page_id, CacheEntry::Borrowed) {
-        // Borrow the page
-        Some(CacheEntry::Ref(page)) => {
-          // Remove from LRU since the page is being borrowed
-          self.lru.remove(page_id);
-          Ok(page)
-        },
-        // Page was already borrowed
-        Some(CacheEntry::Borrowed) => Err(err!("Page {} was already borrowed", page_id)),
-        // Page does not exist in the cache
-        None => Err(err!("Page {} not found", page_id)),
-      }
-    } else {
-      // Load from the disk and insert into the cache
-      self.evict()?;
-      let page = self.page_mngr.read_page(page_id)?;
-      self.entries.insert(page_id, CacheEntry::Borrowed);
-      // Remove from LRU since the page is being borrowed
-      self.lru.remove(page_id);
-      Ok(page)
-    }
-  }
-
-  /// Returns page into the cache by replacing a default value.
-  pub fn put_page(&mut self, page: Page) -> Res<()> {
-    let page_id = page.id;
-    match self.entries.insert(page_id, CacheEntry::Ref(page)) {
-      // Replaced the correct page
-      Some(CacheEntry::Borrowed) => {
-        // Put page id into the LRU cache
-        self.lru.add(page_id);
-        Ok(())
-      },
-      _ => Err(err!("Page {} was replaced incorrectly", page_id)),
-    }
-  }
-
-  /// Deletes page from the cache and on disk.
-  /// If page is not in the cache, page manager still removes the page.
-  pub fn free_page(&mut self, page_id: PageID) -> Res<()> {
-    match self.entries.remove(&page_id) {
-      // Page has been borrowed, we cannot delete it
-      Some(CacheEntry::Borrowed) => Err(err!("Page {} was borrowed", page_id)),
-      // It is okay to remove, it does not matter if the page is in the cache
-      _ => {
-        // Remove from LRU cache
-        self.lru.remove(page_id);
-        self.page_mngr.free_page(page_id)
-      },
-    }
-  }
-
-  /// Evicts entries from the cache to make space for a new entry.
-  fn evict(&mut self) -> Res<()> {
-    while self.len() >= self.capacity {
-      if let Some(page_id) = self.lru.evict() {
-        match self.entries.remove(&page_id) {
-          Some(CacheEntry::Ref(page)) => {
-            if page.is_dirty {
-              self.page_mngr.write_page(page)?;
-            }
-          },
-          _ => {
-            return Err(err!("Fatal error: cannot evict page {}!", page_id));
-          },
-        }
-      } else {
-        return Err(err!("Cannot evict, len: {}, capacity: {}", self.len(), self.capacity));
-      }
-    }
-    Ok(())
-  }
-}
-
-/// LRU entry for page ids.
-struct LRUEntry {
-  id: PageID,
-  prev: Option<PageID>,
-  next: Option<PageID>,
-}
-
-/// LRU cache for page ids.
-/// Used in page cache to keep track of pages.
-pub struct LRU {
-  head: Option<PageID>,
-  tail: Option<PageID>,
-  entries: HashMap<PageID, LRUEntry>
-}
-
-impl LRU {
-  /// Creates new LRU instance.
-  pub fn new() -> Self {
-    Self { head: None, tail: None, entries: HashMap::new() }
-  }
-
-  /// Returns true if the LRU cache is empty.
-  /// Used mainly for testing.
-  pub fn is_empty(&self) -> bool {
-    self.head.is_none() && self.tail.is_none() && self.entries.len() == 0
-  }
-
-  // Internal function to get LRUEntry reference
-  fn get_lru(&self, id: PageID) -> &LRUEntry {
-    self.entries.get(&id).expect(&format!("Entry {} is not found", id))
-  }
-
-  // Internal function to get mutable LRUEntry reference
-  fn get_lru_mut(&mut self, id: PageID) -> &mut LRUEntry {
-    self.entries.get_mut(&id).expect(&format!("Entry {} is not found", id))
-  }
-
-  /// Adds an item to the LRU cache.
-  pub fn add(&mut self, id: PageID) {
-    let mut entry = LRUEntry { id: id, prev: None, next: None };
-    // Update the entry to point to the current head
-    if let Some(curr_id) = self.head {
-      entry.next = Some(curr_id);
-      let curr = self.get_lru_mut(curr_id);
-      curr.prev = Some(id);
-    }
-    // Update the head to the new entry
-    self.head = Some(id);
-    // If it is the first element, update the tail
-    if self.tail.is_none() {
-      self.tail = self.head;
-    }
-    // Finally, insert the entry into the map
-    self.entries.insert(id, entry);
-  }
-
-  /// Removes an item from the LRU cache.
-  pub fn remove(&mut self, id: PageID) {
-    // Remove the entry from the map
-    let entry_opt = self.entries.remove(&id);
-
-    if let Some(entry) = entry_opt {
-      // Update prev pointer for the entry
-      match entry.prev {
-        Some(prev_id) => {
-          let prev = self.get_lru_mut(prev_id);
-          prev.next = entry.next;
-        },
-        None => {
-          // The previous pointer does not exist, update the current head
-          self.head = entry.next;
-        }
-      }
-      // Update next pointer for the entry
-      match entry.next {
-        Some(next_id) => {
-          let next = self.get_lru_mut(next_id);
-          next.prev = entry.prev;
-        },
-        None => {
-          // The next pointer does not exist, update the current tail
-          self.tail = entry.prev;
-        }
-      }
-    }
-  }
-
-  /// Evicts an item according to LRU policy.
-  pub fn evict(&mut self) -> Option<PageID> {
-    if let Some(id) = self.tail {
-      self.remove(id);
-      Some(id)
-    } else {
-      None
-    }
-  }
-}
-
-/// Iterator to traverse LRU entries.
-pub struct LRUIter<'a> {
-  lru: &'a LRU,
-  ptr: Option<PageID>,
-  direct: bool,
-}
-
-impl<'a> LRUIter<'a> {
-  /// Creates an iterator with direct traversal (most recently used first)
-  /// or with LRU order (least recently used first).
-  pub fn new(lru: &'a LRU, direct: bool) -> Self {
-    Self { lru: lru, ptr: if direct { lru.head } else { lru.tail }, direct: direct }
-  }
-}
-
-impl<'a> Iterator for LRUIter<'a> {
-  type Item = PageID;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    if let Some(id) = self.ptr {
-      let entry = self.lru.get_lru(id);
-      self.ptr = if self.direct { entry.next } else { entry.prev };
-      Some(id)
-    } else {
-      None
-    }
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[test]
-  fn test_page_lru_evict_empty() {
-    let mut lru = LRU::new();
-    assert_eq!(lru.evict(), None);
-    assert!(lru.is_empty());
+  fn test_page_type_conversion() {
+    assert_eq!(PageType::from(0), PageType::Leaf);
+    assert_eq!(PageType::from(1), PageType::Internal);
+    assert_eq!(PageType::Leaf, PageType::from(PageType::Leaf.into()));
+    assert_eq!(PageType::Internal, PageType::from(PageType::Internal.into()));
   }
 
   #[test]
-  fn test_page_lru_remove_empty() {
-    let mut lru = LRU::new();
-    lru.remove(123);
-    assert!(lru.is_empty());
+  fn test_page_conversion_empty_buf() {
+    let page = Page::from(vec![0; 32]);
+    assert_eq!(page.into(), vec![0; 32]);
   }
 
   #[test]
-  fn test_page_lru_add() {
-    let mut lru = LRU::new();
-    for id in 1..10 {
-      lru.add(id);
+  fn test_page_conversion() {
+    for &is_dirty in &[true, false] {
+      let data = vec![0; 32];
+      let page1 = Page::new(PageType::Internal, 1, Some(2), Some(3), None, 10, 11, data, is_dirty);
+      let page2 = Page::from(page1.clone().into());
+      assert_eq!(page1.page_type, page2.page_type);
+      assert_eq!(page1.page_id, page2.page_id);
+      assert_eq!(page1.prev, page2.prev);
+      assert_eq!(page1.next, page2.next);
+      assert_eq!(page1.overflow, page2.overflow);
+      assert_eq!(page1.count, page2.count);
+      assert_eq!(page1.free_space_ptr, page2.free_space_ptr);
     }
-    assert!(!lru.is_empty());
-    let mut res = Vec::new();
-    while !lru.is_empty() {
-      res.push(lru.evict().unwrap());
-    }
-    assert_eq!(res, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    assert!(lru.is_empty());
-  }
-
-  #[test]
-  fn test_page_lru_add_remove() {
-    let mut lru = LRU::new();
-    for id in 1..6 {
-      lru.add(id);
-    }
-    lru.remove(1);
-    lru.remove(3);
-    lru.add(1);
-    lru.remove(5);
-    lru.add(3);
-    lru.add(5);
-
-    let mut res = Vec::new();
-    while !lru.is_empty() {
-      res.push(lru.evict().unwrap());
-    }
-    assert_eq!(res, vec![2, 4, 1, 3, 5]);
-    assert!(lru.is_empty());
-  }
-
-  // Simple inmemory page manager that stores pages in a vector
-  struct MemPageManager {
-    pages: Vec<Page>,
-    deleted: Vec<PageID>,
-  }
-
-  impl MemPageManager {
-    fn new() -> Self {
-      Self { pages: Vec::new(), deleted: Vec::new() }
-    }
-
-    fn check_deleted(&self, page_id: PageID) -> Res<()> {
-      for id in &self.deleted {
-        if *id == page_id {
-          return Err(err!("Page {} is deleted", page_id));
-        }
-      }
-      Ok(())
-    }
-  }
-
-  impl PageManager for MemPageManager {
-    fn alloc_page(&mut self) -> Res<Page> {
-      let id = self.pages.len() as u32;
-      let page = Page { id: id, is_dirty: false };
-      self.pages.push(page.clone());
-      Ok(page)
-    }
-
-    fn read_page(&mut self, page_id: PageID) -> Res<Page> {
-      self.check_deleted(page_id)?;
-      Ok(self.pages[page_id as usize].clone())
-    }
-
-    fn write_page(&mut self, page: Page) -> Res<()> {
-      let page_id = page.id;
-      self.check_deleted(page_id)?;
-      self.pages[page_id as usize] = page;
-      Ok(())
-    }
-
-    fn free_page(&mut self, page_id: PageID) -> Res<()> {
-      self.deleted.push(page_id);
-      Ok(())
-    }
-  }
-
-  #[test]
-  fn test_page_cache_multiple_alloc() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    let mut page1 = cache.alloc_page().unwrap();
-    let mut page2 = cache.alloc_page().unwrap();
-
-    assert_eq!(cache.len(), 2);
-
-    page1.is_dirty = true;
-    page2.is_dirty = true;
-
-    cache.put_page(page1).unwrap();
-    cache.put_page(page2).unwrap();
-
-    assert_eq!(cache.len(), 2);
-  }
-
-  #[test]
-  fn test_page_cache_alloc_error() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    for _ in 0..5 {
-      cache.alloc_page().unwrap();
-    }
-    assert!(cache.alloc_page().is_err());
-  }
-
-  #[test]
-  fn test_page_cache_get_error() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
-      cache.put_page(page).unwrap();
-    }
-
-    for id in 0..5 {
-      cache.get_page(id).unwrap();
-    }
-
-    assert!(cache.get_page(6).is_err());
-  }
-
-  #[test]
-  fn test_page_cache_get_put() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
-      cache.put_page(page).unwrap();
-    }
-
-    for id in (0..10).rev() {
-      let page = cache.get_page(id).unwrap();
-      cache.put_page(page).unwrap();
-    }
-
-    let iter = LRUIter::new(&cache.lru, false); // tail first
-    let res: Vec<PageID> = iter.collect();
-    assert_eq!(res, vec![4, 3, 2, 1, 0]);
-  }
-
-  #[test]
-  fn test_page_cache_free() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    for _ in 0..10 {
-      let page = cache.alloc_page().unwrap();
-      cache.put_page(page).unwrap();
-    }
-
-    for id in 0..10 {
-      cache.free_page(id).unwrap();
-    }
-
-    let iter = LRUIter::new(&cache.lru, true);
-    let res: Vec<PageID> = iter.collect();
-    assert_eq!(res, vec![]);
-
-    assert!(cache.lru.is_empty());
-    assert_eq!(cache.len(), 0);
-    assert_eq!(&manager.deleted, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-  }
-
-  #[test]
-  fn test_page_cache_multiple_get() {
-    let mut manager = MemPageManager::new();
-    let mut cache = PageCache::new(5, &mut manager);
-
-    for _ in 0..5 {
-      let page = cache.alloc_page().unwrap();
-      cache.put_page(page).unwrap();
-    }
-
-    let mut page1 = cache.get_page(1).unwrap();
-    let mut page2 = cache.get_page(2).unwrap();
-
-    assert_eq!(cache.len(), 5);
-
-    let iter = LRUIter::new(&cache.lru, true);
-    let res: Vec<PageID> = iter.collect();
-    assert_eq!(res, vec![4, 3, 0]);
-
-    page1.is_dirty = true;
-    page2.is_dirty = true;
-
-    cache.put_page(page1).unwrap();
-    cache.put_page(page2).unwrap();
-
-    assert_eq!(cache.len(), 5);
-
-    let iter = LRUIter::new(&cache.lru, true);
-    let res: Vec<PageID> = iter.collect();
-    assert_eq!(res, vec![2, 1, 4, 3, 0]);
   }
 }
