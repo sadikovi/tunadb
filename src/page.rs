@@ -10,7 +10,6 @@ pub const PAGE_SIZE_64KB: usize = 64 * 1024;
 // Special value to identify if the page id is set.
 const EMPTY_PAGE_ID: PageID = u32::max_value();
 
-
 // Page type.
 // Add new page types for index pages.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,20 +160,25 @@ impl Page {
   }
 
   // Creates a new empty page with id and page size.
-  pub fn empty(page_id: PageID, page_size: usize) -> Self {
-    Self::new(PageType::Leaf, page_id, None, None, None, 0, 0, vec![0; page_size], false)
+  pub fn empty(page_type: PageType, page_id: PageID, page_size: usize) -> Self {
+    Self::new(page_type, page_id, None, None, None, 0, 0, vec![0; page_size], false)
   }
 
   // Returns page id.
   pub fn id(&self) -> PageID {
     self.page_id
   }
+
+  // Returns number of tuples in the page.
+  pub fn len(&self) -> usize {
+    self.count as usize
+  }
 }
 
 // Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
   // Creates new page and returns the page or a copy.
-  fn alloc_page(&mut self, page_size: usize) -> Res<Page>;
+  fn alloc_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page>;
   // Returns a copy of the page for the page id.
   fn read_page(&mut self, page_id: PageID) -> Res<Page>;
   // Updates the page.
@@ -203,7 +207,7 @@ mod tests {
 
   #[test]
   fn test_page_empty() {
-    let page = Page::empty(1, PAGE_SIZE_4KB);
+    let page = Page::empty(PageType::Leaf, 1, PAGE_SIZE_4KB);
     assert_eq!(page.page_type, PageType::Leaf);
     assert_eq!(page.page_id, 1);
     assert_eq!(page.prev, None);

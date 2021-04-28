@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::error::Res;
-use crate::page::{Page, PageManager, PageID};
+use crate::page::{Page, PageID, PageManager, PageType};
 
 enum CacheEntry {
   Borrowed,
@@ -33,9 +33,9 @@ impl<'a> PageCache<'a> {
   }
 
   // Creates a new page using page manager and puts it in the cache.
-  pub fn alloc_page(&mut self, page_size: usize) -> Res<Page> {
+  pub fn alloc_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page> {
     self.evict()?;
-    let page = self.page_mngr.alloc_page(page_size)?;
+    let page = self.page_mngr.alloc_page(page_type, page_size)?;
     self.entries.insert(page.id(), CacheEntry::Borrowed);
     // LRU entry is not there but the operation is no-op
     self.lru.remove(page.id());
@@ -325,9 +325,9 @@ mod tests {
   }
 
   impl PageManager for MemPageManager {
-    fn alloc_page(&mut self, page_size: usize) -> Res<Page> {
+    fn alloc_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page> {
       let id = self.pages.len() as u32;
-      let page = Page::empty(id, page_size);
+      let page = Page::empty(page_type, id, page_size);
       self.pages.push(page.clone());
       Ok(page)
     }
@@ -355,8 +355,8 @@ mod tests {
     let mut manager = MemPageManager::new();
     let mut cache = PageCache::new(5, &mut manager);
 
-    let mut page1 = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
-    let mut page2 = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+    let mut page1 = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
+    let mut page2 = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
 
     assert_eq!(cache.len(), 2);
 
@@ -375,9 +375,9 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..5 {
-      cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+      cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
     }
-    assert!(cache.alloc_page(PAGE_SIZE_4KB).is_err());
+    assert!(cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).is_err());
   }
 
   #[test]
@@ -386,7 +386,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+      let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -403,7 +403,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+      let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -423,7 +423,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..10 {
-      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+      let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
@@ -446,7 +446,7 @@ mod tests {
     let mut cache = PageCache::new(5, &mut manager);
 
     for _ in 0..5 {
-      let page = cache.alloc_page(PAGE_SIZE_4KB).unwrap();
+      let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
       cache.put_page(page).unwrap();
     }
 
