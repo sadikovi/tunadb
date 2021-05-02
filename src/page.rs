@@ -164,6 +164,11 @@ impl Page {
     Self::new(page_type, page_id, None, None, None, 0, 0, vec![0; page_size], false)
   }
 
+  // Returns true if the page is leaf.
+  pub fn is_leaf(&self) -> bool {
+    self.page_type == PageType::Leaf
+  }
+
   // Returns page id.
   pub fn id(&self) -> PageID {
     self.page_id
