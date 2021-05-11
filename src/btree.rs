@@ -106,11 +106,6 @@ impl<'a> BTree<'a> {
     for i in (pos..from_len).rev() {
       delete_key_value(from, i);
     }
-
-    // Update prev and next pointers
-    set_prev_page(to, Some(from.id()));
-    set_next_page(to, get_next_page(from));
-    set_next_page(from, Some(to.id()));
   }
 
   // Splits the keys and pointers and moves the half to another page starting at pos.
@@ -177,31 +172,39 @@ impl<'a> BTree<'a> {
     }
   }
 
-  // Merges curr and right pages by moving data from right to curr.
-  // Page "right" should be treated as empty and will be deleted afterwards.
-  fn _merge_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) {
-    // assert_eq!(curr.is_leaf(), right.is_leaf());
-    //
-    // let curr_len = curr.len();
-    //
-    // if curr.is_leaf() {
-    //   for i in 0..right.len() {
-    //     insert_key_value(curr, curr_len + i, get_key(right, i), get_value(right, i));
-    //   }
-    // } else {
-    //   insert_key(curr, curr_len, get_key(parent, ptr)); // aligns curr keys with ptrs
-    //   for i in 0..right.len() {
-    //     insert_key(curr, curr_len + 1 + i, get_key(right, i));
-    //   }
-    //   for i in 0..right.len() + 1 {
-    //     insert_ptr(curr, curr_len + 1 + i, get_ptr(right, i));
-    //   }
-    //
-    //   assert_eq!(curr.len(), curr_len + right.len() + 1);
-    // }
-    //
-    // delete_key(parent, ptr);
-    // delete_ptr(parent, ptr + 1);
+  // Merges "curr" into "left" by moving data from curr page to left page.
+  // Page "curr" should be treated as empty and will be deleted afterwards.
+  fn _merge_right(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Page, right: Option<&mut Page>) {
+    assert_eq!(left.is_leaf(), curr.is_leaf());
+
+    let left_len = left.len();
+
+    if left.is_leaf() {
+      for i in 0..curr.len() {
+        insert_key_value(left, left_len + i, get_key(curr, i), get_value(curr, i));
+      }
+    } else {
+      insert_key(left, left_len, get_key(parent, ptr)); // aligns left keys with ptrs
+      for i in 0..curr.len() {
+        insert_key(left, left_len + 1 + i, get_key(curr, i));
+      }
+      for i in 0..curr.len() + 1 {
+        insert_ptr(left, left_len + 1 + i, get_ptr(curr, i));
+      }
+
+      assert_eq!(left.len(), left_len + curr.len() + 1);
+    }
+
+    delete_key(parent, ptr);
+    delete_ptr(parent, ptr + 1);
+
+    // Update prev and next pointers
+    if let Some(right) = right {
+      set_prev_page(right, get_prev_page(curr));
+    }
+    set_next_page(left, get_next_page(curr));
+    set_prev_page(curr, None);
+    set_next_page(curr, None);
   }
 
   // Inserts key and value.
@@ -220,6 +223,16 @@ impl<'a> BTree<'a> {
 
       // Move half of the keys into the new page and return the split point
       Self::_split_leaf(&mut page, &mut right_page, split_i);
+
+      // Update prev and next pointers
+      set_prev_page(&mut right_page, Some(page.id()));
+      set_next_page(&mut right_page, get_next_page(&page));
+      set_next_page(&mut page, Some(right_page.id()));
+      if let Some(next_id) = get_next_page(&page) {
+        let mut next_page = self.cache.get_page(next_id)?;
+        set_prev_page(&mut next_page, Some(right_page.id()));
+        self.cache.put_page(next_page)?;
+      }
 
       // Return both pages into the cache
       self.cache.put_page(right_page)?;
@@ -304,47 +317,70 @@ impl<'a> BTree<'a> {
     // Restore parents after delete
 
     let mut stop_early = false;
-    // while let Some((parent_id, ptr)) = stack.pop() {
-    //   let mut parent = self.cache.get_page(parent_id)?;
-    //   let mut curr = self.cache.get_page(get_ptr(&parent, ptr))?;
-    //
-    //   if curr.len() >= self.min_num_keys {
-    //     stop_early = true;
-    //   } else {
-    //     // TODO: the logic here is different from the original btree
-    //     if ptr > 0 {
-    //       let left_id = get_ptr(&parent, ptr - 1);
-    //       let mut left = self.cache.get_page(left_id)?;
-    //       if left.len() > self.min_num_keys {
-    //         Self::_steal_from_left(&mut parent, ptr, &mut curr, &mut left);
-    //         stop_early = true;
-    //       } else {
-    //         self._merge_right(&mut parent, ptr);
-    //       }
-    //       self.cache.put_page(left)?;
-    //     } else if ptr <= parent.len() {
-    //       let right_id = get_ptr(&parent, ptr + 1) ;
-    //       let right = self.cache.get_page(right_id)?;
-    //       if right.len() > self.min_num_keys {
-    //         Self::_steal_from_right(&mut parent, ptr, &mut curr, &mut right);
-    //         stop_early = true;
-    //       } else {
-    //         self._merge_right(&mut parent, ptr - 1)?;
-    //       }
-    //       self.cache.put_page(right)?;
-    //     } else {
-    //       // TODO: Should never happen
-    //       panic!("Invalid case, cannot find siblings");
-    //     }
-    //   }
-    //
-    //   self.cache.put_page(curr)?;
-    //   self.cache.put_page(parent)?;
-    //
-    //   if stop_early {
-    //     break;
-    //   }
-    // }
+    while let Some((parent_id, ptr)) = stack.pop() {
+      let mut parent = self.cache.get_page(parent_id)?;
+      let mut curr = self.cache.get_page(get_ptr(&parent, ptr))?;
+
+      let mut page_id_to_delete: Option<PageID> = None;
+
+      if curr.len() >= self.min_num_keys {
+        stop_early = true;
+      } else {
+        let mut left = if ptr > 0 {
+          Some(self.cache.get_page(get_ptr(&parent, ptr - 1))?)
+        } else {
+          None
+        };
+        let mut right = if ptr < parent.len() {
+          Some(self.cache.get_page(get_ptr(&parent, ptr + 1))?)
+        } else {
+          None
+        };
+
+        if left.is_some() && left.as_ref().unwrap().len() > self.min_num_keys {
+          Self::_steal_from_left(&mut parent, ptr, &mut curr, left.as_mut().unwrap());
+          stop_early = true;
+        } else if right.is_some() && right.as_ref().unwrap().len() > self.min_num_keys {
+          Self::_steal_from_right(&mut parent, ptr, &mut curr, right.as_mut().unwrap());
+          stop_early = true;
+        } else if right.is_some() {
+          let mut right_next = if let Some(right_next_id) = get_next_page(right.as_ref().unwrap()) {
+            Some(self.cache.get_page(right_next_id)?)
+          } else {
+            None
+          };
+          Self::_merge_right(&mut parent, ptr, &mut curr, right.as_mut().unwrap(), right_next.as_mut());
+          if let Some(right_next) = right_next {
+            self.cache.put_page(right_next)?;
+          }
+          page_id_to_delete = right.as_ref().map(|p| p.id());
+        } else if left.is_some() {
+          Self::_merge_right(&mut parent, ptr - 1, left.as_mut().unwrap(), &mut curr, right.as_mut());
+          page_id_to_delete = Some(curr.id());
+        } else {
+          // TODO: Should never happen
+          panic!("Invalid case, cannot find siblings");
+        }
+
+        if let Some(left_page) = left {
+          self.cache.put_page(left_page)?;
+        }
+        if let Some(right_page) = right {
+          self.cache.put_page(right_page)?;
+        }
+      }
+
+      self.cache.put_page(curr)?;
+      self.cache.put_page(parent)?;
+
+      if let Some(page_id_to_delete) = page_id_to_delete {
+        self.cache.free_page(page_id_to_delete)?;
+      }
+
+      if stop_early {
+        break;
+      }
+    }
 
     // Check if we need to update root
     if !stop_early {
