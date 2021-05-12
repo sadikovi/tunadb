@@ -36,6 +36,8 @@ impl<'a> PageCache<'a> {
   pub fn alloc_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page> {
     self.evict()?;
     let page = self.page_mngr.alloc_page(page_type, page_size)?;
+    // Make sure there are no duplicate page ids
+    assert!(self.entries.get(&page.id()).is_none(), "Duplicate page id {}", page.id());
     self.entries.insert(page.id(), CacheEntry::Borrowed);
     // LRU entry is not there but the operation is no-op
     self.lru.remove(page.id());
@@ -45,58 +47,73 @@ impl<'a> PageCache<'a> {
   // Returns a page that is in the cache or loads it from disk and stores in the cache.
   // LRU entries are updated on each access.
   pub fn get_page(&mut self, page_id: PageID) -> Res<Page> {
-    let exists = self.entries.get(&page_id).is_some();
-    if exists {
-      // Check if the page is borrowed
-      match self.entries.insert(page_id, CacheEntry::Borrowed) {
-        // Borrow the page
-        Some(CacheEntry::Ref(page)) => {
-          // Remove from LRU since the page is being borrowed
-          self.lru.remove(page_id);
-          Ok(page)
-        },
-        // Page was already borrowed
-        Some(CacheEntry::Borrowed) => Err(err!("Page {} was already borrowed", page_id)),
-        // Page does not exist in the cache
-        None => Err(err!("Page {} not found", page_id)),
-      }
-    } else {
-      // Load from the disk and insert into the cache
-      self.evict()?;
-      let page = self.page_mngr.read_page(page_id)?;
-      self.entries.insert(page_id, CacheEntry::Borrowed);
-      // Remove from LRU since the page is being borrowed
-      self.lru.remove(page_id);
-      Ok(page)
+    let res = match self.entries.get(&page_id) {
+      // Page was already borrowed
+      Some(CacheEntry::Borrowed) => Err(err!("Page {} was already borrowed", page_id)),
+      // Page exists, we can borrow it
+      Some(CacheEntry::Ref(_)) => Ok(true),
+      // Page does not exist in the cache
+      None => Ok(false),
+    };
+    match res {
+      Ok(true) => {
+        let page = match self.entries.insert(page_id, CacheEntry::Borrowed) {
+          Some(CacheEntry::Ref(page)) => page,
+          _ => panic!("Unexpected cache state"),
+        };
+        // Remove from LRU since the page is being borrowed
+        self.lru.remove(page_id);
+        Ok(page)
+      },
+      Ok(false) => {
+        // Load from the disk and insert into the cache
+        self.evict()?;
+        let page = self.page_mngr.read_page(page_id)?;
+        self.entries.insert(page_id, CacheEntry::Borrowed);
+        // Remove from LRU since the page is being borrowed
+        self.lru.remove(page_id);
+        Ok(page)
+      },
+      Err(err) => Err(err),
     }
   }
 
   // Returns page into the cache by replacing a default value.
   pub fn put_page(&mut self, page: Page) -> Res<()> {
     let page_id = page.id();
-    match self.entries.insert(page_id, CacheEntry::Ref(page)) {
-      // Replaced the correct page
-      Some(CacheEntry::Borrowed) => {
+    let res = match self.entries.get(&page_id) {
+      Some(CacheEntry::Borrowed) => Ok(()),
+      _ => Err(err!("Page {} was replaced incorrectly", page_id)),
+    };
+    match res {
+      Ok(_) => {
+        // Replaced the correct page
+        self.entries.insert(page_id, CacheEntry::Ref(page));
         // Put page id into the LRU cache
         self.lru.add(page_id);
         Ok(())
       },
-      _ => Err(err!("Page {} was replaced incorrectly", page_id)),
+      Err(err) => Err(err),
     }
   }
 
   // Deletes page from the cache and on disk.
   // If page is not in the cache, page manager still removes the page.
   pub fn free_page(&mut self, page_id: PageID) -> Res<()> {
-    match self.entries.remove(&page_id) {
+    let res = match self.entries.get(&page_id) {
       // Page has been borrowed, we cannot delete it
       Some(CacheEntry::Borrowed) => Err(err!("Page {} was borrowed", page_id)),
       // It is okay to remove, it does not matter if the page is in the cache
-      _ => {
+      _ => Ok(()),
+    };
+    match res {
+      Ok(_) => {
+        self.entries.remove(&page_id);
         // Remove from LRU cache
         self.lru.remove(page_id);
         self.page_mngr.free_page(page_id)
       },
+      Err(err) => Err(err),
     }
   }
 
@@ -104,15 +121,21 @@ impl<'a> PageCache<'a> {
   fn evict(&mut self) -> Res<()> {
     while self.len() >= self.capacity {
       if let Some(page_id) = self.lru.evict() {
-        match self.entries.remove(&page_id) {
-          Some(CacheEntry::Ref(page)) => {
+        let res = match self.entries.get(&page_id) {
+          Some(CacheEntry::Ref(_)) => Ok(()),
+          _ => Err(err!("Fatal error: cannot evict page {}!", page_id)),
+        };
+        match res {
+          Ok(_) => {
+            let page = match self.entries.remove(&page_id) {
+              Some(CacheEntry::Ref(page)) => page,
+              _ => panic!("Unexpected cache state"),
+            };
             if page.is_dirty {
               self.page_mngr.write_page(page)?;
             }
           },
-          _ => {
-            return Err(err!("Fatal error: cannot evict page {}!", page_id));
-          },
+          Err(err) => return Err(err),
         }
       } else {
         return Err(err!("Cannot evict, len: {}, capacity: {}", self.len(), self.capacity));
@@ -470,5 +493,48 @@ mod tests {
     let iter = LRUIter::new(&cache.lru, true);
     let res: Vec<PageID> = iter.collect();
     assert_eq!(res, vec![2, 1, 4, 3, 0]);
+  }
+
+  #[test]
+  fn test_page_cache_state_get_page() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
+
+    let res1 = cache.get_page(page.id());
+    assert!(res1.is_err());
+    // The subsequent call should be the same error
+    let res2 = cache.get_page(page.id());
+    assert_eq!(res1, res2);
+  }
+
+  #[test]
+  fn test_page_cache_state_put_page() {
+    let mut manager = MemPageManager::new();
+
+    let page = manager.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
+    let page_id = page.id();
+
+    let mut cache = PageCache::new(5, &mut manager);
+
+    let res1 = cache.put_page(page);
+    assert!(res1.is_err());
+    assert_eq!(cache.entries.len(), 0);
+  }
+
+  #[test]
+  fn test_page_cache_state_free_page() {
+    let mut manager = MemPageManager::new();
+    let mut cache = PageCache::new(5, &mut manager);
+
+    let page = cache.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
+
+    let res1 = cache.free_page(page.id());
+    assert!(res1.is_err());
+
+    // The subsequent call should be the same error
+    let res2 = cache.free_page(page.id());
+    assert_eq!(res1, res2);
   }
 }
