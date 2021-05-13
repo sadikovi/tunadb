@@ -274,7 +274,8 @@ impl<'a> Iterator for LRUIter<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::page::PAGE_SIZE_4KB;
+
+  const PAGE_SIZE_4KB: usize = 4 * 1024;
 
   #[test]
   fn test_page_lru_evict_empty() {
