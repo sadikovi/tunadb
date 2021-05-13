@@ -514,7 +514,6 @@ mod tests {
     let mut manager = MemPageManager::new();
 
     let page = manager.alloc_page(PageType::Leaf, PAGE_SIZE_4KB).unwrap();
-    let page_id = page.id();
 
     let mut cache = PageCache::new(5, &mut manager);
 
