@@ -47,6 +47,11 @@ pub struct Page {
 }
 
 impl Page {
+  // Returns maximal number of keys that a page of `page_size` can hold.
+  pub fn max_num_keys(_page_size: usize) -> usize {
+    unimplemented!()
+  }
+
   // Creates a new in-memory page.
   pub fn new(
     page_type: PageType,
@@ -80,6 +85,56 @@ impl Page {
   // Returns number of tuples in the page.
   pub fn len(&self) -> usize {
     self.count as usize
+  }
+
+  // Performs a search of keys and returns two values:
+  // - flag that indicates whether or not the key exists
+  // - position of that key if exists or the next position where the key would go
+  pub fn search(&self, _key: &[u8]) -> (bool, usize) {
+    unimplemented!()
+  }
+
+  // Returns a key at the position `pos`.
+  pub fn get_key(&self, _pos: usize) -> &[u8] {
+    unimplemented!()
+  }
+
+  // Returns a value at the position `pos`.
+  // This method is only valid for leaf pages.
+  pub fn get_value(&self, _pos: usize) -> &[u8] {
+    unimplemented!()
+  }
+
+  // Returns a pointer at the position `pos`.
+  // This method is only valid for internal pages.
+  // Note that an internal page has N keys and (N + 1) pointers.
+  pub fn get_ptr(&self, _pos: usize) -> PageID {
+    unimplemented!()
+  }
+
+  // Returns a reference to the previous page if one is set.
+  pub fn get_prev_page(&self) -> Option<PageID> {
+    unimplemented!()
+  }
+
+  // Returns a reference to the next page if one is set.
+  // Only applicable to leaf pages.
+  pub fn get_next_page(&self) -> Option<PageID> {
+    unimplemented!()
+  }
+
+  // Sets a link to the previous page.
+  // `None` means this page is a leftmost node in the tree.
+  // Only applicable to leaf pages.
+  pub fn set_prev_page(&mut self, _ptr: Option<PageID>) {
+    unimplemented!()
+  }
+
+  // Sets a link to the next page.
+  // `None` means this page is a rightmost node in the tree.
+  // Only applicable to leaf pages.
+  pub fn set_next_page(&mut self, _ptr: Option<PageID>) {
+    unimplemented!()
   }
 }
 

@@ -20,8 +20,8 @@ impl<'a> BTree<'a> {
 
     // Calculate min and max number of keys that a page is supposed to have.
     // Used to decide if we need to split or merge the page.
-    let min_num_keys = 6;
-    let max_num_keys = 12;
+    let max_num_keys = Page::max_num_keys(page_size);
+    let min_num_keys = max_num_keys / 2;
 
     Ok(Self {
       cache: cache,
@@ -39,15 +39,10 @@ impl<'a> BTree<'a> {
 
     let mut page = self.cache.get_page(self.root)?;
     while !page.is_leaf() {
-      // Search for the pointer to the next page
-      let (exists, i) = search(&page, key);
-      // Find the next page to load
-      let next_id = if exists { get_ptr(&page, i + 1) } else { get_ptr(&page, i) };
-      // Push onto stack the current page and index to trace back
+      let (exists, i) = page.search(key);
+      let next_id = if exists { page.get_ptr(i + 1) } else { page.get_ptr(i) };
       stack.push((page.id(), i));
-      // Return the page to the cache
       self.cache.put_page(page)?;
-      // Load the page from the cache, could be a leaf
       page = self.cache.get_page(next_id)?;
     }
 
@@ -58,8 +53,8 @@ impl<'a> BTree<'a> {
   fn _find_leaf(&mut self, key: &[u8]) -> Res<Page> {
     let mut page = self.cache.get_page(self.root)?;
     while !page.is_leaf() {
-      let (exists, i) = search(&page, key);
-      let next_id = if exists { get_ptr(&page, i + 1) } else { get_ptr(&page, i) };
+      let (exists, i) = page.search(key);
+      let next_id = if exists { page.get_ptr(i + 1) } else { page.get_ptr(i) };
       self.cache.put_page(page)?;
       page = self.cache.get_page(next_id)?;
     }
@@ -71,7 +66,7 @@ impl<'a> BTree<'a> {
   fn _insert_leaf(page: &mut Page, key: &[u8], value: &[u8]) {
     assert!(page.is_leaf());
 
-    let (exists, pos) = search(page, key);
+    let (exists, pos) = page.search(key);
     if exists {
       set_key_value(page, pos, key, value);
     } else {
@@ -99,7 +94,7 @@ impl<'a> BTree<'a> {
 
     // Move the second half into "to"
     for i in pos..from.len() {
-      insert_key_value(to, i - pos, get_key(from, i), get_value(from, i));
+      insert_key_value(to, i - pos, from.get_key(i), from.get_value(i));
     }
     // Remove those keys from "from"
     let from_len = from.len();
@@ -115,11 +110,11 @@ impl<'a> BTree<'a> {
 
     // Internal pages do not include the separator key
     for i in pos + 1..from.len() {
-      insert_key(to, i - pos - 1, get_key(from, i));
+      insert_key(to, i - pos - 1, from.get_key(i));
     }
     // Pointers have +1 length
     for i in pos + 1..from.len() + 1 {
-      insert_ptr(to, i - pos - 1, get_ptr(from, i));
+      insert_ptr(to, i - pos - 1, from.get_ptr(i));
     }
     // Delete keys and pointers from "from"
     // Do not include the separate key at "pos"
@@ -137,15 +132,15 @@ impl<'a> BTree<'a> {
 
     if curr.is_leaf() {
       // The key will be the smallest key in "curr"
-      insert_key_value(curr, 0, get_key(left, left.len() - 1), get_value(left, left.len() - 1));
-      set_key(parent, ptr - 1, get_key(left, left.len() - 1));
+      insert_key_value(curr, 0, left.get_key(left.len() - 1), left.get_value(left.len() - 1));
+      set_key(parent, ptr - 1, left.get_key(left.len() - 1));
       delete_key_value(left, left.len() - 1);
     } else {
       // curr[0].key is the same as the parent key for that node
       // parent[ptr - 1].key is the same as the last key in left
-      insert_key(curr, 0, get_key(parent, ptr - 1));
-      insert_ptr(curr, 0, get_ptr(left, left.len()));
-      set_key(parent, ptr - 1, get_key(left, left.len() - 1));
+      insert_key(curr, 0, parent.get_key(ptr - 1));
+      insert_ptr(curr, 0, left.get_ptr(left.len()));
+      set_key(parent, ptr - 1, left.get_key(left.len() - 1));
       delete_ptr(left, left.len()); // does not decrement length
       delete_key(left, left.len() - 1);
     }
@@ -160,13 +155,13 @@ impl<'a> BTree<'a> {
 
     if curr.is_leaf() {
       // The key will be the largest key in "curr"
-      insert_key_value(curr, curr_len, get_key(right, 0), get_value(right, 0));
-      set_key(parent, ptr, get_key(right, 1));
+      insert_key_value(curr, curr_len, right.get_key(0), right.get_value(0));
+      set_key(parent, ptr, right.get_key(1));
       delete_key_value(right, 0);
     } else {
-      insert_key(curr, curr_len, get_key(parent, ptr)); // increments curr.len()
-      insert_ptr(curr, curr_len + 1, get_ptr(right, 0));
-      set_key(parent, ptr, get_key(right, 0));
+      insert_key(curr, curr_len, parent.get_key(ptr)); // increments curr.len()
+      insert_ptr(curr, curr_len + 1, right.get_ptr(0));
+      set_key(parent, ptr, right.get_key(0));
       delete_key(right, 0);
       delete_ptr(right, 0);
     }
@@ -181,15 +176,15 @@ impl<'a> BTree<'a> {
 
     if left.is_leaf() {
       for i in 0..curr.len() {
-        insert_key_value(left, left_len + i, get_key(curr, i), get_value(curr, i));
+        insert_key_value(left, left_len + i, curr.get_key(i), curr.get_value(i));
       }
     } else {
-      insert_key(left, left_len, get_key(parent, ptr)); // aligns left keys with ptrs
+      insert_key(left, left_len, parent.get_key(ptr)); // aligns left keys with ptrs
       for i in 0..curr.len() {
-        insert_key(left, left_len + 1 + i, get_key(curr, i));
+        insert_key(left, left_len + 1 + i, curr.get_key(i));
       }
       for i in 0..curr.len() + 1 {
-        insert_ptr(left, left_len + 1 + i, get_ptr(curr, i));
+        insert_ptr(left, left_len + 1 + i, curr.get_ptr(i));
       }
 
       assert_eq!(left.len(), left_len + curr.len() + 1);
@@ -200,11 +195,11 @@ impl<'a> BTree<'a> {
 
     // Update prev and next pointers
     if let Some(right) = right {
-      set_prev_page(right, get_prev_page(curr));
+      right.set_prev_page(curr.get_prev_page());
     }
-    set_next_page(left, get_next_page(curr));
-    set_prev_page(curr, None);
-    set_next_page(curr, None);
+    left.set_next_page(curr.get_next_page());
+    curr.set_prev_page(None);
+    curr.set_next_page(None);
   }
 
   // Inserts key and value.
@@ -217,7 +212,7 @@ impl<'a> BTree<'a> {
 
       // Find split point and prepare split key, left id and right id for internal nodes
       let split_i = (page.len() >> 1) + 1; // split point
-      let mut split_key = get_key(&page, split_i).to_vec(); // split key to propagate to the parent
+      let mut split_key = page.get_key(split_i).to_vec(); // split key to propagate to the parent
       let mut left_id = page.id();
       let mut right_id = right_page.id();
 
@@ -225,12 +220,12 @@ impl<'a> BTree<'a> {
       Self::_split_leaf(&mut page, &mut right_page, split_i);
 
       // Update prev and next pointers
-      set_prev_page(&mut right_page, Some(page.id()));
-      set_next_page(&mut right_page, get_next_page(&page));
-      set_next_page(&mut page, Some(right_page.id()));
-      if let Some(next_id) = get_next_page(&page) {
+      right_page.set_prev_page(Some(page.id()));
+      right_page.set_next_page(page.get_next_page());
+      page.set_next_page(Some(right_page.id()));
+      if let Some(next_id) = page.get_next_page() {
         let mut next_page = self.cache.get_page(next_id)?;
-        set_prev_page(&mut next_page, Some(right_page.id()));
+        next_page.set_prev_page(Some(right_page.id()));
         self.cache.put_page(next_page)?;
       }
 
@@ -257,7 +252,7 @@ impl<'a> BTree<'a> {
 
         // Find the new split point
         let split_i = (parent.len() >> 1) + 1;
-        split_key = get_key(&parent, split_i).to_vec();
+        split_key = parent.get_key(split_i).to_vec();
         left_id = parent.id();
         right_id = right_parent.id();
 
@@ -289,7 +284,7 @@ impl<'a> BTree<'a> {
 
   pub fn delete(&mut self, key: &[u8]) -> Res<()> {
     let (mut page, mut stack) = self._find_leaf_stack(key)?;
-    let (exists, i) = search(&page, key);
+    let (exists, i) = page.search(key);
     // Return the page if the key does not exist
     if !exists {
       return self.cache.put_page(page);
@@ -300,12 +295,12 @@ impl<'a> BTree<'a> {
     // Fix the parent links because we are deleting the smallest key
     // We can only fix parent links if the next smallest key exists
     if i == 0 && page.len() > 0 {
-      let next_smallest_key = get_key(&page, 0);
+      let next_smallest_key = page.get_key(0);
       // Restore pointers
       for k in (0..stack.len()).rev() {
         let (parent_id, pos) = stack[k];
         let mut parent = self.cache.get_page(parent_id)?;
-        if get_key(&parent, pos) == key {
+        if parent.get_key(pos) == key {
           set_key(&mut parent, pos, next_smallest_key);
         }
         self.cache.put_page(parent)?;
@@ -319,7 +314,7 @@ impl<'a> BTree<'a> {
     let mut stop_early = false;
     while let Some((parent_id, ptr)) = stack.pop() {
       let mut parent = self.cache.get_page(parent_id)?;
-      let mut curr = self.cache.get_page(get_ptr(&parent, ptr))?;
+      let mut curr = self.cache.get_page(parent.get_ptr(ptr))?;
 
       let mut page_id_to_delete: Option<PageID> = None;
 
@@ -327,12 +322,12 @@ impl<'a> BTree<'a> {
         stop_early = true;
       } else {
         let mut left = if ptr > 0 {
-          Some(self.cache.get_page(get_ptr(&parent, ptr - 1))?)
+          Some(self.cache.get_page(parent.get_ptr(ptr - 1))?)
         } else {
           None
         };
         let mut right = if ptr < parent.len() {
-          Some(self.cache.get_page(get_ptr(&parent, ptr + 1))?)
+          Some(self.cache.get_page(parent.get_ptr(ptr + 1))?)
         } else {
           None
         };
@@ -344,7 +339,7 @@ impl<'a> BTree<'a> {
           Self::_steal_from_right(&mut parent, ptr, &mut curr, right.as_mut().unwrap());
           stop_early = true;
         } else if right.is_some() {
-          let mut right_next = if let Some(right_next_id) = get_next_page(right.as_ref().unwrap()) {
+          let mut right_next = if let Some(right_next_id) = right.as_ref().unwrap().get_next_page() {
             Some(self.cache.get_page(right_next_id)?)
           } else {
             None
@@ -388,7 +383,7 @@ impl<'a> BTree<'a> {
       let root = self.cache.get_page(self.root)?;
       // If root is leaf and empty, do nothing
       if root.len() == 0 && !root.is_leaf() {
-        self.root = get_ptr(&root, 0);
+        self.root = root.get_ptr(0);
         // Delete the old root page
         let old_root_id = root.id();
         self.cache.put_page(root)?;
@@ -403,22 +398,6 @@ impl<'a> BTree<'a> {
 ////////////////////////////////////////////////////////////////
 // Page methods
 ////////////////////////////////////////////////////////////////
-
-fn search(_page: &Page, _key: &[u8]) -> (bool, usize) {
-  unimplemented!()
-}
-
-fn get_key(_page: &Page, _pos: usize) -> &[u8] {
-  unimplemented!()
-}
-
-fn get_value(_page: &Page, _pos: usize) -> &[u8] {
-  unimplemented!()
-}
-
-fn get_ptr(_page: &Page, _pos: usize) -> PageID {
-  unimplemented!()
-}
 
 // Does not shift elements if it is the last element
 fn insert_key(_page: &mut Page, _pos: usize, _key: &[u8]) {
@@ -457,21 +436,5 @@ fn delete_key_value(_page: &mut Page, _pos: usize) {
 }
 
 fn delete_ptr(_page: &mut Page, _pos: usize) {
-  unimplemented!()
-}
-
-fn get_prev_page(_page: &Page) -> Option<PageID> {
-  unimplemented!()
-}
-
-fn get_next_page(_page: &Page) -> Option<PageID> {
-  unimplemented!()
-}
-
-fn set_prev_page(_page: &mut Page, _ptr: Option<PageID>) {
-  unimplemented!()
-}
-
-fn set_next_page(_page: &mut Page, _ptr: Option<PageID>) {
   unimplemented!()
 }
