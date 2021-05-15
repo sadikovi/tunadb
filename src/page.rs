@@ -112,7 +112,65 @@ impl Page {
     unimplemented!()
   }
 
+  // Inserts the key-value pair at the position `pos`.
+  // Does not shift elements if the pair is inserted at the end.
+  // This method is only valid for leaf pages.
+  pub fn insert_key_value(&mut self, _pos: usize, _key: &[u8], _value: &[u8]) {
+    unimplemented!()
+  }
+
+  // Sets the new value for the key at the position `pos`.
+  // This method is only valid for leaf pages.
+  pub fn set_key_value(&mut self, _pos: usize, _key: &[u8], _value: &[u8]) {
+    unimplemented!()
+  }
+
+  // Deletes a key-value pair at the position `pos`.
+  // Does not shift elements if the last key-value pair is deleted.
+  // This method is only valid for leaf pages.
+  pub fn delete_key_value(&mut self, _pos: usize) {
+    unimplemented!()
+  }
+
+  // Inserts a new key into the page.
+  // Does not shift elements if the key is inserted at the end.
+  // Only applicable for internal pages.
+  pub fn insert_key(&mut self, _pos: usize, _key: &[u8]) {
+    unimplemented!()
+  }
+
+  // Sets a key for the position `pos`.
+  // Only applicable for internal pages.
+  pub fn set_key(&mut self, _pos: usize, _key: &[u8]) {
+    unimplemented!()
+  }
+
+  // Deletes a key in the page and decrements the number of the keys.
+  pub fn delete_key(&mut self, _pos: usize) {
+    unimplemented!()
+  }
+
+  // Inserts a pointer at the position `pos`.
+  // Does not increment the length, use `insert_key` for that.
+  // Only applicable for internal pages.
+  pub fn insert_ptr(&mut self, _pos: usize, _ptr: PageID) {
+    unimplemented!()
+  }
+
+  // Sets a pointer for the position `pos`.
+  // Only applicable for internal pages.
+  pub fn set_ptr(&mut self, _pos: usize, _ptr: PageID) {
+    unimplemented!()
+  }
+
+  // Deletes a pointer at the position `pos`.
+  // Does not decrement length, use `delete_key` for that.
+  pub fn delete_ptr(&mut self, _pos: usize) {
+    unimplemented!()
+  }
+
   // Returns a reference to the previous page if one is set.
+  // This method is only valid for leaf pages.
   pub fn get_prev_page(&self) -> Option<PageID> {
     unimplemented!()
   }

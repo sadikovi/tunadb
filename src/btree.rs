@@ -68,9 +68,9 @@ impl<'a> BTree<'a> {
 
     let (exists, pos) = page.search(key);
     if exists {
-      set_key_value(page, pos, key, value);
+      page.set_key_value(pos, key, value);
     } else {
-      insert_key_value(page, pos, key, value);
+      page.insert_key_value(pos, key, value);
     }
   }
 
@@ -80,11 +80,11 @@ impl<'a> BTree<'a> {
     assert!(!page.is_leaf());
 
     // Update the current pointer to the new right node
-    set_ptr(page, pos, right_id);
+    page.set_ptr(pos, right_id);
     // Shift elements (keys and pointers) after pos to the right
     // Insert the new key and pointer at pos
-    insert_key(page, pos, key);
-    insert_ptr(page, pos, left_id);
+    page.insert_key(pos, key);
+    page.insert_ptr(pos, left_id);
   }
 
   // Splits the keys and values and moves the half to another page starting at pos.
@@ -94,12 +94,12 @@ impl<'a> BTree<'a> {
 
     // Move the second half into "to"
     for i in pos..from.len() {
-      insert_key_value(to, i - pos, from.get_key(i), from.get_value(i));
+      to.insert_key_value(i - pos, from.get_key(i), from.get_value(i));
     }
     // Remove those keys from "from"
     let from_len = from.len();
     for i in (pos..from_len).rev() {
-      delete_key_value(from, i);
+      from.delete_key_value(i);
     }
   }
 
@@ -110,18 +110,18 @@ impl<'a> BTree<'a> {
 
     // Internal pages do not include the separator key
     for i in pos + 1..from.len() {
-      insert_key(to, i - pos - 1, from.get_key(i));
+      to.insert_key(i - pos - 1, from.get_key(i));
     }
     // Pointers have +1 length
     for i in pos + 1..from.len() + 1 {
-      insert_ptr(to, i - pos - 1, from.get_ptr(i));
+      to.insert_ptr(i - pos - 1, from.get_ptr(i));
     }
     // Delete keys and pointers from "from"
     // Do not include the separate key at "pos"
     let from_len = from.len();
     for i in (pos..from_len).rev() {
-      delete_key(from, i);
-      delete_ptr(from, i + 1);
+      from.delete_key(i);
+      from.delete_ptr(i + 1);
     }
   }
 
@@ -130,19 +130,21 @@ impl<'a> BTree<'a> {
   fn _steal_from_left(parent: &mut Page, ptr: usize, curr: &mut Page, left: &mut Page) {
     assert_eq!(curr.is_leaf(), left.is_leaf());
 
+    let left_len = left.len();
+
     if curr.is_leaf() {
       // The key will be the smallest key in "curr"
-      insert_key_value(curr, 0, left.get_key(left.len() - 1), left.get_value(left.len() - 1));
-      set_key(parent, ptr - 1, left.get_key(left.len() - 1));
-      delete_key_value(left, left.len() - 1);
+      curr.insert_key_value(0, left.get_key(left_len - 1), left.get_value(left_len - 1));
+      parent.set_key(ptr - 1, left.get_key(left_len - 1));
+      left.delete_key_value(left_len - 1);
     } else {
       // curr[0].key is the same as the parent key for that node
       // parent[ptr - 1].key is the same as the last key in left
-      insert_key(curr, 0, parent.get_key(ptr - 1));
-      insert_ptr(curr, 0, left.get_ptr(left.len()));
-      set_key(parent, ptr - 1, left.get_key(left.len() - 1));
-      delete_ptr(left, left.len()); // does not decrement length
-      delete_key(left, left.len() - 1);
+      curr.insert_key(0, parent.get_key(ptr - 1));
+      curr.insert_ptr(0, left.get_ptr(left_len));
+      parent.set_key(ptr - 1, left.get_key(left_len - 1));
+      left.delete_key(left_len - 1);
+      left.delete_ptr(left_len); // does not decrement length
     }
   }
 
@@ -155,15 +157,15 @@ impl<'a> BTree<'a> {
 
     if curr.is_leaf() {
       // The key will be the largest key in "curr"
-      insert_key_value(curr, curr_len, right.get_key(0), right.get_value(0));
-      set_key(parent, ptr, right.get_key(1));
-      delete_key_value(right, 0);
+      curr.insert_key_value(curr_len, right.get_key(0), right.get_value(0));
+      parent.set_key(ptr, right.get_key(1));
+      right.delete_key_value(0);
     } else {
-      insert_key(curr, curr_len, parent.get_key(ptr)); // increments curr.len()
-      insert_ptr(curr, curr_len + 1, right.get_ptr(0));
-      set_key(parent, ptr, right.get_key(0));
-      delete_key(right, 0);
-      delete_ptr(right, 0);
+      curr.insert_key(curr_len, parent.get_key(ptr)); // increments curr.len()
+      curr.insert_ptr(curr_len + 1, right.get_ptr(0));
+      parent.set_key(ptr, right.get_key(0));
+      right.delete_key(0);
+      right.delete_ptr(0);
     }
   }
 
@@ -176,22 +178,22 @@ impl<'a> BTree<'a> {
 
     if left.is_leaf() {
       for i in 0..curr.len() {
-        insert_key_value(left, left_len + i, curr.get_key(i), curr.get_value(i));
+        left.insert_key_value(left_len + i, curr.get_key(i), curr.get_value(i));
       }
     } else {
-      insert_key(left, left_len, parent.get_key(ptr)); // aligns left keys with ptrs
+      left.insert_key(left_len, parent.get_key(ptr)); // aligns left keys with ptrs
       for i in 0..curr.len() {
-        insert_key(left, left_len + 1 + i, curr.get_key(i));
+        left.insert_key(left_len + 1 + i, curr.get_key(i));
       }
       for i in 0..curr.len() + 1 {
-        insert_ptr(left, left_len + 1 + i, curr.get_ptr(i));
+        left.insert_ptr(left_len + 1 + i, curr.get_ptr(i));
       }
 
       assert_eq!(left.len(), left_len + curr.len() + 1);
     }
 
-    delete_key(parent, ptr);
-    delete_ptr(parent, ptr + 1);
+    parent.delete_key(ptr);
+    parent.delete_ptr(ptr + 1);
 
     // Update prev and next pointers
     if let Some(right) = right {
@@ -290,7 +292,7 @@ impl<'a> BTree<'a> {
       return self.cache.put_page(page);
     }
 
-    delete_key_value(&mut page, i);
+    page.delete_key_value(i);
 
     // Fix the parent links because we are deleting the smallest key
     // We can only fix parent links if the next smallest key exists
@@ -301,7 +303,7 @@ impl<'a> BTree<'a> {
         let (parent_id, pos) = stack[k];
         let mut parent = self.cache.get_page(parent_id)?;
         if parent.get_key(pos) == key {
-          set_key(&mut parent, pos, next_smallest_key);
+          parent.set_key(pos, next_smallest_key);
         }
         self.cache.put_page(parent)?;
       }
@@ -393,48 +395,4 @@ impl<'a> BTree<'a> {
 
     Ok(())
   }
-}
-
-////////////////////////////////////////////////////////////////
-// Page methods
-////////////////////////////////////////////////////////////////
-
-// Does not shift elements if it is the last element
-fn insert_key(_page: &mut Page, _pos: usize, _key: &[u8]) {
-  unimplemented!()
-}
-
-// Does not shift elements if it is the last element
-fn insert_key_value(_page: &mut Page, _pos: usize, _key: &[u8], _value: &[u8]) {
-  unimplemented!()
-}
-
-// Does not shift elements if it is the last element
-fn insert_ptr(_page: &mut Page, _pos: usize, _ptr: PageID) {
-  unimplemented!()
-}
-
-fn set_key(_page: &mut Page, _pos: usize, _key: &[u8]) {
-  unimplemented!()
-}
-
-fn set_key_value(_page: &mut Page, _pos: usize, _key: &[u8], _value: &[u8]) {
-  unimplemented!()
-}
-
-fn set_ptr(_page: &mut Page, _pos: usize, _ptr: PageID) {
-  unimplemented!()
-}
-
-fn delete_key(_page: &mut Page, _pos: usize) {
-  unimplemented!()
-}
-
-// Does not shift elements if it is the last element
-fn delete_key_value(_page: &mut Page, _pos: usize) {
-  unimplemented!()
-}
-
-fn delete_ptr(_page: &mut Page, _pos: usize) {
-  unimplemented!()
 }
