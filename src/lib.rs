@@ -5,3 +5,4 @@ pub mod error;
 pub mod page;
 pub mod cache;
 pub mod btree;
+pub mod db;
