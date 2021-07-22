@@ -44,8 +44,10 @@ impl Page {
 pub trait PageManager {
   // Creates new page and returns it.
   fn new_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page>;
+  // Returns a clone of the page for the provided page id.
+  fn cln_page(&mut self, page_id: u64) -> Res<Page>;
   // Returns a page for the page id.
-  fn get_page(&mut self, page_id: u64) -> Res<Page>;
+  fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>>;
   // Updates the page.
   fn put_page(&mut self, page: Page) -> Res<()>;
   // Deletes the page for the page id.
@@ -67,14 +69,10 @@ impl BTree {
   }
 
   fn cache_clone(&self, page_id: u64) -> Res<Page> {
-    let page = self.cache_get(page_id)?;
-    let mut clone = self.cache_new(page.tpe)?;
-    page.copy(&mut clone);
-    self.cache_put(page)?;
-    Ok(clone)
+    self.cache.borrow_mut().cln_page(page_id)
   }
 
-  fn cache_get(&self, page_id: u64) -> Res<Page> {
+  fn cache_get(&self, page_id: u64) -> Res<Rc<Page>> {
     self.cache.borrow_mut().get_page(page_id)
   }
 
@@ -103,6 +101,21 @@ fn bsearch(keys: &[Vec<u8>], key: &[u8]) -> (bool, usize) {
     }
   }
   (false, start)
+}
+
+// Returns Some(value) for an existing key.
+// If the key does not exist, returns None.
+pub fn get(btree: &BTree, key: &[u8]) -> Res<Option<Vec<u8>>> {
+  let mut curr_id = btree.root_page_id;
+  loop {
+    let page = btree.cache_get(curr_id)?;
+    let (exists, pos) = bsearch(&page.keys[..], key);
+    if page.is_leaf() {
+      return if exists { Ok(Some(page.vals[pos].clone())) } else { Ok(None) };
+    } else {
+      curr_id = if exists { page.ptrs[pos + 1] } else { page.ptrs[pos] };
+    }
+  }
 }
 
 // Puts key and value into the btree.
