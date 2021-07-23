@@ -160,7 +160,7 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
     if exists {
       // Update
       let page_id = page.id;
-      page.keys[pos] = value.to_vec();
+      page.vals[pos] = value.to_vec();
       btree.cache_put(page)?;
       PutResult::Update(page_id)
     } else if page.num_keys() < page.capacity() {
@@ -256,4 +256,209 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
   };
 
   Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::fmt;
+
+  fn display(f: &mut fmt::Formatter<'_>, btree: &BTree, page_id: u64, pad: usize) -> fmt::Result {
+    let page = btree.cache_get(page_id).unwrap();
+    let shift = " ".repeat(pad);
+    if page.is_leaf() {
+      writeln!(f, "{}* ({}) keys: {}", shift, page_id, page.keys.len())?;
+      for i in 0..page.num_keys() {
+        writeln!(f, "{}    k: {:?}, v: {:?}", shift, &page.keys[i], &page.vals[i])?;
+      }
+    } else {
+      writeln!(f, "{}+ ({}) keys: {}", shift, page_id, page.keys.len())?;
+      for i in 0..page.num_keys() + 1 {
+        if i == 0 {
+          writeln!(f, "{} < {:?}", shift, page.keys[0])?;
+        } else {
+          writeln!(f, "{} >= {:?}", shift, page.keys[i - 1])?;
+        }
+        display(f, btree, page.ptrs[i], pad + 4)?;
+
+      }
+    }
+    Ok(())
+  }
+
+  impl fmt::Display for BTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      display(f, self, self.root_page_id, 0)
+    }
+  }
+
+  struct TestPageManager {
+    pages: Vec<Option<Rc<Page>>>,
+  }
+
+  impl PageManager for TestPageManager {
+    fn new_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page> {
+      let page = Page {
+        id: self.pages.len() as u64,
+        tpe: page_type,
+        prev: None,
+        next: None,
+        capacity: page_size,
+        keys: Vec::new(),
+        vals: Vec::new(),
+        ptrs: Vec::new(),
+      };
+      self.pages.push(None);
+      Ok(page)
+    }
+
+    fn cln_page(&mut self, page_id: u64) -> Res<Page> {
+      let page_ref = self.get_page(page_id)?;
+      let page = Page {
+        id: self.pages.len() as u64,
+        tpe: page_ref.tpe,
+        prev: page_ref.prev,
+        next: page_ref.next,
+        capacity: page_ref.capacity,
+        keys: page_ref.keys.clone(),
+        vals: page_ref.vals.clone(),
+        ptrs: page_ref.ptrs.clone(),
+      };
+      self.pages.push(None);
+      Ok(page)
+    }
+
+    fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>> {
+      Ok(self.pages[page_id as usize].as_ref().expect(&format!("Page {} not found", page_id)).clone())
+    }
+
+    fn put_page(&mut self, page: Page) -> Res<()> {
+      let page_id = page.id;
+      self.pages[page_id as usize] = Some(Rc::new(page));
+      Ok(())
+    }
+
+    fn del_page(&mut self, page_id: u64) -> Res<()> {
+      self.pages[page_id as usize] = None;
+      Ok(())
+    }
+  }
+
+  fn new_btree(max_keys_per_page: usize) -> (BTree, Rc<RefCell<TestPageManager>>) {
+    let mut cache = TestPageManager { pages: Vec::new() };
+    let page = cache.new_page(PageType::Leaf, max_keys_per_page).unwrap();
+    let page_id = page.id;
+    cache.put_page(page).unwrap();
+
+    let cache_ref = Rc::new(RefCell::new(cache));
+    let tree = BTree {
+      cache: cache_ref.clone(),
+      root_page_id: page_id,
+      page_size: max_keys_per_page
+    };
+
+    (tree, cache_ref)
+  }
+
+  fn assert_page_consistency(cache: &RefCell<TestPageManager>) {
+    for page in &cache.borrow().pages[..] {
+      assert!(page.is_some(), "Page was borrowed but not returned");
+    }
+  }
+
+  fn assert_num_pages(cache: &RefCell<TestPageManager>, expected: usize) {
+    assert_eq!(cache.borrow().pages.len(), expected);
+  }
+
+  fn get_page(cache: &RefCell<TestPageManager>, id: u64) -> Rc<Page> {
+    cache.borrow_mut().get_page(id).unwrap()
+  }
+
+  #[test]
+  fn test_btree_put_insert_empty() {
+    let (mut tree, cache) = new_btree(5);
+    put(&mut tree, &[1], &[10]).unwrap();
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 2);
+
+    assert_eq!(get_page(&cache, 0).keys.len(), 0);
+    assert_eq!(get_page(&cache, 0).vals.len(), 0);
+    assert_eq!(get_page(&cache, 1).keys, &[vec![1]]);
+    assert_eq!(get_page(&cache, 1).vals, &[vec![10]]);
+  }
+
+  #[test]
+  fn test_btree_put_update() {
+    let (mut tree, cache) = new_btree(5);
+    tree = put(&mut tree, &[1], &[10]).unwrap();
+    tree = put(&mut tree, &[1], &[20]).unwrap();
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 3);
+
+    assert_eq!(get_page(&cache, 1).keys, &[vec![1]]);
+    assert_eq!(get_page(&cache, 1).vals, &[vec![10]]);
+    assert_eq!(get_page(&cache, 2).keys, &[vec![1]]);
+    assert_eq!(get_page(&cache, 2).vals, &[vec![20]]);
+  }
+
+  #[test]
+  fn test_btree_put_insert_capacity() {
+    let (mut tree, cache) = new_btree(3);
+    tree = put(&mut tree, &[1], &[10]).unwrap();
+    tree = put(&mut tree, &[2], &[20]).unwrap();
+    tree = put(&mut tree, &[3], &[30]).unwrap();
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 4);
+
+    assert_eq!(get_page(&cache, tree.root_page_id).keys, &[vec![1], vec![2], vec![3]]);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals, &[vec![10], vec![20], vec![30]]);
+  }
+
+  #[test]
+  fn test_btree_put_insert_leaf_split() {
+    let (mut tree, cache) = new_btree(3);
+    tree = put(&mut tree, &[1], &[10]).unwrap();
+    tree = put(&mut tree, &[2], &[20]).unwrap();
+    tree = put(&mut tree, &[3], &[30]).unwrap();
+    tree = put(&mut tree, &[4], &[40]).unwrap();
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 7);
+
+    assert_eq!(get_page(&cache, tree.root_page_id).keys, &[vec![3]]);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).ptrs, &[4, 5]);
+
+    assert_eq!(get_page(&cache, 4).keys, &[vec![1], vec![2]]);
+    assert_eq!(get_page(&cache, 4).vals, &[vec![10], vec![20]]);
+
+    assert_eq!(get_page(&cache, 5).keys, &[vec![3], vec![4]]);
+    assert_eq!(get_page(&cache, 5).vals, &[vec![30], vec![40]]);
+  }
+
+  #[test]
+  fn test_btree_put_insert_internal_split() {
+    let (mut tree, cache) = new_btree(3);
+    for i in 0..10 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 26);
+
+    assert_eq!(get_page(&cache, tree.root_page_id).keys, &[vec![6]]);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).ptrs, &[14, 23]);
+
+    assert_eq!(get_page(&cache, 14).keys, &[vec![2], vec![4]]);
+    assert_eq!(get_page(&cache, 14).vals.len(), 0);
+    assert_eq!(get_page(&cache, 14).ptrs, &[4, 10, 15]);
+
+    assert_eq!(get_page(&cache, 23).keys, &[vec![8]]);
+    assert_eq!(get_page(&cache, 23).vals.len(), 0);
+    assert_eq!(get_page(&cache, 23).ptrs, &[24, 25]);
+  }
 }
