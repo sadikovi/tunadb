@@ -14,7 +14,6 @@ pub struct Page {
   tpe: PageType, // type of the page
   prev: Option<u64>, // optional ptr to the previous page
   next: Option<u64>, // optional ptr to the next page
-  capacity: usize, // max number of keys in the page
   keys: Vec<Vec<u8>>,
   vals: Vec<Vec<u8>>,
   ptrs: Vec<u64>,
@@ -27,10 +26,6 @@ impl Page {
 
   pub fn num_keys(&self) -> usize {
     self.keys.len()
-  }
-
-  pub fn capacity(&self) -> usize {
-    self.capacity
   }
 
   // Copies the content of this page into the new page except page id
@@ -59,6 +54,8 @@ pub struct BTree {
   cache: Rc<RefCell<dyn PageManager>>, // shared mutability for the cache
   root_page_id: u64, // page id that BTree starts with
   page_size: usize,
+  min_keys: usize,
+  max_keys: usize,
 }
 
 impl BTree {
@@ -140,7 +137,13 @@ pub fn put(btree: &mut BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
       page_id
     },
   };
-  Ok(BTree { cache: btree.cache.clone(), root_page_id: new_root, page_size: btree.page_size })
+  Ok(BTree {
+    cache: btree.cache.clone(),
+    root_page_id: new_root,
+    page_size: btree.page_size,
+    min_keys: btree.min_keys,
+    max_keys: btree.max_keys,
+  })
 }
 
 enum PutResult {
@@ -163,7 +166,7 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
       page.vals[pos] = value.to_vec();
       btree.cache_put(page)?;
       PutResult::Update(page_id)
-    } else if page.num_keys() < page.capacity() {
+    } else if page.num_keys() < btree.max_keys {
       // Direct insert
       let page_id = page.id;
       page.keys.insert(pos, key.to_vec());
@@ -208,11 +211,10 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
       PutResult::Split(left_id, right_id, skey)
     }
   } else {
-    let ptr_pos = if exists { pos + 1 } else { pos };
-    let child_page_id = page.ptrs[ptr_pos];
-    match recur_put(btree, child_page_id, key, value)? {
+    let ptr = if exists { pos + 1 } else { pos };
+    match recur_put(btree, page.ptrs[ptr], key, value)? {
       PutResult::Update(page_id) => {
-        page.ptrs[ptr_pos] = page_id;
+        page.ptrs[ptr] = page_id;
         let page_id = page.id;
         btree.cache_put(page)?;
         PutResult::Update(page_id)
@@ -223,7 +225,7 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
         page.keys.insert(pos, skey);
         page.ptrs.insert(pos, left_id);
 
-        if page.num_keys() < page.capacity() {
+        if page.num_keys() < btree.max_keys {
           // Direct insert
           let page_id = page.id;
           btree.cache_put(page)?;
@@ -256,6 +258,88 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
   };
 
   Ok(res)
+}
+
+// Deletes a key in the btree.
+// If the key does not exist, we still return a modified tree
+// TODO: optimise this case
+pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
+  let res = recur_del(btree, btree.root_page_id, key);
+  unimplemented!()
+}
+
+enum DeleteResult {
+  // Delete a key and update smallest (page, next_smallest_key)
+  Update(Page, Option<Vec<u8>>),
+}
+
+fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
+  // Clone the page since it will be modified anyway
+  let mut page = btree.cache_clone(curr_id)?;
+  // Perform search to find the position of the key and whether or not it exists
+  let (exists, pos) = bsearch(&page.keys[..], key);
+
+  // Repair requires three nodes: parent and 2 child nodes
+  // We do it at the internal node level
+
+  let res = if page.is_leaf() {
+    let mut next_smallest_key = None;
+
+    if exists {
+      // Delete an existing key
+      page.keys.remove(pos);
+      page.vals.remove(pos);
+
+      // We are deleting the smallest key, update parents to the next smallest
+      next_smallest_key = if pos == 0 && page.num_keys() > 0 {
+        Some(page.keys[0].clone())
+      } else {
+        None
+      };
+    }
+
+    DeleteResult::Update(page, next_smallest_key)
+  } else {
+    let ptr = if exists { pos + 1 } else { pos };
+    match recur_del(btree, page.ptrs[ptr], key)? {
+      DeleteResult::Update(mut child, next_smallest_key) => {
+        page.ptrs[ptr] = child.id;
+        if let Some(smallest_key) = next_smallest_key.clone() {
+          page.keys[pos] = smallest_key;
+        }
+
+        if child.num_keys() < btree.min_keys {
+          if ptr > 0 && btree.cache_get(page.ptrs[ptr - 1])?.num_keys() > btree.min_keys {
+            // Steal from the left
+            let mut left = btree.cache_clone(page.ptrs[ptr - 1])?;
+            steal_from_left(&mut page, &mut left, &mut child);
+            btree.cache_put(left)?;
+          } else if ptr < page.num_keys() && btree.cache_get(page.ptrs[ptr + 1])?.num_keys() > btree.min_keys {
+            // Steal from the right
+            let mut right = btree.cache_clone(page.ptrs[ptr + 1])?;
+            steal_from_right(&mut page, &mut child, &mut right);
+            btree.cache_put(right)?;
+          } else if ptr == 0 {
+            // Merge with the right sibling
+          } else {
+            // Merge with the left sibling
+          }
+        }
+
+        // We are done modifying the child
+        btree.cache_put(child)?;
+        DeleteResult::Update(page, next_smallest_key)
+      },
+    }
+  };
+
+  Ok(res)
+}
+
+fn steal_from_left(parent: &mut Page, left: &mut Page, curr: &mut Page) {
+}
+
+fn steal_from_right(parent: &mut Page, curr: &mut Page, right: &mut Page) {
 }
 
 #[cfg(test)]
@@ -303,7 +387,6 @@ mod tests {
         tpe: page_type,
         prev: None,
         next: None,
-        capacity: page_size,
         keys: Vec::new(),
         vals: Vec::new(),
         ptrs: Vec::new(),
@@ -319,7 +402,6 @@ mod tests {
         tpe: page_ref.tpe,
         prev: page_ref.prev,
         next: page_ref.next,
-        capacity: page_ref.capacity,
         keys: page_ref.keys.clone(),
         vals: page_ref.vals.clone(),
         ptrs: page_ref.ptrs.clone(),
@@ -354,7 +436,9 @@ mod tests {
     let tree = BTree {
       cache: cache_ref.clone(),
       root_page_id: page_id,
-      page_size: max_keys_per_page
+      page_size: max_keys_per_page,
+      min_keys: max_keys_per_page / 2,
+      max_keys: max_keys_per_page,
     };
 
     (tree, cache_ref)
