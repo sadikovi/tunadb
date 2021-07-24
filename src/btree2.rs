@@ -27,12 +27,6 @@ impl Page {
   pub fn num_keys(&self) -> usize {
     self.keys.len()
   }
-
-  // Copies the content of this page into the new page except page id
-  pub fn copy(&self, page: &mut Page) {
-    // TODO: check if page type is the same
-    unimplemented!();
-  }
 }
 
 // Page manager that maintains pages on disk or in memory.
@@ -45,8 +39,6 @@ pub trait PageManager {
   fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>>;
   // Updates the page.
   fn put_page(&mut self, page: Page) -> Res<()>;
-  // Deletes the page for the page id.
-  fn del_page(&mut self, page_id: u64) -> Res<()>;
 }
 
 // A simple B+tree implementation
@@ -75,10 +67,6 @@ impl BTree {
 
   fn cache_put(&self, page: Page) -> Res<()> {
     self.cache.borrow_mut().put_page(page)
-  }
-
-  fn cache_del(&self, page_id: u64) -> Res<()> {
-    self.cache.borrow_mut().del_page(page_id)
   }
 }
 
@@ -175,8 +163,10 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
       PutResult::Update(page_id)
     } else {
       // Split + Insert
-      let spos = page.num_keys() / 2 + 1; // split point
-      let skey = page.keys[spos].clone(); // split key to propagate to the parent
+      let spos = page.num_keys() / 2 + (page.num_keys() & 1); // split point
+      // Split key to propagate to the parent
+      // If the key is inserted into split position, it becomes the split key
+      let skey = if pos == spos { key.to_vec() } else { page.keys[spos].clone() };
 
       let mut right_page = btree.cache_new(page.tpe)?;
       for i in spos..page.num_keys() {
@@ -261,7 +251,8 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
 }
 
 // Deletes a key in the btree.
-// If the key does not exist, we still return a modified tree
+//
+// If the key does not exist, we still return a modified tree.
 // TODO: optimise this case
 pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
   match recur_del(btree, btree.root_page_id, key)? {
@@ -291,33 +282,26 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
   // Perform search to find the position of the key and whether or not it exists
   let (exists, pos) = bsearch(&page.keys[..], key);
 
-  // Repair requires three nodes: parent and 2 child nodes
-  // We do it at the internal node level
-
   let res = if page.is_leaf() {
     let mut next_smallest_key = None;
-
     if exists {
       // Delete an existing key
       page.keys.remove(pos);
       page.vals.remove(pos);
-
       // We are deleting the smallest key, update parents to the next smallest
-      next_smallest_key = if pos == 0 && page.num_keys() > 0 {
-        Some(page.keys[0].clone())
-      } else {
-        None
-      };
+      if pos == 0 && page.num_keys() > 0 {
+        next_smallest_key = Some(page.keys[0].clone())
+      }
     }
-
     DeleteResult::Update(page, next_smallest_key)
   } else {
     let ptr = if exists { pos + 1 } else { pos };
     match recur_del(btree, page.ptrs[ptr], key)? {
       DeleteResult::Update(mut child, next_smallest_key) => {
         page.ptrs[ptr] = child.id;
-        if let Some(smallest_key) = next_smallest_key.clone() {
-          if page.keys[pos] == smallest_key {
+
+        if exists && page.keys[pos] == key {
+          if let Some(smallest_key) = next_smallest_key.clone() {
             page.keys[pos] = smallest_key;
           }
         }
@@ -393,7 +377,7 @@ fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut 
     let first_key = right.keys.remove(0);
     let first_ptr = right.ptrs.remove(0);
 
-    curr.keys.push(parent.keys[ptr - 1].clone());
+    curr.keys.push(parent.keys[ptr].clone());
     curr.ptrs.push(first_ptr);
     parent.keys[ptr] = first_key;
   }
@@ -437,6 +421,7 @@ fn merge_right(btree: &mut BTree, parent: &mut Page, ptr: usize, curr: &mut Page
 mod tests {
   use super::*;
   use std::fmt;
+  use rand::prelude::*;
 
   fn display(f: &mut fmt::Formatter<'_>, btree: &BTree, page_id: u64, pad: usize) -> fmt::Result {
     let page = btree.cache_get(page_id).unwrap();
@@ -471,7 +456,7 @@ mod tests {
   }
 
   impl PageManager for TestPageManager {
-    fn new_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page> {
+    fn new_page(&mut self, page_type: PageType, _page_size: usize) -> Res<Page> {
       let page = Page {
         id: self.pages.len() as u64,
         tpe: page_type,
@@ -507,11 +492,6 @@ mod tests {
     fn put_page(&mut self, page: Page) -> Res<()> {
       let page_id = page.id;
       self.pages[page_id as usize] = Some(Rc::new(page));
-      Ok(())
-    }
-
-    fn del_page(&mut self, page_id: u64) -> Res<()> {
-      self.pages[page_id as usize] = None;
       Ok(())
     }
   }
@@ -566,7 +546,7 @@ mod tests {
   fn test_btree_put_update() {
     let (mut tree, cache) = new_btree(5);
     tree = put(&mut tree, &[1], &[10]).unwrap();
-    tree = put(&mut tree, &[1], &[20]).unwrap();
+    put(&mut tree, &[1], &[20]).unwrap();
 
     assert_page_consistency(&cache);
     assert_num_pages(&cache, 3);
@@ -717,8 +697,29 @@ mod tests {
   }
 
   #[test]
+  fn test_btree_del_split_key() {
+    // Regression test to check that we update next smallest key correctly.
+    // When deleting [3], the internal page key needs to be updated to [4]
+    // and the subsequent delete of [4] does not cause "index out of bound" error.
+    let (mut tree, cache) = new_btree(4);
+    tree = put(&mut tree, &[1], &[1]).unwrap();
+    tree = put(&mut tree, &[2], &[2]).unwrap();
+    tree = put(&mut tree, &[3], &[3]).unwrap();
+    tree = put(&mut tree, &[4], &[4]).unwrap();
+    tree = put(&mut tree, &[5], &[5]).unwrap();
+    tree = put(&mut tree, &[6], &[6]).unwrap();
+
+    tree = del(&mut tree, &[3]).unwrap();
+    tree = del(&mut tree, &[4]).unwrap();
+
+    assert_page_consistency(&cache);
+    assert_eq!(get(&tree, &[3]).unwrap(), None);
+    assert_eq!(get(&tree, &[4]).unwrap(), None);
+  }
+
+  #[test]
   fn test_btree_get_existent_key() {
-    let (mut tree, cache) = new_btree(5);
+    let (mut tree, _) = new_btree(5);
     for i in 0..20 {
       tree = put(&mut tree, &[i], &[i * 10]).unwrap();
     }
@@ -732,7 +733,7 @@ mod tests {
 
   #[test]
   fn test_btree_get_non_existent_key() {
-    let (mut tree, cache) = new_btree(5);
+    let (mut tree, _) = new_btree(5);
     for i in 0..20 {
       tree = put(&mut tree, &[i], &[i * 10]).unwrap();
     }
@@ -741,6 +742,117 @@ mod tests {
     }
     for i in (20..40).rev() {
       assert_eq!(get(&tree, &[i]).unwrap(), None);
+    }
+  }
+
+  #[test]
+  fn test_btree_put_get_split_key() {
+    // Regression test for the issue when the inserted key falls into split position
+    let (mut tree, _) = new_btree(6);
+    tree = put(&mut tree, &[1], &[1]).unwrap();
+    tree = put(&mut tree, &[2], &[2]).unwrap();
+    tree = put(&mut tree, &[3], &[3]).unwrap();
+    tree = put(&mut tree, &[4], &[4]).unwrap();
+    tree = put(&mut tree, &[8], &[8]).unwrap();
+    tree = put(&mut tree, &[9], &[9]).unwrap();
+
+    // This insert results in split
+    tree = put(&mut tree, &[5], &[5]).unwrap();
+
+    assert_eq!(get(&tree, &[5]).unwrap(), Some(vec![5]));
+  }
+
+  // BTree fuzz testing
+
+  // A sequence of random byte keys that may contain duplicate values
+  fn random_byte_key_seq(len: usize) -> Vec<Vec<u8>> {
+    let mut rng = thread_rng();
+    let mut input = Vec::with_capacity(len);
+    for _ in 0..len {
+      input.push(rng.gen::<[u8; 10]>().to_vec());
+    }
+    input
+  }
+
+  // A sequence of unique integer values that are shuffled
+  fn random_unique_key_seq(len: usize) -> Vec<Vec<u8>> {
+    let mut input = Vec::with_capacity(len);
+    for i in 0..len {
+      input.push((i as u64).to_be_bytes().to_vec());
+    }
+    shuffle(&mut input);
+    input
+  }
+
+  fn shuffle(input: &mut Vec<Vec<u8>>) {
+    input.shuffle(&mut thread_rng());
+  }
+
+  fn assert_find(btree: &BTree, keys: &[Vec<u8>], assert_match: bool) {
+    for key in keys {
+      let res = get(btree, key).unwrap();
+      if assert_match && res != Some(key.to_vec()) {
+        assert!(false, "Failed to find {:?}", key);
+      } else if !assert_match && res == Some(key.to_vec()) {
+        assert!(false, "Failed, the key {:?} existed", key);
+      }
+    }
+  }
+
+  #[test]
+  fn test_fuzz_unique_put_get_del() {
+    let mut input = random_unique_key_seq(200);
+
+    for &max_keys in &[10, 11] {
+      shuffle(&mut input);
+
+      println!("Input: {:?}, max keys: {}", input, max_keys);
+
+      let (mut tree, cache) = new_btree(max_keys);
+      for i in 0..input.len() {
+        tree = put(&mut tree, &input[i], &input[i]).unwrap();
+        assert_find(&tree, &input[0..i + 1], true);
+        assert_find(&tree, &input[i + 1..], false);
+      }
+
+      shuffle(&mut input);
+      for i in 0..input.len() {
+        assert_find(&tree, &[input[i].clone()], true);
+        tree = del(&mut tree, &input[i]).unwrap();
+        assert_find(&tree, &[input[i].clone()], false);
+      }
+
+      assert_page_consistency(&cache);
+      assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+    }
+  }
+
+  #[test]
+  fn test_fuzz_byte_put_get_del() {
+    let mut input = random_byte_key_seq(200);
+
+    for &max_keys in &[10, 11] {
+      shuffle(&mut input);
+
+      println!("Input: {:?}, max keys: {}", input, max_keys);
+
+      let (mut tree, cache) = new_btree(max_keys);
+      for i in 0..input.len() {
+        tree = put(&mut tree, &input[i], &input[i]).unwrap();
+      }
+
+      shuffle(&mut input);
+
+      for i in 0..input.len() {
+        assert!(get(&tree, &input[i]).unwrap().is_some());
+      }
+
+      for i in 0..input.len() {
+        tree = del(&mut tree, &input[i]).unwrap();
+      }
+
+      assert_page_consistency(&cache);
+      assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
     }
   }
 }
