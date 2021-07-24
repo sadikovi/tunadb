@@ -317,7 +317,7 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
       DeleteResult::Update(mut child, next_smallest_key) => {
         page.ptrs[ptr] = child.id;
         if let Some(smallest_key) = next_smallest_key.clone() {
-          if &page.keys[pos] == &smallest_key {
+          if page.keys[pos] == smallest_key {
             page.keys[pos] = smallest_key;
           }
         }
@@ -423,7 +423,7 @@ fn merge_right(btree: &mut BTree, parent: &mut Page, ptr: usize, curr: &mut Page
       curr.keys.push(right.keys[i].clone());
     }
     for i in 0..right.num_keys() + 1 {
-      curr.ptrs.push(right.ptrs[i].clone());
+      curr.ptrs.push(right.ptrs[i]);
     }
   }
 

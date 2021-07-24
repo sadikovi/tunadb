@@ -14,7 +14,7 @@ impl Error {
 
 impl From<String> for Error {
   fn from(msg: String) -> Self {
-    Self { msg: msg }
+    Self { msg }
   }
 }
 
