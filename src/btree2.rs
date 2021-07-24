@@ -264,8 +264,20 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
 // If the key does not exist, we still return a modified tree
 // TODO: optimise this case
 pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
-  let res = recur_del(btree, btree.root_page_id, key);
-  unimplemented!()
+  match recur_del(btree, btree.root_page_id, key)? {
+    DeleteResult::Update(page, ..) => {
+      let page_id = if !page.is_leaf() && page.num_keys() == 0 { page.ptrs[0] } else { page.id };
+      btree.cache_put(page)?;
+
+      Ok(BTree {
+        cache: btree.cache.clone(),
+        root_page_id: page_id,
+        page_size: btree.page_size,
+        min_keys: btree.min_keys,
+        max_keys: btree.max_keys,
+      })
+    }
+  }
 }
 
 enum DeleteResult {
@@ -305,29 +317,39 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
       DeleteResult::Update(mut child, next_smallest_key) => {
         page.ptrs[ptr] = child.id;
         if let Some(smallest_key) = next_smallest_key.clone() {
-          page.keys[pos] = smallest_key;
+          if &page.keys[pos] == &smallest_key {
+            page.keys[pos] = smallest_key;
+          }
         }
 
         if child.num_keys() < btree.min_keys {
           if ptr > 0 && btree.cache_get(page.ptrs[ptr - 1])?.num_keys() > btree.min_keys {
             // Steal from the left
             let mut left = btree.cache_clone(page.ptrs[ptr - 1])?;
-            steal_from_left(&mut page, &mut left, &mut child);
+            page.ptrs[ptr - 1] = left.id;
+            steal_from_left(&mut page, ptr, &mut left, &mut child);
             btree.cache_put(left)?;
           } else if ptr < page.num_keys() && btree.cache_get(page.ptrs[ptr + 1])?.num_keys() > btree.min_keys {
             // Steal from the right
             let mut right = btree.cache_clone(page.ptrs[ptr + 1])?;
-            steal_from_right(&mut page, &mut child, &mut right);
+            page.ptrs[ptr + 1] = right.id;
+            steal_from_right(&mut page, ptr, &mut child, &mut right);
             btree.cache_put(right)?;
           } else if ptr == 0 {
             // Merge with the right sibling
+            let right = btree.cache_get(page.ptrs[ptr + 1])?;
+            merge_right(btree, &mut page, ptr, &mut child, &right)?;
           } else {
             // Merge with the left sibling
+            let mut left = btree.cache_clone(page.ptrs[ptr - 1])?;
+            page.ptrs[ptr - 1] = left.id;
+            merge_right(btree, &mut page, ptr - 1, &mut left, &child)?;
+            btree.cache_put(left)?;
           }
         }
-
         // We are done modifying the child
         btree.cache_put(child)?;
+
         DeleteResult::Update(page, next_smallest_key)
       },
     }
@@ -336,10 +358,79 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
   Ok(res)
 }
 
-fn steal_from_left(parent: &mut Page, left: &mut Page, curr: &mut Page) {
+fn steal_from_left(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Page) {
+  assert_eq!(left.is_leaf(), curr.is_leaf());
+
+  let num_keys = left.num_keys();
+  if curr.is_leaf() {
+    let last_key = left.keys.remove(num_keys - 1);
+    let last_val = left.vals.remove(num_keys - 1);
+
+    parent.keys[ptr - 1] = last_key.clone();
+    curr.keys.insert(0, last_key);
+    curr.vals.insert(0, last_val);
+  } else {
+    let last_key = left.keys.remove(num_keys - 1);
+    let last_ptr = left.ptrs.remove(num_keys);
+
+    curr.keys.insert(0, parent.keys[ptr - 1].clone());
+    curr.ptrs.insert(0, last_ptr);
+    parent.keys[ptr - 1] = last_key;
+  }
 }
 
-fn steal_from_right(parent: &mut Page, curr: &mut Page, right: &mut Page) {
+fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut Page) {
+  assert_eq!(curr.is_leaf(), right.is_leaf());
+
+  if curr.is_leaf() {
+    let first_key = right.keys.remove(0);
+    let first_val = right.vals.remove(0);
+
+    curr.keys.push(first_key);
+    curr.vals.push(first_val);
+    parent.keys[ptr] = right.keys[0].clone();
+  } else {
+    let first_key = right.keys.remove(0);
+    let first_ptr = right.ptrs.remove(0);
+
+    curr.keys.push(parent.keys[ptr - 1].clone());
+    curr.ptrs.push(first_ptr);
+    parent.keys[ptr] = first_key;
+  }
+}
+
+// Merge right into curr
+fn merge_right(btree: &mut BTree, parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) -> Res<()> {
+  assert_eq!(curr.is_leaf(), right.is_leaf());
+
+  if curr.is_leaf() {
+    for i in 0..right.num_keys() {
+      curr.keys.push(right.keys[i].clone());
+      curr.vals.push(right.vals[i].clone());
+    }
+    // Update prev/next pointers
+
+    curr.next = right.next;
+    if let Some(right_id) = right.next {
+      let mut right_next = btree.cache_clone(right_id)?;
+      right_next.prev = Some(curr.id);
+      btree.cache_put(right_next)?;
+    }
+  } else {
+    curr.keys.push(parent.keys[ptr].clone());
+
+    for i in 0..right.num_keys() {
+      curr.keys.push(right.keys[i].clone());
+    }
+    for i in 0..right.num_keys() + 1 {
+      curr.ptrs.push(right.ptrs[i].clone());
+    }
+  }
+
+  parent.keys.remove(ptr);
+  parent.ptrs.remove(ptr + 1);
+
+  Ok(())
 }
 
 #[cfg(test)]
@@ -357,14 +448,13 @@ mod tests {
       }
     } else {
       writeln!(f, "{}+ ({}) keys: {}", shift, page_id, page.keys.len())?;
-      for i in 0..page.num_keys() + 1 {
-        if i == 0 {
-          writeln!(f, "{} < {:?}", shift, page.keys[0])?;
-        } else {
-          writeln!(f, "{} >= {:?}", shift, page.keys[i - 1])?;
+      for i in 1..page.num_keys() + 1 {
+        if i == 1 {
+          writeln!(f, "{} < {:?}", shift, page.keys[i - 1])?;
+          display(f, btree, page.ptrs[0], pad + 4)?;
         }
+        writeln!(f, "{} >= {:?}", shift, page.keys[i - 1])?;
         display(f, btree, page.ptrs[i], pad + 4)?;
-
       }
     }
     Ok(())
@@ -544,5 +634,113 @@ mod tests {
     assert_eq!(get_page(&cache, 23).keys, &[vec![8]]);
     assert_eq!(get_page(&cache, 23).vals.len(), 0);
     assert_eq!(get_page(&cache, 23).ptrs, &[24, 25]);
+  }
+
+  #[test]
+  fn test_btree_del_leaf_non_existent() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..3 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in 4..10 {
+      tree = del(&mut tree, &[i]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 10);
+    assert_eq!(get_page(&cache, tree.root_page_id).keys, &[vec![0], vec![1], vec![2]]);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals, &[vec![0], vec![10], vec![20]]);
+  }
+
+  #[test]
+  fn test_btree_del_leaf_asc() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..5 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in 0..5 {
+      tree = del(&mut tree, &[i]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 11);
+    assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+  }
+
+  #[test]
+  fn test_btree_del_leaf_desc() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..5 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in (0..5).rev() {
+      tree = del(&mut tree, &[i]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 11);
+    assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+  }
+
+  #[test]
+  fn test_btree_del_internal_asc() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..10 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in 0..10 {
+      tree = del(&mut tree, &[i]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 39);
+    assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+  }
+
+  #[test]
+  fn test_btree_del_internal_desc() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..10 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in (0..10).rev() {
+      tree = del(&mut tree, &[i]).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+    assert_num_pages(&cache, 39);
+    assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+    assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
+  }
+
+  #[test]
+  fn test_btree_get_existent_key() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..20 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in 0..20 {
+      assert_eq!(get(&tree, &[i]).unwrap(), Some(vec![i * 10]));
+    }
+    for i in (0..20).rev() {
+      assert_eq!(get(&tree, &[i]).unwrap(), Some(vec![i * 10]));
+    }
+  }
+
+  #[test]
+  fn test_btree_get_non_existent_key() {
+    let (mut tree, cache) = new_btree(5);
+    for i in 0..20 {
+      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+    }
+    for i in 20..40 {
+      assert_eq!(get(&tree, &[i]).unwrap(), None);
+    }
+    for i in (20..40).rev() {
+      assert_eq!(get(&tree, &[i]).unwrap(), None);
+    }
   }
 }
