@@ -12,8 +12,6 @@ pub enum PageType {
 pub struct Page {
   id: u64, // unique page id
   tpe: PageType, // type of the page
-  prev: Option<u64>, // optional ptr to the previous page
-  next: Option<u64>, // optional ptr to the next page
   keys: Vec<Vec<u8>>,
   vals: Vec<Vec<u8>>,
   ptrs: Vec<u64>,
@@ -184,16 +182,6 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
         page.vals.insert(pos, value.to_vec());
       }
 
-      // Update prev/next pointers for the set of pages
-      if let Some(page_id) = page.next {
-        let mut next_page = btree.cache_clone(page_id)?;
-        next_page.prev = Some(right_page.id);
-        btree.cache_put(next_page)?;
-      }
-      right_page.next = page.next;
-      right_page.prev = Some(page.id);
-      page.next = Some(right_page.id);
-
       let left_id = page.id;
       let right_id = right_page.id;
       btree.cache_put(page)?;
@@ -322,12 +310,12 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
           } else if ptr == 0 {
             // Merge with the right sibling
             let right = btree.cache_get(page.ptrs[ptr + 1])?;
-            merge_right(btree, &mut page, ptr, &mut child, &right)?;
+            merge_right(&mut page, ptr, &mut child, &right)?;
           } else {
             // Merge with the left sibling
             let mut left = btree.cache_clone(page.ptrs[ptr - 1])?;
             page.ptrs[ptr - 1] = left.id;
-            merge_right(btree, &mut page, ptr - 1, &mut left, &child)?;
+            merge_right(&mut page, ptr - 1, &mut left, &child)?;
             btree.cache_put(left)?;
           }
         }
@@ -384,21 +372,13 @@ fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut 
 }
 
 // Merge right into curr
-fn merge_right(btree: &mut BTree, parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) -> Res<()> {
+fn merge_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) -> Res<()> {
   assert_eq!(curr.is_leaf(), right.is_leaf());
 
   if curr.is_leaf() {
     for i in 0..right.num_keys() {
       curr.keys.push(right.keys[i].clone());
       curr.vals.push(right.vals[i].clone());
-    }
-    // Update prev/next pointers
-
-    curr.next = right.next;
-    if let Some(right_id) = right.next {
-      let mut right_next = btree.cache_clone(right_id)?;
-      right_next.prev = Some(curr.id);
-      btree.cache_put(right_next)?;
     }
   } else {
     curr.keys.push(parent.keys[ptr].clone());
@@ -423,31 +403,38 @@ mod tests {
   use std::fmt;
   use rand::prelude::*;
 
-  fn display(f: &mut fmt::Formatter<'_>, btree: &BTree, page_id: u64, pad: usize) -> fmt::Result {
+  fn display(f: &mut fmt::Formatter<'_>, btree: &BTree, page_id: u64, prefix: &mut String) -> fmt::Result {
     let page = btree.cache_get(page_id).unwrap();
-    let shift = " ".repeat(pad);
+    prefix.push(' ');
     if page.is_leaf() {
-      writeln!(f, "{}* ({}) keys: {}", shift, page_id, page.keys.len())?;
+      writeln!(f, "{}LEAF ({}) keys: {}", prefix, page_id, page.keys.len())?;
       for i in 0..page.num_keys() {
-        writeln!(f, "{}    k: {:?}, v: {:?}", shift, &page.keys[i], &page.vals[i])?;
+        writeln!(f, "{}    k: {:?}, v: {:?}", prefix, &page.keys[i], &page.vals[i])?;
       }
     } else {
-      writeln!(f, "{}+ ({}) keys: {}", shift, page_id, page.keys.len())?;
+      writeln!(f, "{}INTERNAL ({}) keys: {}", prefix, page_id, page.keys.len())?;
+      prefix.push(' ');
       for i in 1..page.num_keys() + 1 {
         if i == 1 {
-          writeln!(f, "{} < {:?}", shift, page.keys[i - 1])?;
-          display(f, btree, page.ptrs[0], pad + 4)?;
+          writeln!(f, "{} < {:?}", prefix, page.keys[i - 1])?;
+          prefix.push(' ');
+          display(f, btree, page.ptrs[0], prefix)?;
+          prefix.pop();
         }
-        writeln!(f, "{} >= {:?}", shift, page.keys[i - 1])?;
-        display(f, btree, page.ptrs[i], pad + 4)?;
+        writeln!(f, "{} >= {:?}", prefix, page.keys[i - 1])?;
+        prefix.push(' ');
+        display(f, btree, page.ptrs[i], prefix)?;
+        prefix.pop();
       }
+      prefix.pop();
     }
+    prefix.pop();
     Ok(())
   }
 
   impl fmt::Display for BTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-      display(f, self, self.root_page_id, 0)
+      display(f, self, self.root_page_id, &mut String::new())
     }
   }
 
@@ -460,8 +447,6 @@ mod tests {
       let page = Page {
         id: self.pages.len() as u64,
         tpe: page_type,
-        prev: None,
-        next: None,
         keys: Vec::new(),
         vals: Vec::new(),
         ptrs: Vec::new(),
@@ -475,8 +460,6 @@ mod tests {
       let page = Page {
         id: self.pages.len() as u64,
         tpe: page_ref.tpe,
-        prev: page_ref.prev,
-        next: page_ref.next,
         keys: page_ref.keys.clone(),
         vals: page_ref.vals.clone(),
         ptrs: page_ref.ptrs.clone(),
@@ -675,7 +658,7 @@ mod tests {
     }
 
     assert_page_consistency(&cache);
-    assert_num_pages(&cache, 39);
+    assert_num_pages(&cache, 38);
     assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
     assert_eq!(get_page(&cache, tree.root_page_id).vals.len(), 0);
   }
