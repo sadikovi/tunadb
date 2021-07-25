@@ -101,6 +101,72 @@ pub fn get(btree: &BTree, key: &[u8]) -> Res<Option<Vec<u8>>> {
   }
 }
 
+pub struct BTreeIter<'a, 'b> {
+  btree: &'a BTree,
+  stack: Vec<(Rc<Page>, usize)>, // stack of internal nodes
+  page: Option<Rc<Page>>, // leaf page ref to traverse
+  pos: usize, // key position in the leaf page
+  end_key: Option<&'b [u8]>,
+}
+
+impl<'a, 'b> BTreeIter<'a, 'b> {
+  pub fn new(btree: &'a BTree, start_key: Option<&[u8]>, end_key: Option<&'b [u8]>) -> Self {
+    let mut stack = Vec::new();
+    let mut page = btree.cache_get(btree.root_page_id).unwrap();
+    while !page.is_leaf() {
+      let pos = if let Some(key) = start_key {
+        let (exists, i) = bsearch(&page.keys[..], key);
+        if exists { i + 1 } else { i } // only applicable to internal pages
+      } else {
+        0
+      };
+      stack.push((page.clone(), pos));
+      page = btree.cache_get(page.ptrs[pos]).unwrap();
+    }
+    let pos = if let Some(key) = start_key { bsearch(&page.keys[..], key).1 } else { 0 };
+    Self { btree, stack, page: Some(page), pos, end_key }
+  }
+}
+
+impl<'a, 'b> Iterator for BTreeIter<'a, 'b> {
+  type Item = (Vec<u8>, Vec<u8>);
+
+  fn next(&mut self) -> Option<Self::Item> {
+    while let Some(page) = &self.page {
+      if self.pos < page.num_keys() {
+        let key = page.keys[self.pos].clone();
+        if let Some(ekey) = self.end_key {
+          if &key[..] > ekey {
+            self.page = None;
+            return None;
+          }
+        }
+        let val = page.vals[self.pos].clone();
+        self.pos += 1;
+        return Some((key, val))
+      } else {
+        self.page = None;
+        self.pos = 0;
+        while let Some((ipage, mut iptr)) = self.stack.pop() {
+          if iptr + 1 < ipage.ptrs.len() {
+            iptr += 1;
+            let mut page = self.btree.cache_get(ipage.ptrs[iptr]).unwrap();
+            self.stack.push((ipage, iptr));
+            while !page.is_leaf() {
+              let tmp_page = self.btree.cache_get(page.ptrs[0]).unwrap();
+              self.stack.push((page, 0));
+              page = tmp_page;
+            }
+            self.page = Some(page);
+            break;
+          }
+        }
+      }
+    }
+    None
+  }
+}
+
 // Puts key and value into the btree.
 //
 // If the key already exists, the value is updated, otherwise a new pair of key and value is
@@ -745,6 +811,78 @@ mod tests {
     assert_eq!(get(&tree, &[5]).unwrap(), Some(vec![5]));
   }
 
+  // BTree range tests
+
+  #[test]
+  fn test_btree_range_no_bounds() {
+    let (mut tree, _) = new_btree(5);
+    let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
+
+    for i in &input[..] {
+      tree = put(&mut tree, &i.0, &i.1).unwrap();
+    }
+
+    let iter = BTreeIter::new(&tree, None, None);
+    let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+    assert_eq!(res, input);
+  }
+
+  #[test]
+  fn test_btree_range_start_bound() {
+    let (mut tree, _) = new_btree(5);
+    let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
+
+    for i in &input[..] {
+      tree = put(&mut tree, &i.0, &i.1).unwrap();
+    }
+
+    let iter = BTreeIter::new(&tree, Some(&[6]), None);
+    let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+    assert_eq!(res, &input[6..]);
+  }
+
+  #[test]
+  fn test_btree_range_end_bound() {
+    let (mut tree, _) = new_btree(5);
+    let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
+
+    for i in &input[..] {
+      tree = put(&mut tree, &i.0, &i.1).unwrap();
+    }
+
+    let iter = BTreeIter::new(&tree, None, Some(&[17]));
+    let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+    assert_eq!(res, &input[..18]);
+  }
+
+  #[test]
+  fn test_btree_range_both_bounds() {
+    let (mut tree, _) = new_btree(5);
+    let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
+
+    for i in &input[..] {
+      tree = put(&mut tree, &i.0, &i.1).unwrap();
+    }
+
+    let iter = BTreeIter::new(&tree, Some(&[6]), Some(&[17]));
+    let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+    assert_eq!(res, &input[6..18]);
+  }
+
+  #[test]
+  fn test_btree_range_outside_of_bounds() {
+    let (mut tree, _) = new_btree(5);
+    let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i + 1], vec![i])).collect();
+
+    for i in &input[..] {
+      tree = put(&mut tree, &i.0, &i.1).unwrap();
+    }
+
+    let iter = BTreeIter::new(&tree, Some(&[0]), Some(&[100]));
+    let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+    assert_eq!(res, input);
+  }
+
   // BTree fuzz testing
 
   // A sequence of random byte keys that may contain duplicate values
@@ -798,6 +936,12 @@ mod tests {
         assert_find(&tree, &input[i + 1..], false);
       }
 
+      let iter = BTreeIter::new(&tree, None, None);
+      let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+      let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), i.clone())).collect();
+      exp.sort();
+      assert_eq!(res, exp);
+
       shuffle(&mut input);
       for i in 0..input.len() {
         assert_find(&tree, &[input[i].clone()], true);
@@ -824,6 +968,12 @@ mod tests {
         tree = put(&mut tree, &input[i], &input[i]).unwrap();
       }
 
+      let iter = BTreeIter::new(&tree, None, None);
+      let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+      let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), i.clone())).collect();
+      exp.sort();
+      assert_eq!(res, exp);
+
       shuffle(&mut input);
 
       for i in 0..input.len() {
@@ -837,5 +987,34 @@ mod tests {
       assert_page_consistency(&cache);
       assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
     }
+  }
+
+  #[test]
+  fn test_fuzz_byte_put_range() {
+    let mut input = random_byte_key_seq(200);
+    shuffle(&mut input);
+
+    let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), vec![])).collect();
+
+    let (mut tree, cache) = new_btree(10);
+    for (key, val) in &exp[..] {
+      tree = put(&mut tree, &key, &val).unwrap();
+    }
+
+    exp.sort();
+
+    for i in 0..exp.len() {
+      for j in 0..exp.len() {
+        let mut iter = BTreeIter::new(&tree, Some(&exp[i].0), Some(&exp[j].0));
+        if i > j {
+          assert_eq!(iter.next(), None);
+        } else {
+          let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
+          assert_eq!(&res[..], &exp[i..j + 1]);
+        }
+      }
+    }
+
+    assert_page_consistency(&cache);
   }
 }
