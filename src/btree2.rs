@@ -31,15 +31,15 @@ impl Page {
 pub trait PageManager {
   // Creates new page and returns it.
   fn new_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page>;
-  // Returns a clone of the page for the provided page id.
-  fn cln_page(&mut self, page_id: u64) -> Res<Page>;
+  // Duplicates the page and returns its clone.
+  fn dup_page(&mut self, page_id: u64) -> Res<Page>;
   // Returns a page for the page id.
   fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>>;
   // Updates the page.
   fn put_page(&mut self, page: Page) -> Res<()>;
 }
 
-// A simple B+tree implementation
+// A simple implementation of copy-on-write B+tree
 pub struct BTree {
   cache: Rc<RefCell<dyn PageManager>>, // shared mutability for the cache
   root_page_id: u64, // page id that BTree starts with
@@ -56,7 +56,7 @@ impl BTree {
   }
 
   fn cache_clone(&self, page_id: u64) -> Res<Page> {
-    self.cache.borrow_mut().cln_page(page_id)
+    self.cache.borrow_mut().dup_page(page_id)
   }
 
   fn cache_get(&self, page_id: u64) -> Res<Rc<Page>> {
@@ -101,6 +101,8 @@ pub fn get(btree: &BTree, key: &[u8]) -> Res<Option<Vec<u8>>> {
   }
 }
 
+// B+tree iterator for range scans.
+// Allows to specify start and end keys to return a subset of keys.
 pub struct BTreeIter<'a, 'b> {
   btree: &'a BTree,
   stack: Vec<(Rc<Page>, usize)>, // stack of internal nodes
@@ -110,6 +112,8 @@ pub struct BTreeIter<'a, 'b> {
 }
 
 impl<'a, 'b> BTreeIter<'a, 'b> {
+  // Creates a new iterator.
+  // If start and end keys are not provided, full range is returned.
   pub fn new(btree: &'a BTree, start_key: Option<&[u8]>, end_key: Option<&'b [u8]>) -> Self {
     let mut stack = Vec::new();
     let mut page = btree.cache_get(btree.root_page_id).unwrap();
@@ -169,8 +173,8 @@ impl<'a, 'b> Iterator for BTreeIter<'a, 'b> {
 
 // Puts key and value into the btree.
 //
-// If the key already exists, the value is updated, otherwise a new pair of key and value is
-// inserted.
+// If the key already exists, the value is updated,
+// otherwise a new pair of key and value is inserted.
 // The method always returns a new BTree that contains the modification.
 pub fn put(btree: &mut BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
   let new_root = match recur_put(btree, btree.root_page_id, key, value)? {
@@ -308,6 +312,7 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
 //
 // If the key does not exist, we still return a modified tree.
 // TODO: optimise this case
+// The method always returns a new BTree that contains the modification.
 pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
   match recur_del(btree, btree.root_page_id, key)? {
     DeleteResult::Update(page, ..) => {
@@ -396,6 +401,7 @@ fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
   Ok(res)
 }
 
+// Moves a value from left into curr (ptr).
 fn steal_from_left(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Page) {
   assert_eq!(left.is_leaf(), curr.is_leaf());
 
@@ -417,6 +423,7 @@ fn steal_from_left(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Pa
   }
 }
 
+// Moves a value from right into curr (ptr).
 fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut Page) {
   assert_eq!(curr.is_leaf(), right.is_leaf());
 
@@ -437,7 +444,7 @@ fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut 
   }
 }
 
-// Merge right into curr
+// Merges right into curr (ptr)
 fn merge_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) -> Res<()> {
   assert_eq!(curr.is_leaf(), right.is_leaf());
 
@@ -521,7 +528,7 @@ mod tests {
       Ok(page)
     }
 
-    fn cln_page(&mut self, page_id: u64) -> Res<Page> {
+    fn dup_page(&mut self, page_id: u64) -> Res<Page> {
       let page_ref = self.get_page(page_id)?;
       let page = Page {
         id: self.pages.len() as u64,
