@@ -30,7 +30,7 @@ impl Page {
 // Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
   // Creates new page and returns it.
-  fn new_page(&mut self, page_type: PageType, page_size: usize) -> Res<Page>;
+  fn new_page(&mut self, page_type: PageType) -> Res<Page>;
   // Duplicates the page and returns its clone.
   fn dup_page(&mut self, page_id: u64) -> Res<Page>;
   // Returns a page for the page id.
@@ -43,7 +43,6 @@ pub trait PageManager {
 pub struct BTree {
   cache: Rc<RefCell<dyn PageManager>>, // shared mutability for the cache
   root_page_id: u64, // page id that BTree starts with
-  page_size: usize,
   min_keys: usize,
   max_keys: usize,
 }
@@ -52,7 +51,7 @@ impl BTree {
   // Cache helpers
 
   fn cache_new(&self, tpe: PageType) -> Res<Page> {
-    self.cache.borrow_mut().new_page(tpe, self.page_size)
+    self.cache.borrow_mut().new_page(tpe)
   }
 
   fn cache_clone(&self, page_id: u64) -> Res<Page> {
@@ -196,7 +195,6 @@ pub fn put(btree: &mut BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
   Ok(BTree {
     cache: btree.cache.clone(),
     root_page_id: new_root,
-    page_size: btree.page_size,
     min_keys: btree.min_keys,
     max_keys: btree.max_keys,
   })
@@ -322,7 +320,6 @@ pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
       Ok(BTree {
         cache: btree.cache.clone(),
         root_page_id: page_id,
-        page_size: btree.page_size,
         min_keys: btree.min_keys,
         max_keys: btree.max_keys,
       })
@@ -516,7 +513,7 @@ mod tests {
   }
 
   impl PageManager for TestPageManager {
-    fn new_page(&mut self, page_type: PageType, _page_size: usize) -> Res<Page> {
+    fn new_page(&mut self, page_type: PageType) -> Res<Page> {
       let page = Page {
         id: self.pages.len() as u64,
         tpe: page_type,
@@ -554,7 +551,7 @@ mod tests {
 
   fn new_btree(max_keys_per_page: usize) -> (BTree, Rc<RefCell<TestPageManager>>) {
     let mut cache = TestPageManager { pages: Vec::new() };
-    let page = cache.new_page(PageType::Leaf, max_keys_per_page).unwrap();
+    let page = cache.new_page(PageType::Leaf).unwrap();
     let page_id = page.id;
     cache.put_page(page).unwrap();
 
@@ -562,7 +559,6 @@ mod tests {
     let tree = BTree {
       cache: cache_ref.clone(),
       root_page_id: page_id,
-      page_size: max_keys_per_page,
       min_keys: max_keys_per_page / 2,
       max_keys: max_keys_per_page,
     };
