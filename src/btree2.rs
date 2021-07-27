@@ -11,6 +11,7 @@ pub enum PageType {
 #[derive(Debug)]
 pub struct Page {
   id: u64, // unique page id
+  snapshot_id: u64, // btree snapshot id, used for GC
   tpe: PageType, // type of the page
   keys: Vec<Vec<u8>>,
   vals: Vec<Vec<u8>>,
@@ -29,20 +30,22 @@ impl Page {
 
 // Page manager that maintains pages on disk or in memory.
 pub trait PageManager {
-  // Creates new page and returns it.
-  fn new_page(&mut self, page_type: PageType) -> Res<Page>;
-  // Duplicates the page and returns its clone.
-  fn dup_page(&mut self, page_id: u64) -> Res<Page>;
+  // Creates a new page for the provided snapshot id.
+  fn new_page(&mut self, tpe: PageType, snapshot_id: u64) -> Res<Page>;
+  // Duplicates the page for the provided snapshot id.
+  fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<Page>;
   // Returns a page for the page id.
   fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>>;
-  // Updates the page.
+  // Updates the page after `new_page` or `dup_page` calls
   fn put_page(&mut self, page: Page) -> Res<()>;
 }
 
 // A simple implementation of copy-on-write B+tree
+#[derive(Clone)]
 pub struct BTree {
   cache: Rc<RefCell<dyn PageManager>>, // shared mutability for the cache
   root_page_id: u64, // page id that BTree starts with
+  snapshot_id: u64, // uniquely identifies the tree
   min_keys: usize,
   max_keys: usize,
 }
@@ -51,11 +54,11 @@ impl BTree {
   // Cache helpers
 
   fn cache_new(&self, tpe: PageType) -> Res<Page> {
-    self.cache.borrow_mut().new_page(tpe)
+    self.cache.borrow_mut().new_page(tpe, self.snapshot_id)
   }
 
   fn cache_clone(&self, page_id: u64) -> Res<Page> {
-    self.cache.borrow_mut().dup_page(page_id)
+    self.cache.borrow_mut().dup_page(page_id, self.snapshot_id)
   }
 
   fn cache_get(&self, page_id: u64) -> Res<Rc<Page>> {
@@ -175,8 +178,9 @@ impl<'a, 'b> Iterator for BTreeIter<'a, 'b> {
 // If the key already exists, the value is updated,
 // otherwise a new pair of key and value is inserted.
 // The method always returns a new BTree that contains the modification.
-pub fn put(btree: &mut BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
-  let new_root = match recur_put(btree, btree.root_page_id, key, value)? {
+pub fn put(btree: &BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
+  let mut btree = btree.clone();
+  btree.root_page_id = match recur_put(&btree, btree.root_page_id, key, value)? {
     PutResult::Update(page_id) => {
       page_id
     },
@@ -192,12 +196,7 @@ pub fn put(btree: &mut BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
       page_id
     },
   };
-  Ok(BTree {
-    cache: btree.cache.clone(),
-    root_page_id: new_root,
-    min_keys: btree.min_keys,
-    max_keys: btree.max_keys,
-  })
+  Ok(btree)
 }
 
 enum PutResult {
@@ -207,7 +206,7 @@ enum PutResult {
   Split(u64, u64, Vec<u8>),
 }
 
-fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<PutResult> {
+fn recur_put(btree: &BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<PutResult> {
   // Clone the page since it will be modified anyway
   let mut page = btree.cache_clone(curr_id)?;
   // Perform search to find the position of the key and whether or not it exists
@@ -311,18 +310,14 @@ fn recur_put(btree: &mut BTree, curr_id: u64, key: &[u8], value: &[u8]) -> Res<P
 // If the key does not exist, we still return a modified tree.
 // TODO: optimise this case
 // The method always returns a new BTree that contains the modification.
-pub fn del(btree: &mut BTree, key: &[u8]) -> Res<BTree> {
-  match recur_del(btree, btree.root_page_id, key)? {
+pub fn del(btree: &BTree, key: &[u8]) -> Res<BTree> {
+  let mut btree = btree.clone();
+  match recur_del(&btree, btree.root_page_id, key)? {
     DeleteResult::Update(page, ..) => {
       let page_id = if !page.is_leaf() && page.num_keys() == 0 { page.ptrs[0] } else { page.id };
       btree.cache_put(page)?;
-
-      Ok(BTree {
-        cache: btree.cache.clone(),
-        root_page_id: page_id,
-        min_keys: btree.min_keys,
-        max_keys: btree.max_keys,
-      })
+      btree.root_page_id = page_id;
+      Ok(btree)
     }
   }
 }
@@ -332,7 +327,7 @@ enum DeleteResult {
   Update(Page, Option<Vec<u8>>),
 }
 
-fn recur_del(btree: &mut BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
+fn recur_del(btree: &BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
   // Clone the page since it will be modified anyway
   let mut page = btree.cache_clone(curr_id)?;
   // Perform search to find the position of the key and whether or not it exists
@@ -477,12 +472,12 @@ mod tests {
     let page = btree.cache_get(page_id).unwrap();
     prefix.push(' ');
     if page.is_leaf() {
-      writeln!(f, "{}LEAF ({}) keys: {}", prefix, page_id, page.keys.len())?;
+      writeln!(f, "{}LEAF ({}) snapshot: {}, keys: {}", prefix, page_id, page.snapshot_id, page.keys.len())?;
       for i in 0..page.num_keys() {
         writeln!(f, "{}    k: {:?}, v: {:?}", prefix, &page.keys[i], &page.vals[i])?;
       }
     } else {
-      writeln!(f, "{}INTERNAL ({}) keys: {}", prefix, page_id, page.keys.len())?;
+      writeln!(f, "{}INTERNAL ({}) snapshot: {}, keys: {}", prefix, page_id, page.snapshot_id, page.keys.len())?;
       prefix.push(' ');
       for i in 1..page.num_keys() + 1 {
         if i == 1 {
@@ -513,9 +508,10 @@ mod tests {
   }
 
   impl PageManager for TestPageManager {
-    fn new_page(&mut self, page_type: PageType) -> Res<Page> {
+    fn new_page(&mut self, page_type: PageType, snapshot_id: u64) -> Res<Page> {
       let page = Page {
         id: self.pages.len() as u64,
+        snapshot_id: snapshot_id,
         tpe: page_type,
         keys: Vec::new(),
         vals: Vec::new(),
@@ -525,10 +521,11 @@ mod tests {
       Ok(page)
     }
 
-    fn dup_page(&mut self, page_id: u64) -> Res<Page> {
+    fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<Page> {
       let page_ref = self.get_page(page_id)?;
       let page = Page {
         id: self.pages.len() as u64,
+        snapshot_id: snapshot_id,
         tpe: page_ref.tpe,
         keys: page_ref.keys.clone(),
         vals: page_ref.vals.clone(),
@@ -551,13 +548,15 @@ mod tests {
 
   fn new_btree(max_keys_per_page: usize) -> (BTree, Rc<RefCell<TestPageManager>>) {
     let mut cache = TestPageManager { pages: Vec::new() };
-    let page = cache.new_page(PageType::Leaf).unwrap();
+    let next_snapshot_id = 123;
+    let page = cache.new_page(PageType::Leaf, next_snapshot_id).unwrap();
     let page_id = page.id;
     cache.put_page(page).unwrap();
 
     let cache_ref = Rc::new(RefCell::new(cache));
     let tree = BTree {
       cache: cache_ref.clone(),
+      snapshot_id: next_snapshot_id,
       root_page_id: page_id,
       min_keys: max_keys_per_page / 2,
       max_keys: max_keys_per_page,
@@ -581,9 +580,56 @@ mod tests {
   }
 
   #[test]
+  fn test_btree_cache_clone() {
+    let (tree, cache) = new_btree(5);
+
+    for &tpe in &[PageType::Leaf, PageType::Internal] {
+      let page = tree.cache_new(tpe).unwrap();
+      let page_id = page.id;
+      let page = Page { // create page to make sure we don't miss any new fields
+        id: page_id,
+        snapshot_id: page.snapshot_id,
+        tpe: page.tpe,
+        keys: vec![vec![1]],
+        vals: vec![vec![2]],
+        ptrs: vec![3, 4],
+      };
+      tree.cache_put(page).unwrap();
+
+      let orig_page = tree.cache_get(page_id).unwrap();
+      let cloned_page = tree.cache_clone(page_id).unwrap();
+
+      // If an attribute is missing, please update below
+      assert_ne!(orig_page.id, cloned_page.id);
+      assert_eq!(orig_page.snapshot_id, cloned_page.snapshot_id);
+      assert_eq!(orig_page.tpe, cloned_page.tpe);
+      assert_eq!(orig_page.keys, cloned_page.keys);
+      assert_eq!(orig_page.vals, cloned_page.vals);
+      assert_eq!(orig_page.ptrs, cloned_page.ptrs);
+
+      tree.cache_put(cloned_page).unwrap();
+    }
+
+    assert_page_consistency(&cache);
+  }
+
+  #[test]
+  fn test_btree_snapshot_ids() {
+    let (tree1, cache) = new_btree(5);
+    assert_eq!(get_page(&cache, tree1.root_page_id).snapshot_id, tree1.snapshot_id);
+
+    let tree2 = put(&tree1, &[1], &[10]).unwrap();
+    assert_eq!(get_page(&cache, tree2.root_page_id).snapshot_id, tree2.snapshot_id);
+
+    // BTree clone also clones snapshot ids - this allows us to reduce page allocations on disk
+    // since we can return the same page if it was modified in the same snapshot.
+    assert_eq!(tree2.snapshot_id, tree1.snapshot_id);
+  }
+
+  #[test]
   fn test_btree_put_insert_empty() {
-    let (mut tree, cache) = new_btree(5);
-    put(&mut tree, &[1], &[10]).unwrap();
+    let (tree, cache) = new_btree(5);
+    put(&tree, &[1], &[10]).unwrap();
 
     assert_page_consistency(&cache);
     assert_num_pages(&cache, 2);
@@ -597,8 +643,8 @@ mod tests {
   #[test]
   fn test_btree_put_update() {
     let (mut tree, cache) = new_btree(5);
-    tree = put(&mut tree, &[1], &[10]).unwrap();
-    put(&mut tree, &[1], &[20]).unwrap();
+    tree = put(&tree, &[1], &[10]).unwrap();
+    put(&tree, &[1], &[20]).unwrap();
 
     assert_page_consistency(&cache);
     assert_num_pages(&cache, 3);
@@ -612,9 +658,9 @@ mod tests {
   #[test]
   fn test_btree_put_insert_capacity() {
     let (mut tree, cache) = new_btree(3);
-    tree = put(&mut tree, &[1], &[10]).unwrap();
-    tree = put(&mut tree, &[2], &[20]).unwrap();
-    tree = put(&mut tree, &[3], &[30]).unwrap();
+    tree = put(&tree, &[1], &[10]).unwrap();
+    tree = put(&tree, &[2], &[20]).unwrap();
+    tree = put(&tree, &[3], &[30]).unwrap();
 
     assert_page_consistency(&cache);
     assert_num_pages(&cache, 4);
@@ -626,10 +672,10 @@ mod tests {
   #[test]
   fn test_btree_put_insert_leaf_split() {
     let (mut tree, cache) = new_btree(3);
-    tree = put(&mut tree, &[1], &[10]).unwrap();
-    tree = put(&mut tree, &[2], &[20]).unwrap();
-    tree = put(&mut tree, &[3], &[30]).unwrap();
-    tree = put(&mut tree, &[4], &[40]).unwrap();
+    tree = put(&tree, &[1], &[10]).unwrap();
+    tree = put(&tree, &[2], &[20]).unwrap();
+    tree = put(&tree, &[3], &[30]).unwrap();
+    tree = put(&tree, &[4], &[40]).unwrap();
 
     assert_page_consistency(&cache);
     assert_num_pages(&cache, 7);
@@ -649,7 +695,7 @@ mod tests {
   fn test_btree_put_insert_internal_split() {
     let (mut tree, cache) = new_btree(3);
     for i in 0..10 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -672,10 +718,10 @@ mod tests {
   fn test_btree_del_leaf_non_existent() {
     let (mut tree, cache) = new_btree(5);
     for i in 0..3 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in 4..10 {
-      tree = del(&mut tree, &[i]).unwrap();
+      tree = del(&tree, &[i]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -688,10 +734,10 @@ mod tests {
   fn test_btree_del_leaf_asc() {
     let (mut tree, cache) = new_btree(5);
     for i in 0..5 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in 0..5 {
-      tree = del(&mut tree, &[i]).unwrap();
+      tree = del(&tree, &[i]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -704,10 +750,10 @@ mod tests {
   fn test_btree_del_leaf_desc() {
     let (mut tree, cache) = new_btree(5);
     for i in 0..5 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in (0..5).rev() {
-      tree = del(&mut tree, &[i]).unwrap();
+      tree = del(&tree, &[i]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -720,10 +766,10 @@ mod tests {
   fn test_btree_del_internal_asc() {
     let (mut tree, cache) = new_btree(5);
     for i in 0..10 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in 0..10 {
-      tree = del(&mut tree, &[i]).unwrap();
+      tree = del(&tree, &[i]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -736,10 +782,10 @@ mod tests {
   fn test_btree_del_internal_desc() {
     let (mut tree, cache) = new_btree(5);
     for i in 0..10 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in (0..10).rev() {
-      tree = del(&mut tree, &[i]).unwrap();
+      tree = del(&tree, &[i]).unwrap();
     }
 
     assert_page_consistency(&cache);
@@ -754,15 +800,15 @@ mod tests {
     // When deleting [3], the internal page key needs to be updated to [4]
     // and the subsequent delete of [4] does not cause "index out of bound" error.
     let (mut tree, cache) = new_btree(4);
-    tree = put(&mut tree, &[1], &[1]).unwrap();
-    tree = put(&mut tree, &[2], &[2]).unwrap();
-    tree = put(&mut tree, &[3], &[3]).unwrap();
-    tree = put(&mut tree, &[4], &[4]).unwrap();
-    tree = put(&mut tree, &[5], &[5]).unwrap();
-    tree = put(&mut tree, &[6], &[6]).unwrap();
+    tree = put(&tree, &[1], &[1]).unwrap();
+    tree = put(&tree, &[2], &[2]).unwrap();
+    tree = put(&tree, &[3], &[3]).unwrap();
+    tree = put(&tree, &[4], &[4]).unwrap();
+    tree = put(&tree, &[5], &[5]).unwrap();
+    tree = put(&tree, &[6], &[6]).unwrap();
 
-    tree = del(&mut tree, &[3]).unwrap();
-    tree = del(&mut tree, &[4]).unwrap();
+    tree = del(&tree, &[3]).unwrap();
+    tree = del(&tree, &[4]).unwrap();
 
     assert_page_consistency(&cache);
     assert_eq!(get(&tree, &[3]).unwrap(), None);
@@ -773,7 +819,7 @@ mod tests {
   fn test_btree_get_existent_key() {
     let (mut tree, _) = new_btree(5);
     for i in 0..20 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in 0..20 {
       assert_eq!(get(&tree, &[i]).unwrap(), Some(vec![i * 10]));
@@ -787,7 +833,7 @@ mod tests {
   fn test_btree_get_non_existent_key() {
     let (mut tree, _) = new_btree(5);
     for i in 0..20 {
-      tree = put(&mut tree, &[i], &[i * 10]).unwrap();
+      tree = put(&tree, &[i], &[i * 10]).unwrap();
     }
     for i in 20..40 {
       assert_eq!(get(&tree, &[i]).unwrap(), None);
@@ -801,15 +847,15 @@ mod tests {
   fn test_btree_put_get_split_key() {
     // Regression test for the issue when the inserted key falls into split position
     let (mut tree, _) = new_btree(6);
-    tree = put(&mut tree, &[1], &[1]).unwrap();
-    tree = put(&mut tree, &[2], &[2]).unwrap();
-    tree = put(&mut tree, &[3], &[3]).unwrap();
-    tree = put(&mut tree, &[4], &[4]).unwrap();
-    tree = put(&mut tree, &[8], &[8]).unwrap();
-    tree = put(&mut tree, &[9], &[9]).unwrap();
+    tree = put(&tree, &[1], &[1]).unwrap();
+    tree = put(&tree, &[2], &[2]).unwrap();
+    tree = put(&tree, &[3], &[3]).unwrap();
+    tree = put(&tree, &[4], &[4]).unwrap();
+    tree = put(&tree, &[8], &[8]).unwrap();
+    tree = put(&tree, &[9], &[9]).unwrap();
 
     // This insert results in split
-    tree = put(&mut tree, &[5], &[5]).unwrap();
+    tree = put(&tree, &[5], &[5]).unwrap();
 
     assert_eq!(get(&tree, &[5]).unwrap(), Some(vec![5]));
   }
@@ -822,7 +868,7 @@ mod tests {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
 
     for i in &input[..] {
-      tree = put(&mut tree, &i.0, &i.1).unwrap();
+      tree = put(&tree, &i.0, &i.1).unwrap();
     }
 
     let iter = BTreeIter::new(&tree, None, None);
@@ -836,7 +882,7 @@ mod tests {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
 
     for i in &input[..] {
-      tree = put(&mut tree, &i.0, &i.1).unwrap();
+      tree = put(&tree, &i.0, &i.1).unwrap();
     }
 
     let iter = BTreeIter::new(&tree, Some(&[6]), None);
@@ -850,7 +896,7 @@ mod tests {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
 
     for i in &input[..] {
-      tree = put(&mut tree, &i.0, &i.1).unwrap();
+      tree = put(&tree, &i.0, &i.1).unwrap();
     }
 
     let iter = BTreeIter::new(&tree, None, Some(&[17]));
@@ -864,7 +910,7 @@ mod tests {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i * 10])).collect();
 
     for i in &input[..] {
-      tree = put(&mut tree, &i.0, &i.1).unwrap();
+      tree = put(&tree, &i.0, &i.1).unwrap();
     }
 
     let iter = BTreeIter::new(&tree, Some(&[6]), Some(&[17]));
@@ -878,7 +924,7 @@ mod tests {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i + 1], vec![i])).collect();
 
     for i in &input[..] {
-      tree = put(&mut tree, &i.0, &i.1).unwrap();
+      tree = put(&tree, &i.0, &i.1).unwrap();
     }
 
     let iter = BTreeIter::new(&tree, Some(&[0]), Some(&[100]));
@@ -934,7 +980,7 @@ mod tests {
 
       let (mut tree, cache) = new_btree(max_keys);
       for i in 0..input.len() {
-        tree = put(&mut tree, &input[i], &input[i]).unwrap();
+        tree = put(&tree, &input[i], &input[i]).unwrap();
         assert_find(&tree, &input[0..i + 1], true);
         assert_find(&tree, &input[i + 1..], false);
       }
@@ -948,7 +994,7 @@ mod tests {
       shuffle(&mut input);
       for i in 0..input.len() {
         assert_find(&tree, &[input[i].clone()], true);
-        tree = del(&mut tree, &input[i]).unwrap();
+        tree = del(&tree, &input[i]).unwrap();
         assert_find(&tree, &[input[i].clone()], false);
       }
 
@@ -968,7 +1014,7 @@ mod tests {
 
       let (mut tree, cache) = new_btree(max_keys);
       for i in 0..input.len() {
-        tree = put(&mut tree, &input[i], &input[i]).unwrap();
+        tree = put(&tree, &input[i], &input[i]).unwrap();
       }
 
       let iter = BTreeIter::new(&tree, None, None);
@@ -984,7 +1030,7 @@ mod tests {
       }
 
       for i in 0..input.len() {
-        tree = del(&mut tree, &input[i]).unwrap();
+        tree = del(&tree, &input[i]).unwrap();
       }
 
       assert_page_consistency(&cache);
@@ -1001,7 +1047,7 @@ mod tests {
 
     let (mut tree, cache) = new_btree(10);
     for (key, val) in &exp[..] {
-      tree = put(&mut tree, &key, &val).unwrap();
+      tree = put(&tree, &key, &val).unwrap();
     }
 
     exp.sort();
