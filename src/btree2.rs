@@ -9,7 +9,7 @@ pub enum PageType {
 }
 
 #[derive(Debug)]
-pub struct Page {
+pub struct BTreePage {
   id: u64, // unique page id
   snapshot_id: u64, // btree snapshot id, used for GC
   tpe: PageType, // type of the page
@@ -18,7 +18,7 @@ pub struct Page {
   ptrs: Vec<u64>,
 }
 
-impl Page {
+impl BTreePage {
   pub fn is_leaf(&self) -> bool {
     self.tpe == PageType::Leaf
   }
@@ -29,21 +29,21 @@ impl Page {
 }
 
 // Page manager that maintains pages on disk or in memory.
-pub trait PageManager {
+pub trait BTreePageManager {
   // Creates a new page for the provided snapshot id.
-  fn new_page(&mut self, tpe: PageType, snapshot_id: u64) -> Res<Page>;
+  fn new_page(&mut self, tpe: PageType, snapshot_id: u64) -> Res<BTreePage>;
   // Duplicates the page for the provided snapshot id.
-  fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<Page>;
+  fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<BTreePage>;
   // Returns a page for the page id.
-  fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>>;
+  fn get_page(&mut self, page_id: u64) -> Res<Rc<BTreePage>>;
   // Updates the page after `new_page` or `dup_page` calls
-  fn put_page(&mut self, page: Page) -> Res<()>;
+  fn put_page(&mut self, page: BTreePage) -> Res<()>;
 }
 
 // A simple implementation of copy-on-write B+tree
 #[derive(Clone)]
 pub struct BTree {
-  cache: Rc<RefCell<dyn PageManager>>, // shared mutability for the cache
+  cache: Rc<RefCell<dyn BTreePageManager>>, // shared mutability for the cache
   root_page_id: u64, // page id that BTree starts with
   snapshot_id: u64, // uniquely identifies the tree
   min_keys: usize,
@@ -53,19 +53,19 @@ pub struct BTree {
 impl BTree {
   // Cache helpers
 
-  fn cache_new(&self, tpe: PageType) -> Res<Page> {
+  fn cache_new(&self, tpe: PageType) -> Res<BTreePage> {
     self.cache.borrow_mut().new_page(tpe, self.snapshot_id)
   }
 
-  fn cache_clone(&self, page_id: u64) -> Res<Page> {
+  fn cache_clone(&self, page_id: u64) -> Res<BTreePage> {
     self.cache.borrow_mut().dup_page(page_id, self.snapshot_id)
   }
 
-  fn cache_get(&self, page_id: u64) -> Res<Rc<Page>> {
+  fn cache_get(&self, page_id: u64) -> Res<Rc<BTreePage>> {
     self.cache.borrow_mut().get_page(page_id)
   }
 
-  fn cache_put(&self, page: Page) -> Res<()> {
+  fn cache_put(&self, page: BTreePage) -> Res<()> {
     self.cache.borrow_mut().put_page(page)
   }
 }
@@ -107,8 +107,8 @@ pub fn get(btree: &BTree, key: &[u8]) -> Res<Option<Vec<u8>>> {
 // Allows to specify start and end keys to return a subset of keys.
 pub struct BTreeIter<'a, 'b> {
   btree: &'a BTree,
-  stack: Vec<(Rc<Page>, usize)>, // stack of internal nodes
-  page: Option<Rc<Page>>, // leaf page ref to traverse
+  stack: Vec<(Rc<BTreePage>, usize)>, // stack of internal nodes
+  page: Option<Rc<BTreePage>>, // leaf page ref to traverse
   pos: usize, // key position in the leaf page
   end_key: Option<&'b [u8]>,
 }
@@ -324,7 +324,7 @@ pub fn del(btree: &BTree, key: &[u8]) -> Res<BTree> {
 
 enum DeleteResult {
   // Delete a key and update smallest (page, next_smallest_key)
-  Update(Page, Option<Vec<u8>>),
+  Update(BTreePage, Option<Vec<u8>>),
 }
 
 fn recur_del(btree: &BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
@@ -394,7 +394,7 @@ fn recur_del(btree: &BTree, curr_id: u64, key: &[u8]) -> Res<DeleteResult> {
 }
 
 // Moves a value from left into curr (ptr).
-fn steal_from_left(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Page) {
+fn steal_from_left(parent: &mut BTreePage, ptr: usize, left: &mut BTreePage, curr: &mut BTreePage) {
   assert_eq!(left.is_leaf(), curr.is_leaf());
 
   let num_keys = left.num_keys();
@@ -416,7 +416,7 @@ fn steal_from_left(parent: &mut Page, ptr: usize, left: &mut Page, curr: &mut Pa
 }
 
 // Moves a value from right into curr (ptr).
-fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut Page) {
+fn steal_from_right(parent: &mut BTreePage, ptr: usize, curr: &mut BTreePage, right: &mut BTreePage) {
   assert_eq!(curr.is_leaf(), right.is_leaf());
 
   if curr.is_leaf() {
@@ -437,7 +437,7 @@ fn steal_from_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &mut 
 }
 
 // Merges right into curr (ptr)
-fn merge_right(parent: &mut Page, ptr: usize, curr: &mut Page, right: &Page) -> Res<()> {
+fn merge_right(parent: &mut BTreePage, ptr: usize, curr: &mut BTreePage, right: &BTreePage) -> Res<()> {
   assert_eq!(curr.is_leaf(), right.is_leaf());
 
   if curr.is_leaf() {
@@ -504,12 +504,12 @@ mod tests {
   }
 
   struct TestPageManager {
-    pages: Vec<Option<Rc<Page>>>,
+    pages: Vec<Option<Rc<BTreePage>>>,
   }
 
-  impl PageManager for TestPageManager {
-    fn new_page(&mut self, page_type: PageType, snapshot_id: u64) -> Res<Page> {
-      let page = Page {
+  impl BTreePageManager for TestPageManager {
+    fn new_page(&mut self, page_type: PageType, snapshot_id: u64) -> Res<BTreePage> {
+      let page = BTreePage {
         id: self.pages.len() as u64,
         snapshot_id: snapshot_id,
         tpe: page_type,
@@ -521,9 +521,9 @@ mod tests {
       Ok(page)
     }
 
-    fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<Page> {
+    fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<BTreePage> {
       let page_ref = self.get_page(page_id)?;
-      let page = Page {
+      let page = BTreePage {
         id: self.pages.len() as u64,
         snapshot_id: snapshot_id,
         tpe: page_ref.tpe,
@@ -535,11 +535,11 @@ mod tests {
       Ok(page)
     }
 
-    fn get_page(&mut self, page_id: u64) -> Res<Rc<Page>> {
+    fn get_page(&mut self, page_id: u64) -> Res<Rc<BTreePage>> {
       Ok(self.pages[page_id as usize].as_ref().expect(&format!("Page {} not found", page_id)).clone())
     }
 
-    fn put_page(&mut self, page: Page) -> Res<()> {
+    fn put_page(&mut self, page: BTreePage) -> Res<()> {
       let page_id = page.id;
       self.pages[page_id as usize] = Some(Rc::new(page));
       Ok(())
@@ -575,7 +575,7 @@ mod tests {
     assert_eq!(cache.borrow().pages.len(), expected);
   }
 
-  fn get_page(cache: &RefCell<TestPageManager>, id: u64) -> Rc<Page> {
+  fn get_page(cache: &RefCell<TestPageManager>, id: u64) -> Rc<BTreePage> {
     cache.borrow_mut().get_page(id).unwrap()
   }
 
@@ -586,7 +586,7 @@ mod tests {
     for &tpe in &[PageType::Leaf, PageType::Internal] {
       let page = tree.cache_new(tpe).unwrap();
       let page_id = page.id;
-      let page = Page { // create page to make sure we don't miss any new fields
+      let page = BTreePage { // create page to make sure we don't miss any new fields
         id: page_id,
         snapshot_id: page.snapshot_id,
         tpe: page.tpe,
