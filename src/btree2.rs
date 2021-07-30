@@ -28,7 +28,7 @@ impl BTreePage {
   }
 }
 
-// Page manager that maintains pages on disk or in memory.
+// Page manager that maintains BTreePage instances.
 pub trait BTreePageManager {
   // Creates a new page for the provided snapshot id.
   fn new_page(&mut self, tpe: PageType, snapshot_id: u64) -> Res<BTreePage>;
