@@ -264,8 +264,6 @@ impl StorageManager {
   // =====================
   // page table:
   //   btree (page id -> pos): gives the ability to check the largest page id
-  // snapshots:
-  //   btree (snapshot -> page id), allows to remove older snapshots
   // free pages:
   //   btree (pos -> n/a), allows to order positions for sequential access
 
@@ -285,11 +283,13 @@ impl StorageManager {
   // Free list operations
   // ====================
 
+  // Free list will give positions in sorted (ascending) order to ensure sequential writes.
+
   fn free_list_pop(&mut self) -> Res<(u64, Page)> {
     unimplemented!()
   }
 
-  fn free_list_push(&mut self, pos: u64) -> Res<(u64, Page)> {
+  fn free_list_push(&mut self, pos: u64) -> Res<()> {
     unimplemented!()
   }
 
