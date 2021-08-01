@@ -1,14 +1,12 @@
 use std::cell::RefCell;
 use std::cmp;
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 use crate::error::Res;
-use crate::btree2::{BTreePage, btp2buf, buf2btp};
 
 // Abstract storage interface to write data.
-pub trait Descriptor {
+trait Descriptor {
   // Reads data into the provided buffer at the position.
   fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()>;
   // Writes data at the specified position.
@@ -18,12 +16,12 @@ pub trait Descriptor {
 }
 
 // File-based storage.
-pub struct FileDescriptor {
+struct FileDescriptor {
   fd: File,
 }
 
 impl FileDescriptor {
-  pub fn new(path: &str) -> Res<Self> {
+  fn new(path: &str) -> Res<Self> {
     let fd = OpenOptions::new().read(true).write(true).create(true).open(path)?;
     Ok(Self { fd })
   }
@@ -56,12 +54,12 @@ impl Descriptor for FileDescriptor {
 }
 
 // In-memory storage.
-pub struct MemDescriptor {
+struct MemDescriptor {
   data: Vec<u8>,
 }
 
 impl MemDescriptor {
-  pub fn new(capacity: usize) -> Res<Self> {
+  fn new(capacity: usize) -> Res<Self> {
     Ok(Self { data: Vec::with_capacity(capacity) })
   }
 }
@@ -107,7 +105,8 @@ struct Page {
 }
 
 impl Page {
-  fn new(page_size: usize) -> Page {
+  // Creates an empty page with length 0 and no continuation
+  fn empty(page_size: usize) -> Page {
     Self { len: 0, cont_page_id: INVALID_PAGE_ID, data: vec![0; page_size] }
   }
 
@@ -186,22 +185,19 @@ impl StorageManager {
     next_id
   }
 
-  // ====================
-  // BTreePage operations
-  // ====================
-
-  pub fn btp_write(&mut self, btp: &BTreePage) -> Res<()> {
+  // Writes the data for page id.
+  //
+  // We don't overwrite the existing pages, so the provided page id must not exist in the
+  // page table.
+  pub fn write(&mut self, mut page_id: u64, buf: &[u8]) -> Res<()> {
     // We cannot write a page that has been written already
-    if let Ok(pos) = self.page_table_lookup(btp.id()) {
-      return Err(err!("Page {} already exists at pos {}", btp.id(), pos));
+    if let Ok(pos) = self.page_table_lookup(page_id) {
+      return Err(err!("Page {} already exists at pos {}", page_id, pos));
     }
 
-    let mut page_id = btp.id();
-    let buf = btp2buf(btp);
     let mut buf_len = 0;
-
     while buf_len < buf.len() {
-      let (pos, mut page) = self.free_page_pop()?;
+      let (pos, mut page) = self.free_list_pop()?;
       self.page_table_insert(page_id, pos)?;
       buf_len += page.write(&buf)?;
       page_id = if buf_len < buf.len() { self.new_page_id() } else { INVALID_PAGE_ID };
@@ -212,22 +208,28 @@ impl StorageManager {
     self.sync()
   }
 
-  pub fn btp_read(&mut self, mut page_id: u64) -> Res<BTreePage> {
-    let mut buf = Vec::new();
+  // Reads stored data for the page id.
+  //
+  // Page id must have been written prior calling this method.
+  pub fn read(&mut self, mut page_id: u64, buf: &mut Vec<u8>) -> Res<()> {
     while page_id != INVALID_PAGE_ID {
       let pos = self.page_table_lookup(page_id)?;
       let page = self.pload(pos)?;
-      page.read(&mut buf)?;
+      page.read(buf)?;
       page_id = page.cont_page_id;
     }
-    Ok(buf2btp(&buf[..]))
+    Ok(())
   }
 
-  pub fn btp_free(&mut self, page_id: u64) -> Res<()> {
-    // TODO: consider ignoring page ids that don't exist
-    let pos = self.page_table_lookup(page_id)?;
-    self.page_table_delete(page_id)?;
-    self.free_page_push(pos)?;
+  // Frees the page and its overflow pages.
+  pub fn free(&mut self, mut page_id: u64) -> Res<()> {
+    while page_id != INVALID_PAGE_ID {
+      let pos = self.page_table_lookup(page_id)?;
+      let page = self.pload(pos)?;
+      self.page_table_delete(page_id)?;
+      self.free_list_push(pos)?;
+      page_id = page.cont_page_id;
+    }
     self.sync()
   }
 
@@ -237,7 +239,7 @@ impl StorageManager {
 
   // Returns a new page and its offset position in the file.
   fn pappend(&mut self) -> Res<(u64, Page)> {
-    let buf = Page::new(self.page_size).into()?;
+    let buf = Page::empty(self.page_size).into()?;
     let pos = self.desc.borrow().len()?;
     self.desc.borrow_mut().write(pos, &buf[..])?;
     let page = Page::from(buf)?;
@@ -260,6 +262,12 @@ impl StorageManager {
   // =====================
   // Page table operations
   // =====================
+  // page table:
+  //   btree (page id -> pos): gives the ability to check the largest page id
+  // snapshots:
+  //   btree (snapshot -> page id), allows to remove older snapshots
+  // free pages:
+  //   btree (pos -> n/a), allows to order positions for sequential access
 
   fn page_table_lookup(&self, page_id: u64) -> Res<u64> {
     unimplemented!()
@@ -273,15 +281,15 @@ impl StorageManager {
     unimplemented!()
   }
 
-  // =====================
-  // Free pages operations
-  // =====================
+  // ====================
+  // Free list operations
+  // ====================
 
-  fn free_page_pop(&mut self) -> Res<(u64, Page)> {
+  fn free_list_pop(&mut self) -> Res<(u64, Page)> {
     unimplemented!()
   }
 
-  fn free_page_push(&mut self, pos: u64) -> Res<(u64, Page)> {
+  fn free_list_push(&mut self, pos: u64) -> Res<(u64, Page)> {
     unimplemented!()
   }
 
