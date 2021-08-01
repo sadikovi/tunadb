@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::error::Res;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PageType {
+pub enum BTreePageType {
   Leaf,
   Internal,
 }
@@ -12,26 +12,132 @@ pub enum PageType {
 pub struct BTreePage {
   id: u64, // unique page id
   snapshot_id: u64, // btree snapshot id, used for GC
-  tpe: PageType, // type of the page
+  tpe: BTreePageType, // type of the page
   keys: Vec<Vec<u8>>,
   vals: Vec<Vec<u8>>,
   ptrs: Vec<u64>,
 }
 
 impl BTreePage {
-  pub fn is_leaf(&self) -> bool {
-    self.tpe == PageType::Leaf
+  // Returns the page id.
+  pub fn id(&self) -> u64 {
+    self.id
   }
 
+  // Returns true if this page is a leaf page.
+  pub fn is_leaf(&self) -> bool {
+    self.tpe == BTreePageType::Leaf
+  }
+
+  // Returns the number of keys in the page.
   pub fn num_keys(&self) -> usize {
     self.keys.len()
   }
+
+  // Returns the number of bytes that this page occupies.
+  pub fn disk_size(&self) -> usize {
+    // Calculate number of bytes required to store the page
+    8 /* id */ + 8 /* snapshot_id */ + 1 /* tpe */ + 4 /* num_pairs */ +
+      self.keys.iter().fold(0, |acc, key| acc + 4 /* key len */ + key.len()) +
+      self.vals.iter().fold(0, |acc, val| acc + 4 /* val len */ + val.len()) +
+      self.ptrs.len() * 8 /* ptr len */
+  }
+}
+
+// Converts BTreePage into a byte buffer.
+pub fn btp2buf(btp: &BTreePage) -> Vec<u8> {
+  let mut buf: Vec<u8> = Vec::with_capacity(btp.disk_size());
+
+  // Write BTreePage metadata
+  buf.extend(&btp.id.to_le_bytes());
+  buf.extend(&btp.snapshot_id.to_le_bytes());
+  let tpe = match btp.tpe {
+    BTreePageType::Leaf => 1,
+    BTreePageType::Internal => 2,
+  };
+  buf.push(tpe);
+  buf.extend(&(btp.num_keys() as u32).to_le_bytes());
+
+  // Write BTreePage data
+  match btp.tpe {
+    BTreePageType::Leaf => {
+      for i in 0..btp.num_keys() {
+        let key = &btp.keys[i];
+        buf.extend(&(key.len() as u32).to_le_bytes());
+        buf.extend(key);
+        let val = &btp.vals[i];
+        buf.extend(&(val.len() as u32).to_le_bytes());
+        buf.extend(val);
+      }
+    },
+    BTreePageType::Internal => {
+      for i in 0..btp.num_keys() {
+        let key = &btp.keys[i];
+        buf.extend(&(key.len() as u32).to_le_bytes());
+        buf.extend(key);
+      }
+      for i in 0..btp.num_keys() + 1 {
+        buf.extend(&btp.ptrs[i].to_le_bytes());
+      }
+    },
+  }
+
+  buf
+}
+
+// Converts byte buffer into BTreePage.
+pub fn buf2btp(buf: &[u8]) -> BTreePage {
+  let mut btp = BTreePage {
+    id: 0,
+    snapshot_id: 0,
+    tpe: BTreePageType::Leaf,
+    keys: Vec::new(),
+    vals: Vec::new(),
+    ptrs: Vec::new(),
+  };
+
+  // Read BTreePage metadata
+  btp.id = u64_le!(&buf[0..8]);
+  btp.snapshot_id = u64_le!(&buf[8..16]);
+  btp.tpe = match buf[16] {
+    1 => BTreePageType::Leaf,
+    _ => BTreePageType::Internal,
+  };
+  let num_keys = u32_le!(buf[17..21]) as usize;
+
+  // Read BTreePage data
+  let mut pos = 21;
+  match btp.tpe {
+    BTreePageType::Leaf => {
+      for _ in 0..num_keys {
+        let key_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        btp.keys.push(buf[pos + 4..pos + 4 + key_len].to_vec());
+        pos += 4 + key_len;
+        let val_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        btp.vals.push(buf[pos + 4..pos + 4 + val_len].to_vec());
+        pos += 4 + val_len;
+      }
+    },
+    BTreePageType::Internal => {
+      for _ in 0..num_keys {
+        let key_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        btp.keys.push(buf[pos + 4..pos + 4 + key_len].to_vec());
+        pos += 4 + key_len;
+      }
+      for _ in 0..num_keys + 1 {
+        btp.ptrs.push(u64_le!(&buf[pos..pos + 8]));
+        pos += 8;
+      }
+    },
+  }
+
+  btp
 }
 
 // Page manager that maintains BTreePage instances.
 pub trait BTreePageManager {
   // Creates a new page for the provided snapshot id.
-  fn new_page(&mut self, tpe: PageType, snapshot_id: u64) -> Res<BTreePage>;
+  fn new_page(&mut self, tpe: BTreePageType, snapshot_id: u64) -> Res<BTreePage>;
   // Duplicates the page for the provided snapshot id.
   fn dup_page(&mut self, page_id: u64, snapshot_id: u64) -> Res<BTreePage>;
   // Returns a page for the page id.
@@ -51,9 +157,7 @@ pub struct BTree {
 }
 
 impl BTree {
-  // Cache helpers
-
-  fn cache_new(&self, tpe: PageType) -> Res<BTreePage> {
+  fn cache_new(&self, tpe: BTreePageType) -> Res<BTreePage> {
     self.cache.borrow_mut().new_page(tpe, self.snapshot_id)
   }
 
@@ -186,7 +290,7 @@ pub fn put(btree: &BTree, key: &[u8], value: &[u8]) -> Res<BTree> {
     },
     PutResult::Split(left_id, right_id, skey) => {
       // Root page will always be internal after splitting
-      let mut page = btree.cache_new(PageType::Internal)?;
+      let mut page = btree.cache_new(BTreePageType::Internal)?;
       page.keys.push(skey);
       page.ptrs.push(left_id);
       page.ptrs.push(right_id);
@@ -508,7 +612,7 @@ mod tests {
   }
 
   impl BTreePageManager for TestPageManager {
-    fn new_page(&mut self, page_type: PageType, snapshot_id: u64) -> Res<BTreePage> {
+    fn new_page(&mut self, page_type: BTreePageType, snapshot_id: u64) -> Res<BTreePage> {
       let page = BTreePage {
         id: self.pages.len() as u64,
         snapshot_id: snapshot_id,
@@ -549,7 +653,7 @@ mod tests {
   fn new_btree(max_keys_per_page: usize) -> (BTree, Rc<RefCell<TestPageManager>>) {
     let mut cache = TestPageManager { pages: Vec::new() };
     let next_snapshot_id = 123;
-    let page = cache.new_page(PageType::Leaf, next_snapshot_id).unwrap();
+    let page = cache.new_page(BTreePageType::Leaf, next_snapshot_id).unwrap();
     let page_id = page.id;
     cache.put_page(page).unwrap();
 
@@ -583,7 +687,7 @@ mod tests {
   fn test_btree_cache_clone() {
     let (tree, cache) = new_btree(5);
 
-    for &tpe in &[PageType::Leaf, PageType::Internal] {
+    for &tpe in &[BTreePageType::Leaf, BTreePageType::Internal] {
       let page = tree.cache_new(tpe).unwrap();
       let page_id = page.id;
       let page = BTreePage { // create page to make sure we don't miss any new fields
