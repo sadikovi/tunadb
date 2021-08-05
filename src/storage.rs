@@ -253,7 +253,7 @@ impl StorageManager {
     Page::from(buf)
   }
 
-  // Returns a page at position `pos`.
+  // Stores the page at position `pos`.
   fn pstore(&mut self, pos: u64, page: Page) -> Res<()> {
     let buf = page.into()?;
     self.desc.borrow_mut().write(pos, &buf[..])
