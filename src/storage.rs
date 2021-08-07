@@ -128,8 +128,7 @@ impl Descriptor for MemDescriptor {
   }
 }
 
-const INVALID_PAGE_ID: u64 = u64::MAX;
-const INVALID_POS: u64 = u64::MAX;
+const NULL: u64 = u64::MAX;
 const PAGE_MAGIC: &[u8] = &[b'P', b'A', b'G', b'E'];
 const PAGE_META_LEN: usize = 16; // 4 bytes magic + 4 bytes len + 8 bytes cont
 
@@ -142,13 +141,13 @@ struct Page {
 impl Page {
   // Creates an empty page with length 0 and no continuation
   fn empty(page_size: usize) -> Page {
-    Self { len: 0, cont_page_id: INVALID_PAGE_ID, data: vec![0; page_size] }
+    Self { len: 0, cont_page_id: NULL, data: vec![0; page_size] }
   }
 
   // Resets the page as empty.
   fn reset(&mut self) {
     self.len = 0;
-    self.cont_page_id = INVALID_PAGE_ID;
+    self.cont_page_id = NULL;
   }
 
   fn offset(&self) -> usize {
@@ -227,7 +226,7 @@ impl StorageManager {
   // Page ids are always monotonically increasing numbers.
   // They might be reused after a crash but will never conflict with existing page ids.
   pub fn new_page_id(&mut self) -> u64 {
-    assert_ne!(self.page_counter, INVALID_PAGE_ID, "INVALID_PAGE_ID");
+    assert_ne!(self.page_counter, NULL, "Page counter is NULL");
     let next_id = self.page_counter;
     self.page_counter += 1;
     next_id
@@ -249,7 +248,7 @@ impl StorageManager {
       let (pos, mut page) = self.free_list_pop()?;
       self.page_table_insert(page_id, pos)?;
       buf_len += page.write(&buf)?;
-      page_id = if buf_len < buf.len() { self.new_page_id() } else { INVALID_PAGE_ID };
+      page_id = if buf_len < buf.len() { self.new_page_id() } else { NULL };
       page.cont_page_id = page_id;
       self.pstore(pos, page)?;
     }
@@ -263,7 +262,7 @@ impl StorageManager {
   // the original data.
   // Page id must exist prior calling this method.
   pub fn read(&mut self, mut page_id: u64, buf: &mut Vec<u8>) -> Res<()> {
-    while page_id != INVALID_PAGE_ID {
+    while page_id != NULL {
       let pos = self.page_table_lookup(page_id)?;
       let page = self.pload(pos)?;
       page.read(buf)?;
@@ -276,7 +275,7 @@ impl StorageManager {
   //
   // Page id must exist prior calling this method.
   pub fn free(&mut self, mut page_id: u64) -> Res<()> {
-    while page_id != INVALID_PAGE_ID {
+    while page_id != NULL {
       let pos = self.page_table_lookup(page_id)?;
       let page = self.pload(pos)?;
       self.page_table_delete(page_id)?;
@@ -368,7 +367,7 @@ impl StorageManager {
 
   // Returns the next free page to use and its position.
   fn free_list_pop(&mut self) -> Res<(u64, Page)> {
-    if self.free_ptr == INVALID_POS {
+    if self.free_ptr == NULL {
       self.pappend()
     } else {
       // Next position for sequential access
@@ -379,9 +378,11 @@ impl StorageManager {
 
       if pos == self.free_ptr {
         // Remove the head of the list
-        self.free_ptr = next_pos;
         self.free_map.remove(&pos);
-        self.free_map.insert(next_pos, INVALID_POS);
+        if next_pos != NULL {
+          self.free_map.insert(next_pos, NULL); // previously pointed to `pos`
+        }
+        self.free_ptr = next_pos;
       } else {
         let mut parent = self.pload(parent_pos)?;
         parent.reset();
@@ -403,8 +404,10 @@ impl StorageManager {
     page.write(&self.free_ptr.to_le_bytes())?;
     self.pstore(pos, page)?;
     // Update free map
-    self.free_map.insert(self.free_ptr, pos);
-    self.free_map.insert(pos, INVALID_POS); // head of the list
+    if self.free_ptr != NULL {
+      self.free_map.insert(self.free_ptr, pos);
+    }
+    self.free_map.insert(pos, NULL); // head of the list
     // Update the pointer
     self.free_ptr = pos;
     self.free_count += 1;
@@ -439,7 +442,7 @@ impl StorageManager {
         // Remove the head of the list
         self.free_ptr = next_pos;
         self.free_map.remove(&pos);
-        self.free_map.insert(next_pos, INVALID_POS);
+        self.free_map.insert(next_pos, NULL);
       } else {
         let mut parent = self.pload(parent_pos)?;
         parent.reset();
