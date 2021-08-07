@@ -212,6 +212,7 @@ impl StorageManager {
 
   // Writes the data for page id.
   //
+  // Writes are performed with overflow pages if `buf.len()` exceeds the page size.
   // We don't overwrite the existing pages, so the provided page id must not exist in the
   // page table.
   pub fn write(&mut self, mut page_id: u64, buf: &[u8]) -> Res<()> {
@@ -235,7 +236,9 @@ impl StorageManager {
 
   // Reads stored data for the page id.
   //
-  // Page id must have been written prior calling this method.
+  // All overflow pages that are linked to the page with `page_id` will be read to reconstruct
+  // the original data.
+  // Page id must exist prior calling this method.
   pub fn read(&mut self, mut page_id: u64, buf: &mut Vec<u8>) -> Res<()> {
     while page_id != INVALID_PAGE_ID {
       let pos = self.page_table_lookup(page_id)?;
@@ -246,7 +249,9 @@ impl StorageManager {
     Ok(())
   }
 
-  // Frees the page and its overflow pages.
+  // Frees the page and its overflow pages if exist.
+  //
+  // Page id must exist prior calling this method.
   pub fn free(&mut self, mut page_id: u64) -> Res<()> {
     while page_id != INVALID_PAGE_ID {
       let pos = self.page_table_lookup(page_id)?;
