@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 use crate::error::Res;
+use crate::btree;
 
 // Abstract storage interface to write data.
 trait Descriptor {
@@ -218,6 +219,8 @@ pub struct StorageManager {
   free_ptr: u64, // pointer to the free list, represents the absolute position of a page
   free_count: usize, // number of pages in the free list
   free_map: BTreeMap<u64, u64>, // in-memory BTree to return pages in sequential order
+  page_dir: btree::BTree, // page directory
+  page_dir_size: usize, // number of page ids in the page directory
 }
 
 impl StorageManager {
@@ -239,14 +242,14 @@ impl StorageManager {
   // page table.
   pub fn write(&mut self, mut page_id: u64, buf: &[u8]) -> Res<()> {
     // We cannot write a page that has been written already
-    if let Ok(pos) = self.page_table_lookup(page_id) {
+    if let Ok(pos) = self.page_dir_lookup(page_id) {
       return Err(err!("Page {} already exists at pos {}", page_id, pos));
     }
 
     let mut buf_len = 0;
     while buf_len < buf.len() {
       let (pos, mut page) = self.free_list_pop()?;
-      self.page_table_insert(page_id, pos)?;
+      self.page_dir_insert(page_id, pos)?;
       buf_len += page.write(&buf)?;
       page_id = if buf_len < buf.len() { self.new_page_id() } else { NULL };
       page.cont_page_id = page_id;
@@ -263,7 +266,7 @@ impl StorageManager {
   // Page id must exist prior calling this method.
   pub fn read(&mut self, mut page_id: u64, buf: &mut Vec<u8>) -> Res<()> {
     while page_id != NULL {
-      let pos = self.page_table_lookup(page_id)?;
+      let pos = self.page_dir_lookup(page_id)?;
       let page = self.pload(pos)?;
       page.read(buf)?;
       page_id = page.cont_page_id;
@@ -276,9 +279,9 @@ impl StorageManager {
   // Page id must exist prior calling this method.
   pub fn free(&mut self, mut page_id: u64) -> Res<()> {
     while page_id != NULL {
-      let pos = self.page_table_lookup(page_id)?;
+      let pos = self.page_dir_lookup(page_id)?;
       let page = self.pload(pos)?;
-      self.page_table_delete(page_id)?;
+      self.page_dir_delete(page_id)?;
       page_id = page.cont_page_id;
       self.free_list_push(pos, page)?;
     }
@@ -302,7 +305,7 @@ impl StorageManager {
   }
 
   pub fn num_used_pages(&self) -> Res<usize> {
-    self.page_table_size()
+    Ok(self.page_dir_size)
   }
 
   // The amount of memory (in bytes) used by the storage manager.
@@ -343,20 +346,29 @@ impl StorageManager {
   // free pages:
   //   btree (pos -> n/a), allows to order positions for sequential access
 
-  fn page_table_lookup(&self, page_id: u64) -> Res<u64> {
-    unimplemented!()
+  fn page_dir_lookup(&self, page_id: u64) -> Res<u64> {
+    match btree::get(&self.page_dir, &page_id.to_le_bytes())? {
+      Some(value) => Ok(u64_le!(&value[..])),
+      None => Err(err!("Page {} is not found", page_id))
+    }
   }
 
-  fn page_table_insert(&mut self, page_id: u64, pos: u64) -> Res<()> {
-    unimplemented!()
+  fn page_dir_insert(&mut self, page_id: u64, pos: u64) -> Res<()> {
+    if let Some(_) = btree::get(&self.page_dir, &page_id.to_le_bytes())? {
+      return Err(err!("Page {} already exists, page overwrite is not allowed", page_id));
+    }
+    self.page_dir = btree::put(&self.page_dir, &page_id.to_le_bytes(), &pos.to_le_bytes())?;
+    self.page_dir_size += 1;
+    Ok(())
   }
 
-  fn page_table_delete(&mut self, page_id: u64) -> Res<()> {
-    unimplemented!()
-  }
-
-  fn page_table_size(&self) -> Res<usize> {
-    unimplemented!()
+  fn page_dir_delete(&mut self, page_id: u64) -> Res<()> {
+    if let None = btree::get(&self.page_dir, &page_id.to_le_bytes())? {
+      return Err(err!("Page {} does not exist, no-op delete is not allowed", page_id));
+    }
+    self.page_dir = btree::del(&self.page_dir, &page_id.to_le_bytes())?;
+    self.page_dir_size -= 1;
+    Ok(())
   }
 
   // ====================
