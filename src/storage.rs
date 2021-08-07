@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::cmp;
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
@@ -13,6 +14,8 @@ trait Descriptor {
   fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()>;
   // Total length of the file or memory buffer, used for appends.
   fn len(&self) -> Res<u64>;
+  // Total amount of memory (in bytes) used by the descriptor.
+  fn mem_usage(&self) -> Res<usize>;
 }
 
 // File-based storage.
@@ -50,6 +53,10 @@ impl Descriptor for FileDescriptor {
 
   fn len(&self) -> Res<u64> {
     Ok(self.fd.metadata()?.len())
+  }
+
+  fn mem_usage(&self) -> Res<usize> {
+    Ok(0)
   }
 }
 
@@ -91,6 +98,10 @@ impl Descriptor for MemDescriptor {
 
   fn len(&self) -> Res<u64> {
     Ok(self.data.len() as u64)
+  }
+
+  fn mem_usage(&self) -> Res<usize> {
+    Ok(self.data.len())
   }
 }
 
@@ -184,6 +195,7 @@ pub struct StorageManager {
   desc: Rc<RefCell<dyn Descriptor>>,
   free_ptr: u64, // pointer to the free list, represents the absolute position of a page
   free_count: usize, // number of pages in the free list
+  free_map: BTreeMap<u64, u64>, // in-memory BTree to return pages in sequential order
 }
 
 impl StorageManager {
@@ -266,6 +278,11 @@ impl StorageManager {
     self.page_table_size()
   }
 
+  // The amount of memory (in bytes) used by the storage manager.
+  pub fn mem_usage(&self) -> Res<usize> {
+    Ok(self.desc.borrow().mem_usage()? + self.free_map.len() * (8 /* key */ + 8 /* value */))
+  }
+
   // ==========================
   // Positional page operations
   // ==========================
@@ -326,12 +343,28 @@ impl StorageManager {
     if self.free_ptr == INVALID_POS {
       self.pappend()
     } else {
-      let mut page = self.pload(self.free_ptr)?;
+      // Next position for sequential access
+      let (&pos, &parent_pos) = self.free_map.iter().next().unwrap(); // guaranteed to exist
+      // Load pages and update pointers
+      let mut page = self.pload(pos)?;
       let next_pos = u64_le!(&page.data()[0..8]);
-      let pos = self.free_ptr;
-      self.free_ptr = next_pos;
+
+      if pos == self.free_ptr {
+        // Remove the head of the list
+        self.free_ptr = next_pos;
+        self.free_map.remove(&pos);
+        self.free_map.insert(next_pos, INVALID_POS);
+      } else {
+        let mut parent = self.pload(parent_pos)?;
+        parent.reset();
+        parent.write(&next_pos.to_le_bytes())?;
+        self.pstore(parent_pos, parent)?;
+        self.free_map.remove(&pos);
+        self.free_map.insert(next_pos, parent_pos);
+      }
       page.reset();
       self.free_count -= 1;
+
       Ok((pos, page))
     }
   }
@@ -341,8 +374,13 @@ impl StorageManager {
     page.reset();
     page.write(&self.free_ptr.to_le_bytes())?;
     self.pstore(pos, page)?;
+    // Update free map
+    self.free_map.insert(self.free_ptr, pos);
+    self.free_map.insert(pos, INVALID_POS); // head of the list
+    // Update the pointer
     self.free_ptr = pos;
     self.free_count += 1;
+
     Ok(())
   }
 
