@@ -95,6 +95,7 @@ impl Descriptor for MemDescriptor {
 }
 
 const INVALID_PAGE_ID: u64 = u64::MAX;
+const INVALID_POS: u64 = u64::MAX;
 const PAGE_MAGIC: &[u8] = &[b'P', b'A', b'G', b'E'];
 const PAGE_META_LEN: usize = 16; // 4 bytes magic + 4 bytes len + 8 bytes cont
 
@@ -110,12 +111,22 @@ impl Page {
     Self { len: 0, cont_page_id: INVALID_PAGE_ID, data: vec![0; page_size] }
   }
 
+  // Resets the page as empty.
+  fn reset(&mut self) {
+    self.len = 0;
+    self.cont_page_id = INVALID_PAGE_ID;
+  }
+
   fn offset(&self) -> usize {
     PAGE_META_LEN + self.len
   }
 
   fn capacity(&self) -> usize {
     self.data.len() - self.offset()
+  }
+
+  fn data(&self) -> &[u8] {
+    &self.data[PAGE_META_LEN..PAGE_META_LEN + self.len]
   }
 
   // Writes bytes into page and returns the number of bytes written.
@@ -129,7 +140,7 @@ impl Page {
 
   // Reads full page content into the mutable buffer.
   fn read(&self, buf: &mut Vec<u8>) -> Res<()> {
-    buf.extend(&self.data[PAGE_META_LEN..PAGE_META_LEN + self.len]);
+    buf.extend(self.data());
     Ok(())
   }
 
@@ -171,6 +182,8 @@ pub struct StorageManager {
   page_size: usize, // page size on disk
   page_counter: u64, // ephemeral page counter
   desc: Rc<RefCell<dyn Descriptor>>,
+  free_ptr: u64, // pointer to the free list, represents the absolute position of a page
+  free_count: usize, // number of pages in the free list
 }
 
 impl StorageManager {
@@ -227,10 +240,30 @@ impl StorageManager {
       let pos = self.page_table_lookup(page_id)?;
       let page = self.pload(pos)?;
       self.page_table_delete(page_id)?;
-      self.free_list_push(pos)?;
       page_id = page.cont_page_id;
+      self.free_list_push(pos, page)?;
     }
     self.sync()
+  }
+
+  // ==================
+  // Storage statistics
+  // ==================
+
+  pub fn page_size(&self) -> usize {
+    self.page_size
+  }
+
+  pub fn num_total_pages(&self) -> Res<usize> {
+    Ok(self.desc.borrow().len()? as usize / self.page_size)
+  }
+
+  pub fn num_free_pages(&self) -> Res<usize> {
+    Ok(self.free_count)
+  }
+
+  pub fn num_used_pages(&self) -> Res<usize> {
+    self.page_table_size()
   }
 
   // ==========================
@@ -239,10 +272,9 @@ impl StorageManager {
 
   // Returns a new page and its offset position in the file.
   fn pappend(&mut self) -> Res<(u64, Page)> {
-    let buf = Page::empty(self.page_size).into()?;
+    let page = Page::empty(self.page_size);
     let pos = self.desc.borrow().len()?;
-    self.desc.borrow_mut().write(pos, &buf[..])?;
-    let page = Page::from(buf)?;
+    self.desc.borrow_mut().write(pos, page.data())?;
     Ok((pos, page))
   }
 
@@ -279,18 +311,39 @@ impl StorageManager {
     unimplemented!()
   }
 
+  fn page_table_size(&self) -> Res<usize> {
+    unimplemented!()
+  }
+
   // ====================
   // Free list operations
   // ====================
 
   // Free list will give positions in sorted (ascending) order to ensure sequential writes.
 
+  // Returns the next free page to use and its position.
   fn free_list_pop(&mut self) -> Res<(u64, Page)> {
-    unimplemented!()
+    if self.free_ptr == INVALID_POS {
+      self.pappend()
+    } else {
+      let mut page = self.pload(self.free_ptr)?;
+      let next_pos = u64_le!(&page.data()[0..8]);
+      let pos = self.free_ptr;
+      self.free_ptr = next_pos;
+      page.reset();
+      self.free_count -= 1;
+      Ok((pos, page))
+    }
   }
 
-  fn free_list_push(&mut self, pos: u64) -> Res<()> {
-    unimplemented!()
+  // Stores the page and its corresponding position in the free list.
+  fn free_list_push(&mut self, pos: u64, mut page: Page) -> Res<()> {
+    page.reset();
+    page.write(&self.free_ptr.to_le_bytes())?;
+    self.pstore(pos, page)?;
+    self.free_ptr = pos;
+    self.free_count += 1;
+    Ok(())
   }
 
   // ========================
