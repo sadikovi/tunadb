@@ -5,5 +5,5 @@
 pub mod util;
 #[macro_use]
 pub mod error;
-pub mod btree2;
+pub mod btree;
 pub mod storage;
