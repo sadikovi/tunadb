@@ -1,4 +1,5 @@
 //! Test database.
+#![feature(map_first_last)]
 
 #[macro_use]
 pub mod util;

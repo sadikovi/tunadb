@@ -12,6 +12,9 @@ trait Descriptor {
   fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()>;
   // Writes data at the specified position.
   fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()>;
+  // Truncates the descriptor to the provided length.
+  // If `len` is larger than the current length, error is returned.
+  fn truncate(&mut self, len: u64) -> Res<()>;
   // Total length of the file or memory buffer, used for appends.
   fn len(&self) -> Res<u64>;
   // Total amount of memory (in bytes) used by the descriptor.
@@ -48,6 +51,16 @@ impl Descriptor for FileDescriptor {
     self.fd.write_all(buf)?;
     self.fd.flush()?;
     // TODO: call self.fd.sync_all()
+    Ok(())
+  }
+
+  fn truncate(&mut self, len: u64) -> Res<()> {
+    let curr_len = self.len()?;
+    if len > curr_len {
+      return Err(err!("Cannot truncate to len {}, current len {}", len, curr_len));
+    } else if len < curr_len {
+      self.fd.set_len(len)?;
+    }
     Ok(())
   }
 
@@ -92,6 +105,16 @@ impl Descriptor for MemDescriptor {
     if min_len < buf.len() {
       // Write the rest of the data
       self.data.extend_from_slice(&buf[min_len..]);
+    }
+    Ok(())
+  }
+
+  fn truncate(&mut self, len: u64) -> Res<()> {
+    let curr_len = self.len()?;
+    if len > curr_len {
+      return Err(err!("Cannot truncate to len {}, current len {}", len, curr_len));
+    } else if len < curr_len {
+      self.data.truncate(len as usize);
     }
     Ok(())
   }
@@ -385,6 +408,53 @@ impl StorageManager {
     // Update the pointer
     self.free_ptr = pos;
     self.free_count += 1;
+
+    self.op_truncate()
+  }
+
+  // Truncates the underlying descriptor depending on the positions in the free list.
+  fn op_truncate(&mut self) -> Res<()> {
+    let mut desc_len = self.desc.borrow().len()?;
+    let mut stack: Vec<(u64, u64)> = Vec::new();
+    while let Some((pos, parent_pos)) = self.free_map.pop_last() {
+      assert!(pos < desc_len, "unexpected pos {} >= desc length {}", pos, desc_len);
+      if pos + self.page_size as u64 >= desc_len {
+        // We can truncate the descriptor.
+        stack.push((pos, parent_pos));
+        desc_len = pos;
+      } else {
+        self.free_map.insert(pos, parent_pos);
+        break;
+      }
+    }
+
+    // We have collected at least one position to remove.
+    let do_truncate = stack.len() > 0;
+
+    while let Some((pos, parent_pos)) = stack.pop() {
+      // Load pages and update pointers
+      let page = self.pload(pos)?;
+      let next_pos = u64_le!(&page.data()[0..8]);
+      if pos == self.free_ptr {
+        // Remove the head of the list
+        self.free_ptr = next_pos;
+        self.free_map.remove(&pos);
+        self.free_map.insert(next_pos, INVALID_POS);
+      } else {
+        let mut parent = self.pload(parent_pos)?;
+        parent.reset();
+        parent.write(&next_pos.to_le_bytes())?;
+        self.pstore(parent_pos, parent)?;
+        self.free_map.remove(&pos);
+        self.free_map.insert(next_pos, parent_pos);
+      }
+      self.free_count -= 1;
+    }
+
+
+    if do_truncate {
+      self.desc.borrow_mut().truncate(desc_len)?;
+    }
 
     Ok(())
   }
