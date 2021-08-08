@@ -57,7 +57,7 @@ impl Descriptor for FileDescriptor {
   fn truncate(&mut self, len: u64) -> Res<()> {
     let curr_len = self.len()?;
     if len > curr_len {
-      return Err(err!("Cannot truncate to len {}, current len {}", len, curr_len));
+      return Err(err!("Cannot truncate to len {}, curr_len {}", len, curr_len));
     } else if len < curr_len {
       self.fd.set_len(len)?;
     }
@@ -112,7 +112,7 @@ impl Descriptor for MemDescriptor {
   fn truncate(&mut self, len: u64) -> Res<()> {
     let curr_len = self.len()?;
     if len > curr_len {
-      return Err(err!("Cannot truncate to len {}, current len {}", len, curr_len));
+      return Err(err!("Cannot truncate to len {}, curr_len {}", len, curr_len));
     } else if len < curr_len {
       self.data.truncate(len as usize);
     }
@@ -128,359 +128,143 @@ impl Descriptor for MemDescriptor {
   }
 }
 
-const NULL: u64 = u64::MAX;
-const PAGE_MAGIC: &[u8] = &[b'P', b'A', b'G', b'E'];
-const PAGE_META_LEN: usize = 16; // 4 bytes magic + 4 bytes len + 8 bytes cont
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::env::temp_dir;
+  use std::fs::remove_file;
+  use std::path::Path;
 
-struct Page {
-  len: usize, // actual length of the data (< page_size)
-  cont_page_id: u64, // continuation page id (free -> free, active -> overflow)
-  data: Vec<u8>, // vector of page_size len, must be used as &mut [u8]
-}
-
-impl Page {
-  // Creates an empty page with length 0 and no continuation
-  fn empty(page_size: usize) -> Page {
-    Self { len: 0, cont_page_id: NULL, data: vec![0; page_size] }
+  struct TempFile {
+    path: String,
   }
 
-  // Resets the page as empty.
-  fn reset(&mut self) {
-    self.len = 0;
-    self.cont_page_id = NULL;
-  }
-
-  fn offset(&self) -> usize {
-    PAGE_META_LEN + self.len
-  }
-
-  fn capacity(&self) -> usize {
-    self.data.len() - self.offset()
-  }
-
-  fn data(&self) -> &[u8] {
-    &self.data[PAGE_META_LEN..PAGE_META_LEN + self.len]
-  }
-
-  // Writes bytes into page and returns the number of bytes written.
-  fn write(&mut self, buf: &[u8]) -> Res<usize> {
-    let offset = self.offset();
-    let len = cmp::min(buf.len(), self.capacity());
-    (&mut self.data[offset..offset + len]).write(&buf[..len])?;
-    self.len += len;
-    Ok(len)
-  }
-
-  // Reads full page content into the mutable buffer.
-  fn read(&self, buf: &mut Vec<u8>) -> Res<()> {
-    buf.extend(self.data());
-    Ok(())
-  }
-
-  // Converts byte buffer into Page.
-  fn from(buf: Vec<u8>) -> Res<Self> {
-    if buf.len() < PAGE_META_LEN {
-      return Err(err!("Page buffer is too small ({})", buf.len()));
-    }
-    if &buf[0..4] != PAGE_MAGIC {
-      return Err(err!("Invalid page magic: {:?}", &buf[0..4]));
-    }
-    // Read length of the data in the page
-    let len = u32_le!(&buf[4..8]) as usize;
-    if len > buf.len() {
-      return Err(err!("Invalid page length: {}", len));
-    }
-    // Read continuation position for the page
-    let cont_page_id = u64_le!(&buf[8..16]);
-    Ok(Self { len, cont_page_id, data: buf })
-  }
-
-  // Stores page metadata into the byte buffer and returns it.
-  fn into(mut self) -> Res<Vec<u8>> {
-    if self.data.len() < PAGE_META_LEN {
-      return Err(err!("Page buffer is too small ({})", self.data.len()));
-    }
-    (&mut self.data[0..4]).write_all(&PAGE_MAGIC)?;
-    if self.len > self.data.len() {
-      return Err(err!("Invalid page length: {}", self.len));
-    }
-    (&mut self.data[4..8]).write_all(&(self.len as u32).to_le_bytes())?;
-    (&mut self.data[8..16]).write_all(&self.cont_page_id.to_le_bytes())?;
-    Ok(self.data)
-  }
-}
-
-// Free pages are not stored in the page table, they are stored in a separate data structure.
-pub struct StorageManager {
-  page_size: usize, // page size on disk
-  page_counter: u64, // ephemeral page counter
-  desc: Rc<RefCell<dyn Descriptor>>,
-  free_ptr: u64, // pointer to the free list, represents the absolute position of a page
-  free_count: usize, // number of pages in the free list
-  free_map: BTreeMap<u64, u64>, // in-memory BTree to return pages in sequential order
-  page_dir: btree::BTree, // page directory
-  page_dir_size: usize, // number of page ids in the page directory
-}
-
-impl StorageManager {
-  // Returns the next page id.
-  //
-  // Page ids are always monotonically increasing numbers.
-  // They might be reused after a crash but will never conflict with existing page ids.
-  pub fn new_page_id(&mut self) -> u64 {
-    assert_ne!(self.page_counter, NULL, "Page counter is NULL");
-    let next_id = self.page_counter;
-    self.page_counter += 1;
-    next_id
-  }
-
-  // Writes the data for page id.
-  //
-  // Writes are performed with overflow pages if `buf.len()` exceeds the page size.
-  // We don't overwrite the existing pages, so the provided page id must not exist in the
-  // page table.
-  pub fn write(&mut self, mut page_id: u64, buf: &[u8]) -> Res<()> {
-    // We cannot write a page that has been written already
-    if let Ok(pos) = self.page_dir_lookup(page_id) {
-      return Err(err!("Page {} already exists at pos {}", page_id, pos));
+  impl TempFile {
+    fn new() -> Self {
+      let file_name = format!("test_storage_tmp_file_{}", rand::random::<u64>());
+      let mut tmp_dir = temp_dir();
+      tmp_dir.push(file_name);
+      let path = tmp_dir.as_path();
+      assert!(!path.exists(), "Random path {:?} exists", path);
+      Self { path: path.to_str().unwrap().to_owned() }
     }
 
-    let mut buf_len = 0;
-    while buf_len < buf.len() {
-      let (pos, mut page) = self.free_list_pop()?;
-      self.page_dir_insert(page_id, pos)?;
-      buf_len += page.write(&buf)?;
-      page_id = if buf_len < buf.len() { self.new_page_id() } else { NULL };
-      page.cont_page_id = page_id;
-      self.pstore(pos, page)?;
-    }
-
-    self.sync()
-  }
-
-  // Reads stored data for the page id.
-  //
-  // All overflow pages that are linked to the page with `page_id` will be read to reconstruct
-  // the original data.
-  // Page id must exist prior calling this method.
-  pub fn read(&mut self, mut page_id: u64, buf: &mut Vec<u8>) -> Res<()> {
-    while page_id != NULL {
-      let pos = self.page_dir_lookup(page_id)?;
-      let page = self.pload(pos)?;
-      page.read(buf)?;
-      page_id = page.cont_page_id;
-    }
-    Ok(())
-  }
-
-  // Frees the page and its overflow pages if exist.
-  //
-  // Page id must exist prior calling this method.
-  pub fn free(&mut self, mut page_id: u64) -> Res<()> {
-    while page_id != NULL {
-      let pos = self.page_dir_lookup(page_id)?;
-      let page = self.pload(pos)?;
-      self.page_dir_delete(page_id)?;
-      page_id = page.cont_page_id;
-      self.free_list_push(pos, page)?;
-    }
-    self.sync()
-  }
-
-  // ==================
-  // Storage statistics
-  // ==================
-
-  pub fn page_size(&self) -> usize {
-    self.page_size
-  }
-
-  pub fn num_total_pages(&self) -> Res<usize> {
-    Ok(self.desc.borrow().len()? as usize / self.page_size)
-  }
-
-  pub fn num_free_pages(&self) -> Res<usize> {
-    Ok(self.free_count)
-  }
-
-  pub fn num_used_pages(&self) -> Res<usize> {
-    Ok(self.page_dir_size)
-  }
-
-  // The amount of memory (in bytes) used by the storage manager.
-  pub fn mem_usage(&self) -> Res<usize> {
-    Ok(self.desc.borrow().mem_usage()? + self.free_map.len() * (8 /* key */ + 8 /* value */))
-  }
-
-  // ==========================
-  // Positional page operations
-  // ==========================
-
-  // Returns a new page and its offset position in the file.
-  fn pappend(&mut self) -> Res<(u64, Page)> {
-    let page = Page::empty(self.page_size);
-    let pos = self.desc.borrow().len()?;
-    self.desc.borrow_mut().write(pos, page.data())?;
-    Ok((pos, page))
-  }
-
-  // Returns a page at position `pos`.
-  fn pload(&mut self, pos: u64) -> Res<Page> {
-    let mut buf = vec![0; self.page_size];
-    self.desc.borrow_mut().read(pos, &mut buf[..])?;
-    Page::from(buf)
-  }
-
-  // Stores the page at position `pos`.
-  fn pstore(&mut self, pos: u64, page: Page) -> Res<()> {
-    let buf = page.into()?;
-    self.desc.borrow_mut().write(pos, &buf[..])
-  }
-
-  // =====================
-  // Page table operations
-  // =====================
-  // page table:
-  //   btree (page id -> pos): gives the ability to check the largest page id
-  // free pages:
-  //   btree (pos -> n/a), allows to order positions for sequential access
-
-  fn page_dir_lookup(&self, page_id: u64) -> Res<u64> {
-    match btree::get(&self.page_dir, &page_id.to_le_bytes())? {
-      Some(value) => Ok(u64_le!(&value[..])),
-      None => Err(err!("Page {} is not found", page_id))
+    fn path(&self) -> &str {
+      self.path.as_ref()
     }
   }
 
-  fn page_dir_insert(&mut self, page_id: u64, pos: u64) -> Res<()> {
-    if let Some(_) = btree::get(&self.page_dir, &page_id.to_le_bytes())? {
-      return Err(err!("Page {} already exists, page overwrite is not allowed", page_id));
-    }
-    self.page_dir = btree::put(&self.page_dir, &page_id.to_le_bytes(), &pos.to_le_bytes())?;
-    self.page_dir_size += 1;
-    Ok(())
-  }
-
-  fn page_dir_delete(&mut self, page_id: u64) -> Res<()> {
-    if let None = btree::get(&self.page_dir, &page_id.to_le_bytes())? {
-      return Err(err!("Page {} does not exist, no-op delete is not allowed", page_id));
-    }
-    self.page_dir = btree::del(&self.page_dir, &page_id.to_le_bytes())?;
-    self.page_dir_size -= 1;
-    Ok(())
-  }
-
-  // ====================
-  // Free list operations
-  // ====================
-
-  // Free list will give positions in sorted (ascending) order to ensure sequential writes.
-
-  // Returns the next free page to use and its position.
-  fn free_list_pop(&mut self) -> Res<(u64, Page)> {
-    if self.free_ptr == NULL {
-      self.pappend()
-    } else {
-      // Next position for sequential access
-      let (&pos, &parent_pos) = self.free_map.first_key_value().unwrap(); // guaranteed to exist
-      // Load pages and update pointers
-      let mut page = self.pload(pos)?;
-      let next_pos = u64_le!(&page.data()[0..8]);
-
-      if pos == self.free_ptr {
-        // Remove the head of the list
-        self.free_map.remove(&pos);
-        if next_pos != NULL {
-          self.free_map.insert(next_pos, NULL); // previously pointed to `pos`
-        }
-        self.free_ptr = next_pos;
-      } else {
-        let mut parent = self.pload(parent_pos)?;
-        parent.reset();
-        parent.write(&next_pos.to_le_bytes())?;
-        self.pstore(parent_pos, parent)?;
-        self.free_map.remove(&pos);
-        self.free_map.insert(next_pos, parent_pos);
-      }
-      page.reset();
-      self.free_count -= 1;
-
-      Ok((pos, page))
-    }
-  }
-
-  // Stores the page and its corresponding position in the free list.
-  fn free_list_push(&mut self, pos: u64, mut page: Page) -> Res<()> {
-    page.reset();
-    page.write(&self.free_ptr.to_le_bytes())?;
-    self.pstore(pos, page)?;
-    // Update free map
-    if self.free_ptr != NULL {
-      self.free_map.insert(self.free_ptr, pos);
-    }
-    self.free_map.insert(pos, NULL); // head of the list
-    // Update the pointer
-    self.free_ptr = pos;
-    self.free_count += 1;
-
-    // self.op_truncate()
-    Ok(())
-  }
-
-  // Truncates the underlying descriptor depending on the positions in the free list.
-  fn op_truncate(&mut self) -> Res<()> {
-    let mut desc_len = self.desc.borrow().len()?;
-    let mut stack: Vec<(u64, u64)> = Vec::new();
-    while let Some((pos, parent_pos)) = self.free_map.pop_last() {
-      assert!(pos < desc_len, "unexpected pos {} >= desc length {}", pos, desc_len);
-      if pos + self.page_size as u64 >= desc_len {
-        // We can truncate the descriptor.
-        stack.push((pos, parent_pos));
-        desc_len = pos;
-      } else {
-        self.free_map.insert(pos, parent_pos);
-        break;
+  impl Drop for TempFile {
+    fn drop(&mut self) {
+      let path = Path::new(&self.path);
+      if path.exists() {
+        remove_file(path).unwrap();
       }
     }
-
-    // We have collected at least one position to remove.
-    let do_truncate = stack.len() > 0;
-
-    while let Some((pos, parent_pos)) = stack.pop() {
-      // Load pages and update pointers
-      let page = self.pload(pos)?;
-      let next_pos = u64_le!(&page.data()[0..8]);
-      if pos == self.free_ptr {
-        // Remove the head of the list
-        self.free_ptr = next_pos;
-        self.free_map.remove(&pos);
-        self.free_map.insert(next_pos, NULL);
-      } else {
-        let mut parent = self.pload(parent_pos)?;
-        parent.reset();
-        parent.write(&next_pos.to_le_bytes())?;
-        self.pstore(parent_pos, parent)?;
-        self.free_map.remove(&pos);
-        self.free_map.insert(next_pos, parent_pos);
-      }
-      self.free_count -= 1;
-    }
-
-
-    if do_truncate {
-      self.desc.borrow_mut().truncate(desc_len)?;
-    }
-
-    Ok(())
   }
 
-  // ========================
-  // Metadata sync operations
-  // ========================
+  fn with_tmp_file<F>(func: F) where F: Fn(&str) -> () {
+    let tmp = TempFile::new();
+    println!("path: {}", tmp.path());
+    func(tmp.path());
+  }
 
-  // Sync metadata + page table + free pages.
-  fn sync(&mut self) -> Res<()> {
-    // get page 0
-    unimplemented!()
+  fn with_descriptor<F>(func: F) where F: Fn(&mut dyn Descriptor) -> () {
+    println!("Started testing FileDescriptor");
+    with_tmp_file(|path| {
+      let mut desc = FileDescriptor::new(path).unwrap();
+      func(&mut desc);
+    });
+    println!("Finished testing FileDescriptor");
+
+    println!("Started testing MemDescriptor");
+    let mut desc = MemDescriptor::new(0).unwrap();
+    func(&mut desc);
+    println!("Finished testing MemDescriptor");
+  }
+
+  #[test]
+  fn test_storage_tmp() {
+    with_descriptor(|desc| {
+      desc.write(0, "Hello, world!".as_bytes()).unwrap();
+    });
+  }
+
+  #[test]
+  fn test_storage_descriptor_write() {
+    with_descriptor(|desc| {
+      assert!(desc.write(10, &[1, 2, 3]).is_err());
+      assert!(desc.write(0, &[1, 2, 3]).is_ok());
+      assert!(desc.write(3, &[4, 5, 6]).is_ok());
+      assert!(desc.write(8, &[0, 0, 0]).is_err());
+    });
+  }
+
+  #[test]
+  fn test_storage_descriptor_read() {
+    with_descriptor(|desc| {
+      assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
+
+      let mut res = vec![0; 5];
+      assert!(desc.read(0, &mut res[0..4]).is_ok());
+      assert_eq!(res, vec![1, 2, 3, 4, 0]);
+
+      // Invalid reads
+      assert!(desc.read(100, &mut res[0..4]).is_err());
+      assert!(desc.read(7, &mut res[0..4]).is_err());
+    });
+  }
+
+  #[test]
+  fn test_storage_descriptor_truncate() {
+    with_descriptor(|desc| {
+      assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
+
+      // Truncate with larger length
+      assert!(desc.truncate(100).is_err());
+
+      // Truncate with smaller length
+      assert!(desc.truncate(5).is_ok());
+      let mut res = vec![0; 10];
+      assert!(desc.read(0, &mut res[0..5]).is_ok());
+      assert_eq!(&res[0..5], &[1, 2, 3, 4, 5]);
+      assert!(desc.read(0, &mut res[0..6]).is_err());
+
+      // Truncate the same length
+      assert!(desc.truncate(5).is_ok());
+      assert_eq!(desc.len(), Ok(5));
+    });
+  }
+
+  #[test]
+  fn test_storage_descriptor_len() {
+    with_descriptor(|desc| {
+      assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
+
+      assert_eq!(desc.len(), Ok(8));
+      for len in (0..desc.len().unwrap()).rev() {
+        assert!(desc.truncate(len).is_ok());
+        assert_eq!(desc.len(), Ok(len));
+      }
+    });
+  }
+
+  #[test]
+  fn test_storage_descriptor_mem_usage() {
+    let mut desc = MemDescriptor::new(0).unwrap();
+    assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
+    assert_eq!(desc.mem_usage(), Ok(8));
+
+    assert!(desc.truncate(2).is_ok());
+    assert_eq!(desc.mem_usage(), Ok(2));
+
+    // FileDescriptor has 0 memory usage
+    with_tmp_file(|path| {
+      let mut desc = FileDescriptor::new(path).unwrap();
+      assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
+      assert_eq!(desc.mem_usage(), Ok(0));
+      assert!(desc.truncate(2).is_ok());
+      assert_eq!(desc.mem_usage(), Ok(0));
+    })
   }
 }
