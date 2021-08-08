@@ -13,8 +13,7 @@ trait Descriptor {
   fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()>;
   // Writes data at the specified position.
   fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()>;
-  // Truncates the descriptor to the provided length.
-  // If `len` is larger than the current length, error is returned.
+  // Truncates to the provided length, `len` must be less than or equal to length.
   fn truncate(&mut self, len: u64) -> Res<()>;
   // Total length of the file or memory buffer, used for appends.
   fn len(&self) -> Res<u64>;
@@ -383,7 +382,7 @@ impl StorageManager {
       self.pappend()
     } else {
       // Next position for sequential access
-      let (&pos, &parent_pos) = self.free_map.iter().next().unwrap(); // guaranteed to exist
+      let (&pos, &parent_pos) = self.free_map.first_key_value().unwrap(); // guaranteed to exist
       // Load pages and update pointers
       let mut page = self.pload(pos)?;
       let next_pos = u64_le!(&page.data()[0..8]);
@@ -424,7 +423,8 @@ impl StorageManager {
     self.free_ptr = pos;
     self.free_count += 1;
 
-    self.op_truncate()
+    // self.op_truncate()
+    Ok(())
   }
 
   // Truncates the underlying descriptor depending on the positions in the free list.
