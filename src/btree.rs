@@ -49,35 +49,35 @@ pub fn btp2buf(btp: &BTreePage) -> Vec<u8> {
   let mut buf: Vec<u8> = Vec::with_capacity(btp.disk_size());
 
   // Write BTreePage metadata
-  buf.extend(&btp.id.to_le_bytes());
-  buf.extend(&btp.snapshot_id.to_le_bytes());
+  buf.extend(u64_u8!(btp.id));
+  buf.extend(u64_u8!(btp.snapshot_id));
   let tpe = match btp.tpe {
     BTreePageType::Leaf => 1,
     BTreePageType::Internal => 2,
   };
   buf.push(tpe);
-  buf.extend(&(btp.num_keys() as u32).to_le_bytes());
+  buf.extend(u32_u8!(btp.num_keys() as u32));
 
   // Write BTreePage data
   match btp.tpe {
     BTreePageType::Leaf => {
       for i in 0..btp.num_keys() {
         let key = &btp.keys[i];
-        buf.extend(&(key.len() as u32).to_le_bytes());
+        buf.extend(u32_u8!(key.len() as u32));
         buf.extend(key);
         let val = &btp.vals[i];
-        buf.extend(&(val.len() as u32).to_le_bytes());
+        buf.extend(u32_u8!(val.len() as u32));
         buf.extend(val);
       }
     },
     BTreePageType::Internal => {
       for i in 0..btp.num_keys() {
         let key = &btp.keys[i];
-        buf.extend(&(key.len() as u32).to_le_bytes());
+        buf.extend(u32_u8!(key.len() as u32));
         buf.extend(key);
       }
       for i in 0..btp.num_keys() + 1 {
-        buf.extend(&btp.ptrs[i].to_le_bytes());
+        buf.extend(u64_u8!(btp.ptrs[i]));
       }
     },
   }
@@ -97,35 +97,35 @@ pub fn buf2btp(buf: &[u8]) -> BTreePage {
   };
 
   // Read BTreePage metadata
-  btp.id = u64_le!(&buf[0..8]);
-  btp.snapshot_id = u64_le!(&buf[8..16]);
+  btp.id = u8_u64!(&buf[0..8]);
+  btp.snapshot_id = u8_u64!(&buf[8..16]);
   btp.tpe = match buf[16] {
     1 => BTreePageType::Leaf,
     _ => BTreePageType::Internal,
   };
-  let num_keys = u32_le!(buf[17..21]) as usize;
+  let num_keys = u8_u32!(buf[17..21]) as usize;
 
   // Read BTreePage data
   let mut pos = 21;
   match btp.tpe {
     BTreePageType::Leaf => {
       for _ in 0..num_keys {
-        let key_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        let key_len = u8_u32!(&buf[pos..pos + 4]) as usize;
         btp.keys.push(buf[pos + 4..pos + 4 + key_len].to_vec());
         pos += 4 + key_len;
-        let val_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        let val_len = u8_u32!(&buf[pos..pos + 4]) as usize;
         btp.vals.push(buf[pos + 4..pos + 4 + val_len].to_vec());
         pos += 4 + val_len;
       }
     },
     BTreePageType::Internal => {
       for _ in 0..num_keys {
-        let key_len = u32_le!(&buf[pos..pos + 4]) as usize;
+        let key_len = u8_u32!(&buf[pos..pos + 4]) as usize;
         btp.keys.push(buf[pos + 4..pos + 4 + key_len].to_vec());
         pos += 4 + key_len;
       }
       for _ in 0..num_keys + 1 {
-        btp.ptrs.push(u64_le!(&buf[pos..pos + 8]));
+        btp.ptrs.push(u8_u64!(&buf[pos..pos + 8]));
         pos += 8;
       }
     },
@@ -1074,7 +1074,7 @@ mod tests {
   }
 
   #[test]
-  fn test_fuzz_unique_put_get_del() {
+  fn test_btree_fuzz_unique_put_get_del() {
     let mut input = random_unique_key_seq(200);
 
     for &max_keys in &[10, 11] {
@@ -1108,7 +1108,7 @@ mod tests {
   }
 
   #[test]
-  fn test_fuzz_byte_put_get_del() {
+  fn test_btree_fuzz_byte_put_get_del() {
     let mut input = random_byte_key_seq(200);
 
     for &max_keys in &[10, 11] {
@@ -1143,7 +1143,7 @@ mod tests {
   }
 
   #[test]
-  fn test_fuzz_byte_put_range() {
+  fn test_btree_fuzz_byte_put_range() {
     let mut input = random_byte_key_seq(200);
     shuffle(&mut input);
 
