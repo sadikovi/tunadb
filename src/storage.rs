@@ -1,11 +1,10 @@
 use std::cell::RefCell;
 use std::cmp;
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::rc::Rc;
 use crate::error::Res;
-use crate::btree;
 
 // Abstract storage interface to write data.
 trait Descriptor {
@@ -125,6 +124,157 @@ impl Descriptor for MemDescriptor {
 
   fn mem_usage(&self) -> Res<usize> {
     Ok(self.data.len())
+  }
+}
+
+const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
+
+pub struct StorageManager {
+  page_size: u32, // page size on disk
+  desc: Rc<RefCell<dyn Descriptor>>,
+  free_page_id: u32, // pointer to the free list, represents the absolute position of a page
+  free_count: u32, // number of pages in the free list
+}
+
+impl StorageManager {
+  pub fn disk(page_size: u32, path_str: &str) -> Res<Self> {
+    let path = Path::new(path_str);
+
+    if path.exists() {
+      if !path.is_file() {
+        return Err(err!("Not a file: {}", path_str));
+      }
+      if path.metadata()?.len() < 16 {
+        return Err(err!("Corrupt database file, header is too small"));
+      }
+      // Because we don't know our page size, we need to read the minimum amount
+      // to load our metadata: 4 bytes magic + 4 bytes page size + (4 + 4) bytes on free pages
+      let mut page_buf = [0u8; 16];
+      let mut desc = FileDescriptor::new(path_str)?;
+      desc.read(0, &mut page_buf[..])?;
+
+      if &page_buf[..4] != MAGIC {
+        return Err(err!("Corrupt database file, invalid MAGIC"));
+      }
+
+      let page_size = u8_u32!(&page_buf[4..8]);
+      if page_size == 0 {
+        return Err(err!("Invalid page size {}", page_size));
+      }
+
+      let mngr = Self {
+        page_size,
+        desc: Rc::new(RefCell::new(desc)),
+        free_page_id: u8_u32!(&page_buf[8..12]),
+        free_count: u8_u32!(&page_buf[12..16]),
+      };
+      Ok(mngr)
+    } else {
+      if page_size == 0 {
+        return Err(err!("Invalid page size {}", page_size));
+      }
+
+      let desc = Rc::new(RefCell::new(FileDescriptor::new(path_str)?));
+      let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
+      mngr.sync()?;
+      Ok(mngr)
+    }
+  }
+
+  pub fn mem(page_size: u32, capacity: usize) -> Res<Self> {
+    if page_size == 0 {
+      return Err(err!("Invalid page size {}", page_size));
+    }
+    if capacity == 0 {
+      return Err(err!("Invalid capacity {}", capacity));
+    }
+    let desc = Rc::new(RefCell::new(MemDescriptor::new(capacity)?));
+    let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
+    mngr.sync()?; // stores metadata in page 0 and advances descriptor
+    Ok(mngr)
+  }
+
+  #[inline]
+  fn pos(&self, page_id: u32) -> u64 {
+    page_id as u64 * self.page_size as u64
+  }
+
+  // Reads the content of the page with `page_id` into the buffer.
+  pub fn read(&mut self, page_id: u32, buf: &mut [u8]) -> Res<()> {
+    self.desc.borrow_mut().read(self.pos(page_id), &mut buf[..self.page_size as usize])
+  }
+
+  // Writes data in the page with `page_id`.
+  pub fn write(&mut self, page_id: u32, buf: &[u8]) -> Res<()> {
+    self.desc.borrow_mut().write(self.pos(page_id), &buf[..self.page_size as usize])
+  }
+
+  // Writes data to the next available page and returns its page id.
+  pub fn write_next(&mut self, buf: &[u8]) -> Res<u32> {
+    let page_id = if self.free_count > 0 {
+      // TODO: optimise this
+      let mut page_buf = vec![0u8; self.page_size as usize];
+      self.read(self.free_page_id, &mut page_buf[..])?;
+      let next_page_id = self.free_page_id;
+      self.free_page_id = u8_u32!(&page_buf[0..4]);
+      self.free_count -= 1;
+      self.sync()?;
+      next_page_id
+    } else {
+      self.num_pages()? as u32
+    };
+    self.write(page_id, buf)?;
+    Ok(page_id)
+  }
+
+  // Marks page as free so it can be reused.
+  pub fn free(&mut self, page_id: u32) -> Res<()> {
+    if self.free_count > 0 {
+      // TODO: optimise this
+      let mut page_buf = vec![0u8; self.page_size as usize];
+      (&mut page_buf[0..]).write(&u32_u8!(self.free_page_id))?;
+      self.write(page_id, &page_buf)?;
+    }
+    self.free_page_id = page_id;
+    self.free_count += 1;
+    self.sync()
+  }
+
+  // Sync metadata + free pages in page 0.
+  pub fn sync(&mut self) -> Res<()> {
+    let mut page_buf = vec![0u8; self.page_size as usize];
+    (&mut page_buf[0..]).write(MAGIC)?;
+    (&mut page_buf[4..]).write(&u32_u8!(self.page_size))?;
+    (&mut page_buf[8..]).write(&u32_u8!(self.free_page_id))?;
+    (&mut page_buf[12..]).write(&u32_u8!(self.free_count))?;
+    self.write(0, &page_buf[..])
+  }
+
+  // ==================
+  // Storage statistics
+  // ==================
+
+  // Returns the configured page size for the storage manager.
+  pub fn page_size(&self) -> usize {
+    self.page_size as usize
+  }
+
+  // Total number of pages that is managed by the storage manager.
+  pub fn num_pages(&self) -> Res<usize> {
+    Ok(self.desc.borrow().len()? as usize / self.page_size as usize)
+  }
+
+  // Number of free pages that were reclaimed.
+  pub fn num_free_pages(&self) -> Res<usize> {
+    Ok(self.free_count as usize)
+  }
+
+  // The amount of memory (in bytes) used by the storage manager.
+  pub fn mem_usage(&self) -> Res<usize> {
+    Ok(
+      self.desc.borrow().mem_usage()? +
+      8 /* page_size */ + 4 /* free_page_id */ + 4 /* free_count */
+    )
   }
 }
 
