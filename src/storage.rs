@@ -1,138 +1,121 @@
-use std::cell::RefCell;
 use std::cmp;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::rc::Rc;
 use crate::error::Res;
 
-// Abstract storage interface to write data.
-trait Descriptor {
-  // Reads data into the provided buffer at the position.
-  fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()>;
-  // Writes data at the specified position.
-  fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()>;
-  // Truncates to the provided length, `len` must be less than or equal to length.
-  fn truncate(&mut self, len: u64) -> Res<()>;
-  // Total length of the file or memory buffer, used for appends.
-  fn len(&self) -> Res<u64>;
-  // Total amount of memory (in bytes) used by the descriptor.
-  fn mem_usage(&self) -> Res<usize>;
+enum Descriptor {
+  // File-based storage.
+  Disk { fd: File },
+  // In-memory storage.
+  Mem { data: Vec<u8> },
 }
 
-// File-based storage.
-struct FileDescriptor {
-  fd: File,
-}
-
-impl FileDescriptor {
-  fn new(path: &str) -> Res<Self> {
+impl Descriptor {
+  fn disk(path: &str) -> Res<Self> {
     let fd = OpenOptions::new().read(true).write(true).create(true).open(path)?;
-    Ok(Self { fd })
+    Ok(Descriptor::Disk { fd })
   }
-}
 
-impl Descriptor for FileDescriptor {
+  fn mem(capacity: usize) -> Res<Self> {
+    let data = Vec::with_capacity(capacity);
+    Ok(Descriptor::Mem { data })
+  }
+
+  // Reads data into the provided buffer at the position.
   fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()> {
     if pos + buf.len() as u64 > self.len()? {
       return Err(err!("Read past EOF: pos {} len {}", pos, buf.len()));
     }
-    self.fd.seek(SeekFrom::Start(pos))?;
-    self.fd.read_exact(buf)?;
+
+    match self {
+      Descriptor::Disk { fd } => {
+        fd.seek(SeekFrom::Start(pos))?;
+        fd.read_exact(buf)?;
+      },
+      Descriptor::Mem { data } => {
+        let pos = pos as usize;
+        (&mut data[pos..pos + buf.len()].as_ref()).read_exact(buf)?;
+      },
+    }
+
     Ok(())
   }
 
+  // Writes data at the specified position.
   fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()> {
     if pos > self.len()? {
       return Err(err!("Write past EOF: pos {} len {}", pos, buf.len()));
     }
-    self.fd.seek(SeekFrom::Start(pos))?;
-    self.fd.write_all(buf)?;
-    self.fd.flush()?;
-    // TODO: call self.fd.sync_all()
+
+    match self {
+      Descriptor::Disk { fd } => {
+        fd.seek(SeekFrom::Start(pos))?;
+        fd.write_all(buf)?;
+        fd.flush()?;
+        // TODO: call self.fd.sync_all()
+      },
+      Descriptor::Mem { data } => {
+        let pos = pos as usize;
+        // Write has append semantics
+        let min_len = cmp::min(buf.len(), data[pos..].len());
+        data[pos..pos + min_len].as_mut().write_all(&buf[0..min_len])?;
+        if min_len < buf.len() {
+          // Write the rest of the data
+          data.extend_from_slice(&buf[min_len..]);
+        }
+      },
+    }
+
     Ok(())
   }
 
+  // Truncates to the provided length, `len` must be less than or equal to length.
   fn truncate(&mut self, len: u64) -> Res<()> {
     let curr_len = self.len()?;
     if len > curr_len {
       return Err(err!("Cannot truncate to len {}, curr_len {}", len, curr_len));
-    } else if len < curr_len {
-      self.fd.set_len(len)?;
     }
+
+    match self {
+      Descriptor::Disk { fd } => {
+        if len < curr_len {
+          fd.set_len(len)?;
+        }
+      },
+      Descriptor::Mem { data } => {
+        if len < curr_len {
+          data.truncate(len as usize);
+        }
+      },
+    }
+
     Ok(())
   }
 
+  // Total length of the file or memory buffer, used for appends.
   fn len(&self) -> Res<u64> {
-    Ok(self.fd.metadata()?.len())
+    match self {
+      Descriptor::Disk { fd } => Ok(fd.metadata()?.len()),
+      Descriptor::Mem { data } => Ok(data.len() as u64),
+    }
   }
 
+  // Total amount of memory (in bytes) used by the descriptor.
   fn mem_usage(&self) -> Res<usize> {
-    Ok(0)
-  }
-}
-
-// In-memory storage.
-struct MemDescriptor {
-  data: Vec<u8>,
-}
-
-impl MemDescriptor {
-  fn new(capacity: usize) -> Res<Self> {
-    Ok(Self { data: Vec::with_capacity(capacity) })
-  }
-}
-
-impl Descriptor for MemDescriptor {
-  fn read(&mut self, pos: u64, buf: &mut [u8]) -> Res<()> {
-    let pos = pos as usize;
-    if pos + buf.len() > self.data.len() {
-      return Err(err!("Read past EOF: pos {} len {}", pos, buf.len()));
+    match self {
+      Descriptor::Disk { .. } => Ok(0),
+      Descriptor::Mem { data } => Ok(data.len()),
     }
-    (&mut self.data[pos..pos + buf.len()].as_ref()).read_exact(buf)?;
-    Ok(())
-  }
-
-  fn write(&mut self, pos: u64, buf: &[u8]) -> Res<()> {
-    let pos = pos as usize;
-    if pos > self.data.len() {
-      return Err(err!("Write past EOF: pos {} len {}", pos, buf.len()));
-    }
-    // Write has append semantics
-    let min_len = cmp::min(buf.len(), self.data[pos..].len());
-    self.data[pos..pos + min_len].as_mut().write_all(&buf[0..min_len])?;
-    if min_len < buf.len() {
-      // Write the rest of the data
-      self.data.extend_from_slice(&buf[min_len..]);
-    }
-    Ok(())
-  }
-
-  fn truncate(&mut self, len: u64) -> Res<()> {
-    let curr_len = self.len()?;
-    if len > curr_len {
-      return Err(err!("Cannot truncate to len {}, curr_len {}", len, curr_len));
-    } else if len < curr_len {
-      self.data.truncate(len as usize);
-    }
-    Ok(())
-  }
-
-  fn len(&self) -> Res<u64> {
-    Ok(self.data.len() as u64)
-  }
-
-  fn mem_usage(&self) -> Res<usize> {
-    // TODO: maybe this should be capacity.
-    Ok(self.data.len())
   }
 }
 
 const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
+const METADATA_LEN: usize = 16; // 4 bytes magic + 4 bytes page size + (4 + 4) bytes on free pages
 
 pub struct StorageManager {
   page_size: u32, // page size on disk
-  desc: Rc<RefCell<dyn Descriptor>>,
+  desc: Descriptor,
   free_page_id: u32, // pointer to the free list, represents the absolute position of a page
   free_count: u32, // number of pages in the free list
 }
@@ -145,13 +128,13 @@ impl StorageManager {
       if !path.is_file() {
         return Err(err!("Not a file: {}", path_str));
       }
-      if path.metadata()?.len() < 16 {
+      if path.metadata()?.len() < METADATA_LEN as u64 {
         return Err(err!("Corrupt database file, header is too small"));
       }
       // Because we don't know our page size, we need to read the minimum amount
       // to load our metadata: 4 bytes magic + 4 bytes page size + (4 + 4) bytes on free pages
-      let mut page_buf = [0u8; 16];
-      let mut desc = FileDescriptor::new(path_str)?;
+      let mut page_buf = vec![0u8; METADATA_LEN];
+      let mut desc = Descriptor::disk(path_str)?;
       desc.read(0, &mut page_buf[..])?;
 
       if &page_buf[..4] != MAGIC {
@@ -165,7 +148,7 @@ impl StorageManager {
 
       let mngr = Self {
         page_size,
-        desc: Rc::new(RefCell::new(desc)),
+        desc,
         free_page_id: u8_u32!(&page_buf[8..12]),
         free_count: u8_u32!(&page_buf[12..16]),
       };
@@ -175,7 +158,7 @@ impl StorageManager {
         return Err(err!("Invalid page size {}", page_size));
       }
 
-      let desc = Rc::new(RefCell::new(FileDescriptor::new(path_str)?));
+      let desc = Descriptor::disk(path_str)?;
       let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
       mngr.sync()?;
       Ok(mngr)
@@ -186,7 +169,7 @@ impl StorageManager {
     if page_size == 0 {
       return Err(err!("Invalid page size {}", page_size));
     }
-    let desc = Rc::new(RefCell::new(MemDescriptor::new(capacity)?));
+    let desc = Descriptor::mem(capacity)?;
     let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
     mngr.sync()?; // stores metadata in page 0 and advances descriptor
     Ok(mngr)
@@ -199,12 +182,12 @@ impl StorageManager {
 
   // Reads the content of the page with `page_id` into the buffer.
   pub fn read(&mut self, page_id: u32, buf: &mut [u8]) -> Res<()> {
-    self.desc.borrow_mut().read(self.pos(page_id), &mut buf[..self.page_size as usize])
+    self.desc.read(self.pos(page_id), &mut buf[..self.page_size as usize])
   }
 
   // Writes data in the page with `page_id`.
   pub fn write(&mut self, page_id: u32, buf: &[u8]) -> Res<()> {
-    self.desc.borrow_mut().write(self.pos(page_id), &buf[..self.page_size as usize])
+    self.desc.write(self.pos(page_id), &buf[..self.page_size as usize])
   }
 
   // Writes data to the next available page and returns its page id.
@@ -259,7 +242,7 @@ impl StorageManager {
 
   // Total number of pages that is managed by the storage manager.
   pub fn num_pages(&self) -> Res<usize> {
-    Ok(self.desc.borrow().len()? as usize / self.page_size as usize)
+    Ok(self.desc.len()? as usize / self.page_size as usize)
   }
 
   // Number of free pages that were reclaimed.
@@ -269,7 +252,7 @@ impl StorageManager {
 
   // The amount of memory (in bytes) used by the storage manager.
   pub fn mem_usage(&self) -> Res<usize> {
-    self.desc.borrow().mem_usage()
+    self.desc.mem_usage()
   }
 }
 
@@ -314,16 +297,16 @@ mod tests {
     func(tmp.path());
   }
 
-  fn with_descriptor<F>(func: F) where F: Fn(&mut dyn Descriptor) -> () {
+  fn with_descriptor<F>(func: F) where F: Fn(&mut Descriptor) -> () {
     println!("Started testing FileDescriptor");
     with_tmp_file(|path| {
-      let mut desc = FileDescriptor::new(path).unwrap();
+      let mut desc = Descriptor::disk(path).unwrap();
       func(&mut desc);
     });
     println!("Finished testing FileDescriptor");
 
     println!("Started testing MemDescriptor");
-    let mut desc = MemDescriptor::new(0).unwrap();
+    let mut desc = Descriptor::mem(0).unwrap();
     func(&mut desc);
     println!("Finished testing MemDescriptor");
   }
@@ -396,7 +379,7 @@ mod tests {
 
   #[test]
   fn test_storage_descriptor_mem_usage() {
-    let mut desc = MemDescriptor::new(0).unwrap();
+    let mut desc = Descriptor::mem(0).unwrap();
     assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
     assert_eq!(desc.mem_usage(), Ok(8));
 
@@ -405,7 +388,7 @@ mod tests {
 
     // FileDescriptor has 0 memory usage
     with_tmp_file(|path| {
-      let mut desc = FileDescriptor::new(path).unwrap();
+      let mut desc = Descriptor::disk(path).unwrap();
       assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
       assert_eq!(desc.mem_usage(), Ok(0));
       assert!(desc.truncate(2).is_ok());
