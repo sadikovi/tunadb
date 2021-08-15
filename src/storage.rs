@@ -123,6 +123,7 @@ impl Descriptor for MemDescriptor {
   }
 
   fn mem_usage(&self) -> Res<usize> {
+    // TODO: maybe this should be capacity.
     Ok(self.data.len())
   }
 }
@@ -184,9 +185,6 @@ impl StorageManager {
   pub fn mem(page_size: u32, capacity: usize) -> Res<Self> {
     if page_size == 0 {
       return Err(err!("Invalid page size {}", page_size));
-    }
-    if capacity == 0 {
-      return Err(err!("Invalid capacity {}", capacity));
     }
     let desc = Rc::new(RefCell::new(MemDescriptor::new(capacity)?));
     let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
@@ -271,10 +269,7 @@ impl StorageManager {
 
   // The amount of memory (in bytes) used by the storage manager.
   pub fn mem_usage(&self) -> Res<usize> {
-    Ok(
-      self.desc.borrow().mem_usage()? +
-      8 /* page_size */ + 4 /* free_page_id */ + 4 /* free_count */
-    )
+    self.desc.borrow().mem_usage()
   }
 }
 
@@ -415,6 +410,114 @@ mod tests {
       assert_eq!(desc.mem_usage(), Ok(0));
       assert!(desc.truncate(2).is_ok());
       assert_eq!(desc.mem_usage(), Ok(0));
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_init_mem() {
+    let mngr = StorageManager::mem(24, 0).unwrap();
+    assert_eq!(mngr.page_size, 24);
+    assert_eq!(mngr.free_page_id, 0);
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.num_pages().unwrap(), 1);
+    assert_eq!(mngr.mem_usage().unwrap(), 24);
+  }
+
+  #[test]
+  fn test_storage_manager_init_mem_invalid_page_size() {
+    assert!(StorageManager::mem(0, 0).is_err());
+  }
+
+  #[test]
+  fn test_storage_manager_init_disk() {
+    with_tmp_file(|path| {
+      let mngr = StorageManager::disk(24, path).unwrap();
+      assert_eq!(mngr.page_size, 24);
+      assert_eq!(mngr.free_page_id, 0);
+      assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.num_pages().unwrap(), 1);
+      assert_eq!(mngr.mem_usage().unwrap(), 0);
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_init_disk_2() {
+    with_tmp_file(|path| {
+      let _mngr = StorageManager::disk(24, path).unwrap();
+      let mngr = StorageManager::disk(32, path).unwrap();
+
+      assert_eq!(mngr.page_size, 24);
+      assert_eq!(mngr.free_page_id, 0);
+      assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.num_pages().unwrap(), 1);
+      assert_eq!(mngr.mem_usage().unwrap(), 0);
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_init_disk_invalid_page_size() {
+    with_tmp_file(|path| {
+      assert!(StorageManager::disk(0, path).is_err());
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_write_read() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut buf = vec![5u8; mngr.page_size as usize];
+    (&mut buf[..]).write(&[1, 2, 3, 4]).unwrap();
+
+    let page_id = mngr.write_next(&buf[..]).unwrap();
+    assert_eq!(page_id, 1);
+
+    (&mut buf[4..]).write(&[8, 9, 0]).unwrap();
+    mngr.write(page_id, &buf[..]).unwrap();
+
+    mngr.read(page_id, &mut buf[..]).unwrap();
+    assert_eq!(&buf[..8], &[1, 2, 3, 4, 8, 9, 0, 5]);
+  }
+
+  #[test]
+  fn test_storage_manager_write_free() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let buf = vec![5u8; mngr.page_size as usize];
+
+    assert_eq!(mngr.write_next(&buf[..]), Ok(1));
+    assert_eq!(mngr.write_next(&buf[..]), Ok(2));
+    assert_eq!(mngr.write_next(&buf[..]), Ok(3));
+
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_page_id, 0);
+
+    mngr.free(3).unwrap();
+    mngr.free(1).unwrap();
+    mngr.free(2).unwrap();
+
+    assert_eq!(mngr.free_count, 3);
+    assert_eq!(mngr.free_page_id, 2);
+
+    assert_eq!(mngr.write_next(&buf[..]), Ok(2));
+    assert_eq!(mngr.write_next(&buf[..]), Ok(1));
+    assert_eq!(mngr.write_next(&buf[..]), Ok(3));
+
+    assert_eq!(mngr.free_count, 0);
+    assert_ne!(mngr.free_page_id, 0);
+  }
+
+  #[test]
+  fn test_storage_manager_disk_meta_sync() {
+    with_tmp_file(|path| {
+      let mut mngr = StorageManager::disk(32, path).unwrap();
+      mngr.page_size = 64;
+      mngr.free_page_id = 100;
+      mngr.free_count = 2;
+
+      mngr.sync().unwrap();
+
+      let mngr = StorageManager::disk(32, path).unwrap();
+      assert_eq!(mngr.page_size, 64);
+      assert_eq!(mngr.free_page_id, 100);
+      assert_eq!(mngr.free_count, 2);
     })
   }
 }
