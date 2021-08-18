@@ -1,4 +1,5 @@
 use std::cmp;
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -118,6 +119,7 @@ pub struct StorageManager {
   desc: Descriptor,
   free_page_id: u32, // pointer to the free list, represents the absolute position of a page
   free_count: u32, // number of pages in the free list
+  free_map: BTreeMap<u32, (Option<u32>, Option<u32>)>, // page id -> (prev, next), keys are sorted
 }
 
 impl StorageManager {
@@ -146,12 +148,32 @@ impl StorageManager {
         return Err(err!("Invalid page size {}", page_size));
       }
 
-      let mngr = Self {
-        page_size,
-        desc,
-        free_page_id: u8_u32!(&page_buf[8..12]),
-        free_count: u8_u32!(&page_buf[12..16]),
-      };
+      let free_page_id = u8_u32!(&page_buf[8..12]);
+      let free_count = u8_u32!(&page_buf[12..16]);
+      let mut free_map = BTreeMap::new();
+
+      // Reconstruct the in-memory map
+      let mut cnt = 0;
+      let mut prev_opt = None;
+      let mut curr = free_page_id;
+      let mut page_buf = vec![0u8; page_size as usize];
+      while cnt < free_count {
+        let next_opt = if cnt + 1 < free_count {
+          println!("curr: {}", curr);
+          desc.read(curr as u64 * page_size as u64, &mut page_buf[..]).unwrap();
+          Some(u8_u32!(&page_buf[0..4]))
+        } else {
+          None
+        };
+
+        free_map.insert(curr, (prev_opt, next_opt));
+        prev_opt = Some(curr);
+        curr = next_opt.unwrap_or(u32::MAX);
+
+        cnt += 1;
+      }
+
+      let mngr = Self { page_size, desc, free_page_id, free_count, free_map };
       Ok(mngr)
     } else {
       if page_size == 0 {
@@ -159,7 +181,13 @@ impl StorageManager {
       }
 
       let desc = Descriptor::disk(path_str)?;
-      let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
+      let mut mngr = Self {
+        page_size,
+        desc,
+        free_page_id: 0,
+        free_count: 0,
+        free_map: BTreeMap::new(),
+      };
       mngr.sync()?;
       Ok(mngr)
     }
@@ -170,7 +198,13 @@ impl StorageManager {
       return Err(err!("Invalid page size {}", page_size));
     }
     let desc = Descriptor::mem(capacity)?;
-    let mut mngr = Self { page_size, desc, free_page_id: 0, free_count: 0 };
+    let mut mngr = Self {
+      page_size,
+      desc,
+      free_page_id: 0,
+      free_count: 0,
+      free_map: BTreeMap::new(),
+    };
     mngr.sync()?; // stores metadata in page 0 and advances descriptor
     Ok(mngr)
   }
@@ -193,12 +227,8 @@ impl StorageManager {
   // Writes data to the next available page and returns its page id.
   pub fn write_next(&mut self, buf: &[u8]) -> Res<u32> {
     let page_id = if self.free_count > 0 {
-      // TODO: optimise this
-      let mut page_buf = vec![0u8; self.page_size as usize];
-      self.read(self.free_page_id, &mut page_buf[..])?;
-      let next_page_id = self.free_page_id;
-      self.free_page_id = u8_u32!(&page_buf[0..4]);
-      self.free_count -= 1;
+      let (&next_page_id, _) = self.free_map.first_key_value().unwrap();
+      self.remove_free_page(next_page_id)?;
       self.sync()?;
       next_page_id
     } else {
@@ -208,16 +238,83 @@ impl StorageManager {
     Ok(page_id)
   }
 
+  // Removes the provided page id from free list and free map.
+  // Does not perform sync.
+  fn remove_free_page(&mut self, page_id: u32) -> Res<()> {
+    if let Some(value) = self.free_map.remove(&page_id) {
+      self.free_count -= 1;
+
+      match value {
+        (Some(prev), Some(next)) => {
+          // TODO: optimise this
+          let mut page_buf = vec![0u8; self.page_size as usize];
+          (&mut page_buf[0..]).write(&u32_u8!(next))?;
+          self.write(prev, &page_buf)?;
+          // Point prev to next
+          self.free_map.get_mut(&prev).unwrap().1 = Some(next);
+          self.free_map.get_mut(&next).unwrap().0 = Some(prev);
+        },
+        (Some(prev), None) => {
+          // It is the tail of the free list, there is no need to override the page data.
+          self.free_map.get_mut(&prev).unwrap().1 = None; // next = None
+        },
+        (None, Some(next)) => {
+          // Current head of the free list.
+          self.free_page_id = next;
+          self.free_map.get_mut(&next).unwrap().0 = None; // prev = None
+        },
+        (None, None) => {
+          // Free list only had one element.
+          assert_eq!(self.free_count, 0);
+          assert_eq!(self.free_map.len(), 0);
+        },
+      }
+
+      Ok(())
+    } else {
+      Err(err!("Free page {} is not found", page_id))
+    }
+  }
+
   // Marks page as free so it can be reused.
   pub fn free(&mut self, page_id: u32) -> Res<()> {
-    if self.free_count > 0 {
-      // TODO: optimise this
-      let mut page_buf = vec![0u8; self.page_size as usize];
-      (&mut page_buf[0..]).write(&u32_u8!(self.free_page_id))?;
-      self.write(page_id, &page_buf)?;
+    let num_pages = self.num_pages()?;
+
+    if page_id as usize >= num_pages {
+      return Err(err!("Invalid page {} to free", page_id));
     }
-    self.free_page_id = page_id;
-    self.free_count += 1;
+
+    // If the page is the last page, truncate instead of adding to the free list.
+    if num_pages - 1 == page_id as usize {
+      let mut last_page_id = page_id;
+      while let Some((&curr, _)) = self.free_map.last_key_value() {
+        if curr + 1 == last_page_id {
+          last_page_id = curr;
+          self.remove_free_page(curr)?;
+        } else {
+          break;
+        }
+      }
+      self.desc.truncate(last_page_id as u64 * self.page_size as u64)?;
+    } else {
+      if self.free_count > 0 {
+        // Update free map
+        self.free_map.get_mut(&self.free_page_id).unwrap().0 = Some(page_id);
+        self.free_map.insert(page_id, (None, Some(self.free_page_id)));
+
+        // Update the page
+        // TODO: optimise this
+        let mut page_buf = vec![0u8; self.page_size as usize];
+        (&mut page_buf[0..]).write(&u32_u8!(self.free_page_id))?;
+        self.write(page_id, &page_buf)?;
+      } else {
+        self.free_map.insert(page_id, (None, None));
+      }
+
+      self.free_page_id = page_id;
+      self.free_count += 1;
+    }
+
     self.sync()
   }
 
@@ -252,7 +349,9 @@ impl StorageManager {
 
   // The amount of memory (in bytes) used by the storage manager.
   pub fn mem_usage(&self) -> Res<usize> {
-    self.desc.mem_usage()
+    let desc_mem_usage = self.desc.mem_usage()?;
+    let free_mem_usage = self.free_map.len() * (4 /* u32 key */ + 8 /* u32 prev and next */);
+    Ok(desc_mem_usage + free_mem_usage)
   }
 }
 
@@ -262,6 +361,7 @@ mod tests {
   use std::env::temp_dir;
   use std::fs::remove_file;
   use std::path::Path;
+  use rand::prelude::*;
 
   struct TempFile {
     path: String,
@@ -445,6 +545,25 @@ mod tests {
   }
 
   #[test]
+  fn test_storage_manager_disk_meta_sync() {
+    with_tmp_file(|path| {
+      let mut mngr = StorageManager::disk(32, path).unwrap();
+      let buf = vec![5u8; mngr.page_size as usize];
+
+      mngr.write_next(&buf[..]).unwrap();
+      mngr.write_next(&buf[..]).unwrap();
+      mngr.free(1).unwrap();
+
+      mngr.sync().unwrap();
+
+      let mngr = StorageManager::disk(32, path).unwrap();
+      assert_eq!(mngr.page_size, 32);
+      assert_eq!(mngr.free_page_id, 1);
+      assert_eq!(mngr.free_count, 1);
+    })
+  }
+
+  #[test]
   fn test_storage_manager_write_read() {
     let mut mngr = StorageManager::mem(32, 0).unwrap();
     let mut buf = vec![5u8; mngr.page_size as usize];
@@ -476,31 +595,155 @@ mod tests {
     mngr.free(1).unwrap();
     mngr.free(2).unwrap();
 
-    assert_eq!(mngr.free_count, 3);
-    assert_eq!(mngr.free_page_id, 2);
+    // This is because our free map would truncate the source instead of keeping the pages
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_page_id, 1);
+    assert_eq!(mngr.free_map.len(), 0);
 
-    assert_eq!(mngr.write_next(&buf[..]), Ok(2));
     assert_eq!(mngr.write_next(&buf[..]), Ok(1));
+    assert_eq!(mngr.write_next(&buf[..]), Ok(2));
     assert_eq!(mngr.write_next(&buf[..]), Ok(3));
 
     assert_eq!(mngr.free_count, 0);
     assert_ne!(mngr.free_page_id, 0);
+    assert_eq!(mngr.free_map.len(), 0);
   }
 
   #[test]
-  fn test_storage_manager_disk_meta_sync() {
+  fn test_storage_manager_free_out_of_bound() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    assert!(mngr.free(100).is_err());
+  }
+
+  #[test]
+  fn test_storage_manager_free_truncate_no_evict() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let buf = vec![1u8; mngr.page_size as usize];
+
+    let page_id = mngr.write_next(&buf[..]).unwrap();
+    assert_eq!(mngr.num_pages(), Ok(2));
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_map.len(), 0);
+
+    mngr.free(page_id).unwrap();
+
+    assert_eq!(mngr.num_pages(), Ok(1));
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_map.len(), 0);
+  }
+
+  #[test]
+  fn test_storage_manager_free_truncate_evict() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let buf = vec![1u8; mngr.page_size as usize];
+
+    for _ in 1..10 {
+      mngr.write_next(&buf[..]).unwrap();
+    }
+    mngr.write_next(&buf[..]).unwrap();
+
+    for i in 1..10 {
+      mngr.free(i).unwrap();
+    }
+
+    assert_eq!(mngr.num_pages(), Ok(11)); // page 0 + 10 data pages
+    assert_eq!(mngr.free_count, 9);
+    assert_eq!(mngr.free_page_id, 9);
+    assert_eq!(mngr.free_map.len(), 9);
+
+    mngr.free(10).unwrap();
+
+    assert_eq!(mngr.num_pages(), Ok(1));
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_map.len(), 0);
+  }
+
+  #[test]
+  fn test_storage_manager_free_manager_restart() {
     with_tmp_file(|path| {
-      let mut mngr = StorageManager::disk(32, path).unwrap();
-      mngr.page_size = 64;
-      mngr.free_page_id = 100;
-      mngr.free_count = 2;
+      {
+        let mut mngr = StorageManager::disk(32, path).unwrap();
+        let buf = vec![1u8; mngr.page_size as usize];
 
-      mngr.sync().unwrap();
+        for _ in 1..10 {
+          mngr.write_next(&buf[..]).unwrap();
+        }
 
-      let mngr = StorageManager::disk(32, path).unwrap();
-      assert_eq!(mngr.page_size, 64);
-      assert_eq!(mngr.free_page_id, 100);
-      assert_eq!(mngr.free_count, 2);
+        for i in 1..9 {
+          mngr.free(i).unwrap();
+        }
+      }
+      {
+        let mngr = StorageManager::disk(32, path).unwrap();
+        assert_eq!(mngr.num_pages(), Ok(10));
+        assert_eq!(mngr.free_count, 8);
+        assert_eq!(mngr.free_map.len(), 8);
+      }
     })
+  }
+
+  // Storage manager fuzz testing
+
+  fn shuffle(input: &mut Vec<u32>) {
+    input.shuffle(&mut thread_rng());
+  }
+
+  #[test]
+  fn test_storage_manager_fuzz_free_fully() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let buf = vec![1u8; mngr.page_size as usize];
+    let num_pages = 500;
+    let num_iterations = 100;
+    let mut pages = Vec::new();
+
+    for _ in 0..num_iterations {
+      for _ in 1..num_pages + 1 {
+        pages.push(mngr.write_next(&buf[..]).unwrap());
+      }
+
+      shuffle(&mut pages);
+
+      while let Some(page) = pages.pop() {
+        mngr.free(page).unwrap();
+      }
+
+      assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.free_map.len(), 0);
+      assert_eq!(mngr.num_pages(), Ok(1));
+    }
+  }
+
+  #[test]
+  fn test_storage_manager_fuzz_free_with_writes() {
+    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let buf = vec![1u8; mngr.page_size as usize];
+    let num_pages = 500;
+    let num_pages_to_keep = 23;
+    let num_iterations = 100;
+    let mut pages = Vec::new();
+
+    for _ in 0..num_iterations {
+      for _ in 1..num_pages + 1 {
+        pages.push(mngr.write_next(&buf[..]).unwrap());
+      }
+
+      shuffle(&mut pages);
+
+      while pages.len() > num_pages_to_keep {
+        let page = pages.pop().unwrap();
+        mngr.free(page).unwrap();
+      }
+      assert_eq!(mngr.free_count as usize, mngr.free_map.len());
+    }
+
+    assert_eq!(mngr.free_count as usize, mngr.free_map.len());
+    // Account for page 0
+    assert_eq!(mngr.free_count as usize + pages.len() + 1, mngr.num_pages().unwrap());
+
+    while let Some(page) = pages.pop() {
+      mngr.free(page).unwrap();
+    }
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_map.len(), 0);
   }
 }
