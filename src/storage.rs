@@ -159,7 +159,6 @@ impl StorageManager {
       let mut page_buf = vec![0u8; page_size as usize];
       while cnt < free_count {
         let next_opt = if cnt + 1 < free_count {
-          println!("curr: {}", curr);
           desc.read(curr as u64 * page_size as u64, &mut page_buf[..]).unwrap();
           Some(u8_u32!(&page_buf[0..4]))
         } else {
