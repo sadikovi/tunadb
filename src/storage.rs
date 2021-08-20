@@ -112,7 +112,8 @@ impl Descriptor {
 }
 
 const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
-const METADATA_LEN: usize = 16; // 4 bytes magic + 4 bytes page size + (4 + 4) bytes on free pages
+// magic (4) + page size (4) + free page id (4) + free count (4) + counter (8)
+const METADATA_LEN: usize = 24;
 
 pub struct StorageManager {
   page_size: u32, // page size on disk
@@ -120,6 +121,7 @@ pub struct StorageManager {
   free_page_id: u32, // pointer to the free list, represents the absolute position of a page
   free_count: u32, // number of pages in the free list
   free_map: BTreeMap<u32, (Option<u32>, Option<u32>)>, // page id -> (prev, next), keys are sorted
+  counter: u64, // general monotonically increasing counter
 }
 
 impl StorageManager {
@@ -150,6 +152,7 @@ impl StorageManager {
 
       let free_page_id = u8_u32!(&page_buf[8..12]);
       let free_count = u8_u32!(&page_buf[12..16]);
+      let counter = u8_u64!(&page_buf[16..24]);
       let mut free_map = BTreeMap::new();
 
       // Reconstruct the in-memory map
@@ -172,7 +175,7 @@ impl StorageManager {
         cnt += 1;
       }
 
-      let mngr = Self { page_size, desc, free_page_id, free_count, free_map };
+      let mngr = Self { page_size, desc, free_page_id, free_count, free_map, counter };
       Ok(mngr)
     } else {
       if page_size == 0 {
@@ -186,6 +189,7 @@ impl StorageManager {
         free_page_id: 0,
         free_count: 0,
         free_map: BTreeMap::new(),
+        counter: 0,
       };
       mngr.sync()?;
       Ok(mngr)
@@ -203,6 +207,7 @@ impl StorageManager {
       free_page_id: 0,
       free_count: 0,
       free_map: BTreeMap::new(),
+      counter: 0,
     };
     mngr.sync()?; // stores metadata in page 0 and advances descriptor
     Ok(mngr)
@@ -211,6 +216,14 @@ impl StorageManager {
   #[inline]
   fn pos(&self, page_id: u32) -> u64 {
     page_id as u64 * self.page_size as u64
+  }
+
+  // Returns the next counter.
+  pub fn next_id(&mut self) -> Res<u64> {
+    let value = self.counter;
+    self.counter += 1;
+    self.sync()?;
+    Ok(value)
   }
 
   // Reads the content of the page with `page_id` into the buffer.
@@ -324,6 +337,7 @@ impl StorageManager {
     (&mut page_buf[4..]).write(&u32_u8!(self.page_size))?;
     (&mut page_buf[8..]).write(&u32_u8!(self.free_page_id))?;
     (&mut page_buf[12..]).write(&u32_u8!(self.free_count))?;
+    (&mut page_buf[16..]).write(&u64_u8!(self.counter))?;
     self.write(0, &page_buf[..])
   }
 
@@ -501,6 +515,7 @@ mod tests {
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, 0);
     assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.counter, 0);
     assert_eq!(mngr.num_pages().unwrap(), 1);
     assert_eq!(mngr.mem_usage().unwrap(), 24);
   }
@@ -517,6 +532,7 @@ mod tests {
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 1);
       assert_eq!(mngr.mem_usage().unwrap(), 0);
     })
@@ -531,6 +547,7 @@ mod tests {
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 1);
       assert_eq!(mngr.mem_usage().unwrap(), 0);
     })
@@ -552,6 +569,7 @@ mod tests {
       mngr.write_next(&buf[..]).unwrap();
       mngr.write_next(&buf[..]).unwrap();
       mngr.free(1).unwrap();
+      mngr.next_id().unwrap();
 
       mngr.sync().unwrap();
 
@@ -559,6 +577,23 @@ mod tests {
       assert_eq!(mngr.page_size, 32);
       assert_eq!(mngr.free_page_id, 1);
       assert_eq!(mngr.free_count, 1);
+      assert_eq!(mngr.counter, 1);
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_counter_persist() {
+    with_tmp_file(|path| {
+      {
+        let mut mngr = StorageManager::disk(32, path).unwrap();
+        for i in 0..10 {
+          assert_eq!(mngr.next_id(), Ok(i));
+        }
+      }
+      {
+        let mut mngr = StorageManager::disk(32, path).unwrap();
+        assert_eq!(mngr.next_id(), Ok(10));
+      }
     })
   }
 
