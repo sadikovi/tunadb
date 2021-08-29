@@ -308,7 +308,6 @@ impl StorageManager {
   // Removes the provided page id from free list and free map.
   // Does not perform sync.
   fn remove_free_page(&mut self, page_id: u32) -> Res<()> {
-    println!("{:?}, remove {}", self.free_map, page_id);
     if let Some(value) = self.free_map.remove(&page_id) {
       self.free_count -= 1;
 
@@ -350,6 +349,11 @@ impl StorageManager {
 
     if page_id as usize >= num_pages {
       return Err(err!("Invalid page {} to free", page_id));
+    }
+
+    // If the free map already contains the page, return to avoid double free issues.
+    if self.free_map.get(&page_id).is_some() {
+      return Ok(());
     }
 
     // If the page is the last page, truncate instead of adding to the free list.
