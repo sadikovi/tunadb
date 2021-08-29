@@ -103,10 +103,10 @@ impl Descriptor {
   }
 
   // Total amount of memory (in bytes) used by the descriptor.
-  fn mem_usage(&self) -> Res<usize> {
+  fn mem_usage(&self) -> usize {
     match self {
-      Descriptor::Disk { .. } => Ok(0),
-      Descriptor::Mem { data } => Ok(data.len()),
+      Descriptor::Disk { .. } => 0,
+      Descriptor::Mem { data } => data.len(),
     }
   }
 }
@@ -114,6 +114,70 @@ impl Descriptor {
 const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
 // magic (4) + page size (4) + free page id (4) + free count (4) + counter (8)
 const METADATA_LEN: usize = 24;
+const MIN_PAGE_SIZE: u32 = 16;
+const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
+const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
+
+// StorageManager options.
+pub struct Options {
+  page_size: u32,
+  is_disk: bool,
+  disk_path: String,
+  mem_capacity: usize,
+}
+
+impl Options {
+  pub fn new() -> OptionsBuilder {
+    OptionsBuilder {
+      opts: Self {
+        page_size: DEFAULT_PAGE_SIZE,
+        is_disk: false,
+        disk_path: String::new(),
+        mem_capacity: 0,
+      }
+    }
+  }
+}
+
+pub struct OptionsBuilder {
+  opts: Options,
+}
+
+impl OptionsBuilder {
+  // Creates options for disk-based storage manager.
+  pub fn as_disk(mut self, path: &str) -> Self {
+    self.opts.is_disk = true;
+    self.opts.disk_path = path.to_owned();
+    self
+  }
+
+  // Creates options for memory-based storage manager.
+  pub fn as_mem(mut self, capacity: usize) -> Self {
+    self.opts.is_disk = false;
+    self.opts.mem_capacity = capacity;
+    self
+  }
+
+  // Sets the provided page size.
+  pub fn with_page_size(mut self, page_size: u32) -> Self {
+    self.opts.page_size = page_size;
+    self
+  }
+
+  // Returns new options from the builder.
+  // All options are validated here.
+  pub fn build(self) -> Res<Options> {
+    if self.opts.is_disk && self.opts.disk_path.len() == 0 {
+      return Err(err!("Empty file path"));
+    }
+
+    if self.opts.page_size < MIN_PAGE_SIZE || self.opts.page_size > MAX_PAGE_SIZE {
+      return Err(err!("Invalid page size {}", self.opts.page_size));
+    }
+
+    Ok(self.opts)
+  }
+}
 
 pub struct StorageManager {
   page_size: u32, // page size on disk
@@ -125,92 +189,81 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-  pub fn disk(page_size: u32, path_str: &str) -> Res<Self> {
-    let path = Path::new(path_str);
+  pub fn new(opts: &Options) -> Res<Self> {
+    if opts.is_disk {
+      let path = Path::new(&opts.disk_path);
 
-    if path.exists() {
-      if !path.is_file() {
-        return Err(err!("Not a file: {}", path_str));
-      }
-      if path.metadata()?.len() < METADATA_LEN as u64 {
-        return Err(err!("Corrupt database file, header is too small"));
-      }
-      // Because we don't know our page size, we need to read the minimum amount
-      // to load our metadata: 4 bytes magic + 4 bytes page size + (4 + 4) bytes on free pages
-      let mut page_buf = vec![0u8; METADATA_LEN];
-      let mut desc = Descriptor::disk(path_str)?;
-      desc.read(0, &mut page_buf[..])?;
+      if path.exists() {
+        if !path.is_file() {
+          return Err(err!("Not a file: {}", path.display()));
+        }
 
-      if &page_buf[..4] != MAGIC {
-        return Err(err!("Corrupt database file, invalid MAGIC"));
-      }
+        if path.metadata()?.len() < METADATA_LEN as u64 {
+          return Err(err!("Corrupt database file, header is too small"));
+        }
 
-      let page_size = u8_u32!(&page_buf[4..8]);
-      if page_size == 0 {
-        return Err(err!("Invalid page size {}", page_size));
-      }
+        let mut page_buf = vec![0u8; METADATA_LEN];
+        let mut desc = Descriptor::disk(opts.disk_path.as_ref())?;
+        desc.read(0, &mut page_buf[..])?;
 
-      let free_page_id = u8_u32!(&page_buf[8..12]);
-      let free_count = u8_u32!(&page_buf[12..16]);
-      let counter = u8_u64!(&page_buf[16..24]);
-      let mut free_map = BTreeMap::new();
+        if &page_buf[..4] != MAGIC {
+          return Err(err!("Corrupt database file, invalid MAGIC"));
+        }
 
-      // Reconstruct the in-memory map
-      let mut cnt = 0;
-      let mut prev_opt = None;
-      let mut curr = free_page_id;
-      let mut page_buf = vec![0u8; page_size as usize];
-      while cnt < free_count {
-        let next_opt = if cnt + 1 < free_count {
-          desc.read(curr as u64 * page_size as u64, &mut page_buf[..]).unwrap();
-          Some(u8_u32!(&page_buf[0..4]))
-        } else {
-          None
+        let page_size = u8_u32!(&page_buf[4..8]);
+        if page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
+          return Err(err!("Corrupt database file, invalid page size {}", page_size));
+        }
+
+        let free_page_id = u8_u32!(&page_buf[8..12]);
+        let free_count = u8_u32!(&page_buf[12..16]);
+        let counter = u8_u64!(&page_buf[16..24]);
+        let mut free_map = BTreeMap::new();
+
+        // Reconstruct the in-memory map
+        let mut cnt = 0;
+        let mut prev_opt = None;
+        let mut curr = free_page_id;
+        let mut page_buf = vec![0u8; page_size as usize];
+        while cnt < free_count {
+          let next_opt = if cnt + 1 < free_count {
+            desc.read(curr as u64 * page_size as u64, &mut page_buf[..]).unwrap();
+            Some(u8_u32!(&page_buf[0..4]))
+          } else {
+            None
+          };
+
+          free_map.insert(curr, (prev_opt, next_opt));
+          prev_opt = Some(curr);
+          curr = next_opt.unwrap_or(u32::MAX);
+
+          cnt += 1;
+        }
+        Ok(Self { page_size, desc, free_page_id, free_count, free_map, counter })
+      } else {
+        let mut mngr = Self {
+          page_size: opts.page_size,
+          desc: Descriptor::disk(opts.disk_path.as_ref())?,
+          free_page_id: 0,
+          free_count: 0,
+          free_map: BTreeMap::new(),
+          counter: 0,
         };
-
-        free_map.insert(curr, (prev_opt, next_opt));
-        prev_opt = Some(curr);
-        curr = next_opt.unwrap_or(u32::MAX);
-
-        cnt += 1;
+        mngr.sync()?;
+        Ok(mngr)
       }
-
-      let mngr = Self { page_size, desc, free_page_id, free_count, free_map, counter };
-      Ok(mngr)
     } else {
-      if page_size == 0 {
-        return Err(err!("Invalid page size {}", page_size));
-      }
-
-      let desc = Descriptor::disk(path_str)?;
       let mut mngr = Self {
-        page_size,
-        desc,
+        page_size: opts.page_size,
+        desc: Descriptor::mem(opts.mem_capacity)?,
         free_page_id: 0,
         free_count: 0,
         free_map: BTreeMap::new(),
         counter: 0,
       };
-      mngr.sync()?;
+      mngr.sync()?; // stores metadata in page 0 and advances descriptor
       Ok(mngr)
     }
-  }
-
-  pub fn mem(page_size: u32, capacity: usize) -> Res<Self> {
-    if page_size == 0 {
-      return Err(err!("Invalid page size {}", page_size));
-    }
-    let desc = Descriptor::mem(capacity)?;
-    let mut mngr = Self {
-      page_size,
-      desc,
-      free_page_id: 0,
-      free_count: 0,
-      free_map: BTreeMap::new(),
-      counter: 0,
-    };
-    mngr.sync()?; // stores metadata in page 0 and advances descriptor
-    Ok(mngr)
   }
 
   #[inline]
@@ -361,10 +414,10 @@ impl StorageManager {
   }
 
   // The amount of memory (in bytes) used by the storage manager.
-  pub fn mem_usage(&self) -> Res<usize> {
-    let desc_mem_usage = self.desc.mem_usage()?;
+  pub fn mem_usage(&self) -> usize {
+    let desc_mem_usage = self.desc.mem_usage();
     let free_mem_usage = self.free_map.len() * (4 /* u32 key */ + 8 /* u32 prev and next */);
-    Ok(desc_mem_usage + free_mem_usage)
+    desc_mem_usage + free_mem_usage
   }
 }
 
@@ -424,11 +477,73 @@ mod tests {
     println!("Finished testing MemDescriptor");
   }
 
+  fn storage_mem(page_size: u32) -> StorageManager {
+    let opts = Options::new().as_mem(0).with_page_size(page_size).build().unwrap();
+    StorageManager::new(&opts).unwrap()
+  }
+
+  fn storage_disk(page_size: u32, path: &str) -> StorageManager {
+    let opts = Options::new().as_disk(path).with_page_size(page_size).build().unwrap();
+    StorageManager::new(&opts).unwrap()
+  }
+
   #[test]
   fn test_storage_tmp() {
     with_descriptor(|desc| {
       desc.write(0, "Hello, world!".as_bytes()).unwrap();
     });
+  }
+
+  #[test]
+  fn test_storage_options_default() {
+    let opts = Options::new().build().unwrap();
+    assert!(!opts.is_disk);
+    assert_eq!(opts.page_size, DEFAULT_PAGE_SIZE);
+  }
+
+  #[test]
+  fn test_storage_options_mem() {
+    let opts = Options::new().as_mem(128).build().unwrap();
+    assert!(!opts.is_disk);
+    assert_eq!(opts.mem_capacity, 128);
+    assert_eq!(opts.page_size, DEFAULT_PAGE_SIZE);
+  }
+
+  #[test]
+  fn test_storage_options_disk() {
+    with_tmp_file(|path| {
+      let opts = Options::new().as_disk(path).with_page_size(32).build().unwrap();
+      assert!(opts.is_disk);
+      assert_eq!(opts.disk_path, path.to_owned());
+      assert_eq!(opts.page_size, 32);
+    });
+  }
+
+  #[test]
+  fn test_storage_options_chaining() {
+    with_tmp_file(|path| {
+      let opts = Options::new()
+        .as_disk(path).with_page_size(32)
+        .as_mem(128).with_page_size(64)
+        .build()
+        .unwrap();
+
+      assert!(!opts.is_disk);
+      assert_eq!(opts.mem_capacity, 128);
+      assert_eq!(opts.page_size, 64);
+    });
+  }
+
+  #[test]
+  fn test_storage_options_invalid() {
+    let opts = Options::new().as_disk(&"").build();
+    assert!(opts.is_err());
+
+    let opts = Options::new().as_mem(0).with_page_size(MIN_PAGE_SIZE - 1).build();
+    assert!(opts.is_err());
+
+    let opts = Options::new().as_mem(0).with_page_size(MAX_PAGE_SIZE + 1).build();
+    assert!(opts.is_err());
   }
 
   #[test]
@@ -494,76 +609,64 @@ mod tests {
   fn test_storage_descriptor_mem_usage() {
     let mut desc = Descriptor::mem(0).unwrap();
     assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
-    assert_eq!(desc.mem_usage(), Ok(8));
+    assert_eq!(desc.mem_usage(), 8);
 
     assert!(desc.truncate(2).is_ok());
-    assert_eq!(desc.mem_usage(), Ok(2));
+    assert_eq!(desc.mem_usage(), 2);
 
     // FileDescriptor has 0 memory usage
     with_tmp_file(|path| {
       let mut desc = Descriptor::disk(path).unwrap();
       assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
-      assert_eq!(desc.mem_usage(), Ok(0));
+      assert_eq!(desc.mem_usage(), 0);
       assert!(desc.truncate(2).is_ok());
-      assert_eq!(desc.mem_usage(), Ok(0));
+      assert_eq!(desc.mem_usage(), 0);
     })
   }
 
   #[test]
   fn test_storage_manager_init_mem() {
-    let mngr = StorageManager::mem(24, 0).unwrap();
+    let mngr = storage_mem(24);
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, 0);
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.counter, 0);
     assert_eq!(mngr.num_pages().unwrap(), 1);
-    assert_eq!(mngr.mem_usage().unwrap(), 24);
-  }
-
-  #[test]
-  fn test_storage_manager_init_mem_invalid_page_size() {
-    assert!(StorageManager::mem(0, 0).is_err());
+    assert_eq!(mngr.mem_usage(), 24);
   }
 
   #[test]
   fn test_storage_manager_init_disk() {
     with_tmp_file(|path| {
-      let mngr = StorageManager::disk(24, path).unwrap();
+      let mngr = storage_disk(24, path);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 1);
-      assert_eq!(mngr.mem_usage().unwrap(), 0);
+      assert_eq!(mngr.mem_usage(), 0);
     })
   }
 
   #[test]
   fn test_storage_manager_init_disk_2() {
     with_tmp_file(|path| {
-      let _mngr = StorageManager::disk(24, path).unwrap();
-      let mngr = StorageManager::disk(32, path).unwrap();
+      let _mngr = storage_disk(24, path);
+      let mngr = storage_disk(32, path);
 
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 1);
-      assert_eq!(mngr.mem_usage().unwrap(), 0);
-    })
-  }
-
-  #[test]
-  fn test_storage_manager_init_disk_invalid_page_size() {
-    with_tmp_file(|path| {
-      assert!(StorageManager::disk(0, path).is_err());
+      assert_eq!(mngr.mem_usage(), 0);
     })
   }
 
   #[test]
   fn test_storage_manager_disk_meta_sync() {
     with_tmp_file(|path| {
-      let mut mngr = StorageManager::disk(32, path).unwrap();
+      let mut mngr = storage_disk(32, path);
       let buf = vec![5u8; mngr.page_size as usize];
 
       mngr.write_next(&buf[..]).unwrap();
@@ -573,7 +676,7 @@ mod tests {
 
       mngr.sync().unwrap();
 
-      let mngr = StorageManager::disk(32, path).unwrap();
+      let mngr = storage_disk(32, path);
       assert_eq!(mngr.page_size, 32);
       assert_eq!(mngr.free_page_id, 1);
       assert_eq!(mngr.free_count, 1);
@@ -585,13 +688,13 @@ mod tests {
   fn test_storage_manager_counter_persist() {
     with_tmp_file(|path| {
       {
-        let mut mngr = StorageManager::disk(32, path).unwrap();
+        let mut mngr = storage_disk(32, path);
         for i in 0..10 {
           assert_eq!(mngr.next_id(), Ok(i));
         }
       }
       {
-        let mut mngr = StorageManager::disk(32, path).unwrap();
+        let mut mngr = storage_disk(32, path);
         assert_eq!(mngr.next_id(), Ok(10));
       }
     })
@@ -599,7 +702,7 @@ mod tests {
 
   #[test]
   fn test_storage_manager_write_read() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let mut buf = vec![5u8; mngr.page_size as usize];
     (&mut buf[..]).write(&[1, 2, 3, 4]).unwrap();
 
@@ -615,7 +718,7 @@ mod tests {
 
   #[test]
   fn test_storage_manager_write_free() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let buf = vec![5u8; mngr.page_size as usize];
 
     assert_eq!(mngr.write_next(&buf[..]), Ok(1));
@@ -645,13 +748,13 @@ mod tests {
 
   #[test]
   fn test_storage_manager_free_out_of_bound() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     assert!(mngr.free(100).is_err());
   }
 
   #[test]
   fn test_storage_manager_free_truncate_no_evict() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
 
     let page_id = mngr.write_next(&buf[..]).unwrap();
@@ -668,7 +771,7 @@ mod tests {
 
   #[test]
   fn test_storage_manager_free_truncate_evict() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
 
     for _ in 1..10 {
@@ -696,7 +799,7 @@ mod tests {
   fn test_storage_manager_free_manager_restart() {
     with_tmp_file(|path| {
       {
-        let mut mngr = StorageManager::disk(32, path).unwrap();
+        let mut mngr = storage_disk(32, path);
         let buf = vec![1u8; mngr.page_size as usize];
 
         for _ in 1..10 {
@@ -708,7 +811,7 @@ mod tests {
         }
       }
       {
-        let mngr = StorageManager::disk(32, path).unwrap();
+        let mngr = storage_disk(32, path);
         assert_eq!(mngr.num_pages(), Ok(10));
         assert_eq!(mngr.free_count, 8);
         assert_eq!(mngr.free_map.len(), 8);
@@ -724,7 +827,7 @@ mod tests {
 
   #[test]
   fn test_storage_manager_fuzz_free_fully() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
     let num_pages = 500;
     let num_iterations = 100;
@@ -749,7 +852,7 @@ mod tests {
 
   #[test]
   fn test_storage_manager_fuzz_free_with_writes() {
-    let mut mngr = StorageManager::mem(32, 0).unwrap();
+    let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
     let num_pages = 500;
     let num_pages_to_keep = 23;
