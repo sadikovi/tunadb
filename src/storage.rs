@@ -112,11 +112,18 @@ impl Descriptor {
 }
 
 const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
-// magic (4) + page size (4) + free page id (4) + free count (4) + counter (8)
-const METADATA_LEN: usize = 24;
+// We have a fixed metadata size, see sync() method for more information.
+const METADATA_LEN: usize = 32;
 const MIN_PAGE_SIZE: u32 = 16;
 const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
+
+// Calculates the absolute position of a page depending on the page size.
+// This is needed so we can account for the metadata length.
+#[inline]
+fn pos(page_id: u32, page_size: u32) -> u64 {
+  METADATA_LEN as u64 + page_id as u64 * page_size as u64
+}
 
 // StorageManager options.
 pub struct Options {
@@ -227,7 +234,7 @@ impl StorageManager {
         let mut page_buf = vec![0u8; page_size as usize];
         while cnt < free_count {
           let next_opt = if cnt + 1 < free_count {
-            desc.read(curr as u64 * page_size as u64, &mut page_buf[..]).unwrap();
+            desc.read(pos(curr, page_size), &mut page_buf[..]).unwrap();
             Some(u8_u32!(&page_buf[0..4]))
           } else {
             None
@@ -266,11 +273,6 @@ impl StorageManager {
     }
   }
 
-  #[inline]
-  fn pos(&self, page_id: u32) -> u64 {
-    page_id as u64 * self.page_size as u64
-  }
-
   // Returns the next counter.
   pub fn next_id(&mut self) -> Res<u64> {
     let value = self.counter;
@@ -281,12 +283,12 @@ impl StorageManager {
 
   // Reads the content of the page with `page_id` into the buffer.
   pub fn read(&mut self, page_id: u32, buf: &mut [u8]) -> Res<()> {
-    self.desc.read(self.pos(page_id), &mut buf[..self.page_size as usize])
+    self.desc.read(pos(page_id, self.page_size), &mut buf[..self.page_size as usize])
   }
 
   // Writes data in the page with `page_id`.
   pub fn write(&mut self, page_id: u32, buf: &[u8]) -> Res<()> {
-    self.desc.write(self.pos(page_id), &buf[..self.page_size as usize])
+    self.desc.write(pos(page_id, self.page_size), &buf[..self.page_size as usize])
   }
 
   // Writes data to the next available page and returns its page id.
@@ -306,6 +308,7 @@ impl StorageManager {
   // Removes the provided page id from free list and free map.
   // Does not perform sync.
   fn remove_free_page(&mut self, page_id: u32) -> Res<()> {
+    println!("{:?}, remove {}", self.free_map, page_id);
     if let Some(value) = self.free_map.remove(&page_id) {
       self.free_count -= 1;
 
@@ -360,7 +363,7 @@ impl StorageManager {
           break;
         }
       }
-      self.desc.truncate(last_page_id as u64 * self.page_size as u64)?;
+      self.desc.truncate(pos(last_page_id, self.page_size))?;
     } else {
       if self.free_count > 0 {
         // Update free map
@@ -385,13 +388,13 @@ impl StorageManager {
 
   // Sync metadata + free pages in page 0.
   pub fn sync(&mut self) -> Res<()> {
-    let mut page_buf = vec![0u8; self.page_size as usize];
-    (&mut page_buf[0..]).write(MAGIC)?;
-    (&mut page_buf[4..]).write(&u32_u8!(self.page_size))?;
-    (&mut page_buf[8..]).write(&u32_u8!(self.free_page_id))?;
-    (&mut page_buf[12..]).write(&u32_u8!(self.free_count))?;
-    (&mut page_buf[16..]).write(&u64_u8!(self.counter))?;
-    self.write(0, &page_buf[..])
+    let mut buf = vec![0u8; METADATA_LEN];
+    (&mut buf[0..]).write(MAGIC)?;
+    (&mut buf[4..]).write(&u32_u8!(self.page_size))?;
+    (&mut buf[8..]).write(&u32_u8!(self.free_page_id))?;
+    (&mut buf[12..]).write(&u32_u8!(self.free_count))?;
+    (&mut buf[16..]).write(&u64_u8!(self.counter))?;
+    self.desc.write(0, &buf[..])
   }
 
   // ==================
@@ -405,7 +408,8 @@ impl StorageManager {
 
   // Total number of pages that is managed by the storage manager.
   pub fn num_pages(&self) -> Res<usize> {
-    Ok(self.desc.len()? as usize / self.page_size as usize)
+    let num_pages = (self.desc.len()? - METADATA_LEN as u64) / self.page_size as u64;
+    Ok(num_pages as usize)
   }
 
   // Number of free pages that were reclaimed.
@@ -631,8 +635,8 @@ mod tests {
     assert_eq!(mngr.free_page_id, 0);
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.counter, 0);
-    assert_eq!(mngr.num_pages().unwrap(), 1);
-    assert_eq!(mngr.mem_usage(), 24);
+    assert_eq!(mngr.num_pages().unwrap(), 0);
+    assert_eq!(mngr.mem_usage(), METADATA_LEN);
   }
 
   #[test]
@@ -643,8 +647,9 @@ mod tests {
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
-      assert_eq!(mngr.num_pages().unwrap(), 1);
+      assert_eq!(mngr.num_pages().unwrap(), 0);
       assert_eq!(mngr.mem_usage(), 0);
+      assert_eq!(Path::new(path).metadata().unwrap().len(), METADATA_LEN as u64);
     })
   }
 
@@ -658,7 +663,7 @@ mod tests {
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
-      assert_eq!(mngr.num_pages().unwrap(), 1);
+      assert_eq!(mngr.num_pages().unwrap(), 0);
       assert_eq!(mngr.mem_usage(), 0);
     })
   }
@@ -666,21 +671,24 @@ mod tests {
   #[test]
   fn test_storage_manager_disk_meta_sync() {
     with_tmp_file(|path| {
-      let mut mngr = storage_disk(32, path);
-      let buf = vec![5u8; mngr.page_size as usize];
+      {
+        let mut mngr = storage_disk(32, path);
+        let buf = vec![5u8; mngr.page_size as usize];
 
-      mngr.write_next(&buf[..]).unwrap();
-      mngr.write_next(&buf[..]).unwrap();
-      mngr.free(1).unwrap();
-      mngr.next_id().unwrap();
+        mngr.write_next(&buf[..]).unwrap();
+        mngr.write_next(&buf[..]).unwrap();
+        mngr.free(0).unwrap();
+        mngr.next_id().unwrap();
 
-      mngr.sync().unwrap();
-
-      let mngr = storage_disk(32, path);
-      assert_eq!(mngr.page_size, 32);
-      assert_eq!(mngr.free_page_id, 1);
-      assert_eq!(mngr.free_count, 1);
-      assert_eq!(mngr.counter, 1);
+        mngr.sync().unwrap();
+      }
+      {
+        let mngr = storage_disk(32, path);
+        assert_eq!(mngr.page_size, 32);
+        assert_eq!(mngr.free_page_id, 0);
+        assert_eq!(mngr.free_count, 1);
+        assert_eq!(mngr.counter, 1);
+      }
     })
   }
 
@@ -707,7 +715,7 @@ mod tests {
     (&mut buf[..]).write(&[1, 2, 3, 4]).unwrap();
 
     let page_id = mngr.write_next(&buf[..]).unwrap();
-    assert_eq!(page_id, 1);
+    assert_eq!(page_id, 0);
 
     (&mut buf[4..]).write(&[8, 9, 0]).unwrap();
     mngr.write(page_id, &buf[..]).unwrap();
@@ -721,28 +729,28 @@ mod tests {
     let mut mngr = storage_mem(32);
     let buf = vec![5u8; mngr.page_size as usize];
 
+    assert_eq!(mngr.write_next(&buf[..]), Ok(0));
     assert_eq!(mngr.write_next(&buf[..]), Ok(1));
     assert_eq!(mngr.write_next(&buf[..]), Ok(2));
-    assert_eq!(mngr.write_next(&buf[..]), Ok(3));
 
     assert_eq!(mngr.free_count, 0);
-    assert_eq!(mngr.free_page_id, 0);
+    assert_eq!(mngr.free_page_id, 0); // does not really matter since the count is 0
 
-    mngr.free(3).unwrap();
-    mngr.free(1).unwrap();
     mngr.free(2).unwrap();
+    mngr.free(0).unwrap();
+    mngr.free(1).unwrap();
 
     // This is because our free map would truncate the source instead of keeping the pages
     assert_eq!(mngr.free_count, 0);
-    assert_eq!(mngr.free_page_id, 1);
+    assert_eq!(mngr.free_page_id, 0); // 0 because when we truncate, we don't update free ptr
     assert_eq!(mngr.free_map.len(), 0);
 
+    assert_eq!(mngr.write_next(&buf[..]), Ok(0));
     assert_eq!(mngr.write_next(&buf[..]), Ok(1));
     assert_eq!(mngr.write_next(&buf[..]), Ok(2));
-    assert_eq!(mngr.write_next(&buf[..]), Ok(3));
 
     assert_eq!(mngr.free_count, 0);
-    assert_ne!(mngr.free_page_id, 0);
+    assert_eq!(mngr.free_page_id, 0);
     assert_eq!(mngr.free_map.len(), 0);
   }
 
@@ -753,18 +761,38 @@ mod tests {
   }
 
   #[test]
+  fn test_storage_manager_free_double_free() {
+    let mut mngr = storage_mem(32);
+    let buf = vec![1u8; mngr.page_size as usize];
+
+    for i in 0..3 {
+      assert_eq!(mngr.write_next(&buf[..]).unwrap(), i);
+    }
+
+    for _ in 0..10 {
+      mngr.free(1).unwrap();
+    }
+
+    mngr.free(0).unwrap();
+    mngr.free(2).unwrap();
+
+    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_map.len(), 0);
+  }
+
+  #[test]
   fn test_storage_manager_free_truncate_no_evict() {
     let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
 
     let page_id = mngr.write_next(&buf[..]).unwrap();
-    assert_eq!(mngr.num_pages(), Ok(2));
+    assert_eq!(mngr.num_pages(), Ok(1));
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.free_map.len(), 0);
 
     mngr.free(page_id).unwrap();
 
-    assert_eq!(mngr.num_pages(), Ok(1));
+    assert_eq!(mngr.num_pages(), Ok(0));
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.free_map.len(), 0);
   }
@@ -774,23 +802,23 @@ mod tests {
     let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
 
-    for _ in 1..10 {
+    for _ in 0..9 {
       mngr.write_next(&buf[..]).unwrap();
     }
-    mngr.write_next(&buf[..]).unwrap();
+    assert_eq!(mngr.write_next(&buf[..]).unwrap(), 9); // 10 pages in total
 
-    for i in 1..10 {
+    for i in 0..9 {
       mngr.free(i).unwrap();
     }
 
-    assert_eq!(mngr.num_pages(), Ok(11)); // page 0 + 10 data pages
+    assert_eq!(mngr.num_pages(), Ok(10));
     assert_eq!(mngr.free_count, 9);
-    assert_eq!(mngr.free_page_id, 9);
+    assert_eq!(mngr.free_page_id, 8);
     assert_eq!(mngr.free_map.len(), 9);
 
-    mngr.free(10).unwrap();
+    mngr.free(9).unwrap();
 
-    assert_eq!(mngr.num_pages(), Ok(1));
+    assert_eq!(mngr.num_pages(), Ok(0));
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.free_map.len(), 0);
   }
@@ -802,17 +830,17 @@ mod tests {
         let mut mngr = storage_disk(32, path);
         let buf = vec![1u8; mngr.page_size as usize];
 
-        for _ in 1..10 {
-          mngr.write_next(&buf[..]).unwrap();
+        for i in 0..9 {
+          assert_eq!(mngr.write_next(&buf[..]).unwrap(), i);
         }
 
-        for i in 1..9 {
+        for i in 0..8 {
           mngr.free(i).unwrap();
         }
       }
       {
         let mngr = storage_disk(32, path);
-        assert_eq!(mngr.num_pages(), Ok(10));
+        assert_eq!(mngr.num_pages(), Ok(9));
         assert_eq!(mngr.free_count, 8);
         assert_eq!(mngr.free_map.len(), 8);
       }
@@ -846,7 +874,7 @@ mod tests {
 
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.free_map.len(), 0);
-      assert_eq!(mngr.num_pages(), Ok(1));
+      assert_eq!(mngr.num_pages(), Ok(0));
     }
   }
 
@@ -874,8 +902,7 @@ mod tests {
     }
 
     assert_eq!(mngr.free_count as usize, mngr.free_map.len());
-    // Account for page 0
-    assert_eq!(mngr.free_count as usize + pages.len() + 1, mngr.num_pages().unwrap());
+    assert_eq!(mngr.free_count as usize + pages.len(), mngr.num_pages().unwrap());
 
     while let Some(page) = pages.pop() {
       mngr.free(page).unwrap();
