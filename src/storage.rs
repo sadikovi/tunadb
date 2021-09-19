@@ -103,15 +103,15 @@ impl Descriptor {
   }
 
   // Total amount of memory (in bytes) used by the descriptor.
-  fn mem_usage(&self) -> usize {
+  fn estimated_mem_usage(&self) -> usize {
     match self {
       Descriptor::Disk { .. } => 0,
-      Descriptor::Mem { data } => data.len(),
+      Descriptor::Mem { data } => data.len(), // TODO: should probably be capacity
     }
   }
 }
 
-const MAGIC: &[u8] = &[b'S', b'K', b'V', b'S'];
+const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed metadata size, see sync() method for more information.
 const METADATA_LEN: usize = 32;
 const MIN_PAGE_SIZE: u32 = 16;
@@ -392,7 +392,7 @@ impl StorageManager {
 
   // Sync metadata + free pages in page 0.
   pub fn sync(&mut self) -> Res<()> {
-    let mut buf = vec![0u8; METADATA_LEN];
+    let mut buf = [0u8; METADATA_LEN];
     (&mut buf[0..]).write(MAGIC)?;
     (&mut buf[4..]).write(&u32_u8!(self.page_size))?;
     (&mut buf[8..]).write(&u32_u8!(self.free_page_id))?;
@@ -422,8 +422,8 @@ impl StorageManager {
   }
 
   // The amount of memory (in bytes) used by the storage manager.
-  pub fn mem_usage(&self) -> usize {
-    let desc_mem_usage = self.desc.mem_usage();
+  pub fn estimated_mem_usage(&self) -> usize {
+    let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_map.len() * (4 /* u32 key */ + 8 /* u32 prev and next */);
     desc_mem_usage + free_mem_usage
   }
@@ -614,21 +614,21 @@ mod tests {
   }
 
   #[test]
-  fn test_storage_descriptor_mem_usage() {
+  fn test_storage_descriptor_estimated_mem_usage() {
     let mut desc = Descriptor::mem(0).unwrap();
     assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
-    assert_eq!(desc.mem_usage(), 8);
+    assert_eq!(desc.estimated_mem_usage(), 8);
 
     assert!(desc.truncate(2).is_ok());
-    assert_eq!(desc.mem_usage(), 2);
+    assert_eq!(desc.estimated_mem_usage(), 2);
 
     // FileDescriptor has 0 memory usage
     with_tmp_file(|path| {
       let mut desc = Descriptor::disk(path).unwrap();
       assert!(desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]).is_ok());
-      assert_eq!(desc.mem_usage(), 0);
+      assert_eq!(desc.estimated_mem_usage(), 0);
       assert!(desc.truncate(2).is_ok());
-      assert_eq!(desc.mem_usage(), 0);
+      assert_eq!(desc.estimated_mem_usage(), 0);
     })
   }
 
@@ -640,7 +640,7 @@ mod tests {
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.counter, 0);
     assert_eq!(mngr.num_pages().unwrap(), 0);
-    assert_eq!(mngr.mem_usage(), METADATA_LEN);
+    assert_eq!(mngr.estimated_mem_usage(), METADATA_LEN);
   }
 
   #[test]
@@ -652,7 +652,7 @@ mod tests {
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 0);
-      assert_eq!(mngr.mem_usage(), 0);
+      assert_eq!(mngr.estimated_mem_usage(), 0);
       assert_eq!(Path::new(path).metadata().unwrap().len(), METADATA_LEN as u64);
     })
   }
@@ -668,7 +668,7 @@ mod tests {
       assert_eq!(mngr.free_count, 0);
       assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.num_pages().unwrap(), 0);
-      assert_eq!(mngr.mem_usage(), 0);
+      assert_eq!(mngr.estimated_mem_usage(), 0);
     })
   }
 
