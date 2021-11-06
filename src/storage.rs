@@ -281,6 +281,10 @@ impl StorageManager {
     Ok(value)
   }
 
+  pub fn update_page_table(&mut self, root: Option<u32>, max_block_id: u32) -> Res<()> {
+    Ok(())
+  }
+
   // Reads the content of the page with `page_id` into the buffer.
   pub fn read(&mut self, page_id: u32, buf: &mut [u8]) -> Res<()> {
     self.desc.read(pos(page_id, self.page_size), &mut buf[..self.page_size as usize])
