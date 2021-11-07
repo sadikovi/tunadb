@@ -312,7 +312,7 @@ fn insert_data(
 ) -> Res<bool> {
   assert!(is_data_page(&buf));
 
-  let mut depth = 0;
+  let mut num_overflow = 0;
   loop {
     if data_set(buf, key, value) {
       mngr.write(page_id, &buf)?;
@@ -321,8 +321,8 @@ fn insert_data(
       page_id = overflow_page_id;
       mngr.read(page_id, buf)?;
       assert!(is_data_page(&buf));
-      depth += 1;
-    } else if depth + 1 < MAX_DATA_PAGES {
+      num_overflow += 1;
+    } else if num_overflow + 1 < MAX_DATA_PAGES {
       // Create a new page, insert the value
       let mut new_buf = vec![0u8; buf.len()];
       let overflow_page_id = create_new(&mut new_buf, key, value, mngr)?;
@@ -369,7 +369,14 @@ fn rebalance(
     for &(k, v) in &all_keys {
       if let Some(next) = meta_get(&meta_buf, k) {
         mngr.read(next, buf)?;
-        assert!(insert_data(next, buf, k, v, mngr)?);
+        // assert!(insert_data(next, buf, k, v, mngr)?);
+        let r = insert_data(next, buf, k, v, mngr)?;
+        if !r {
+          println!("Trying to insert k: {}, v: {}, all keys: {:?}, hash: {}", k, v, all_keys, get_hash_func(&meta_buf));
+          let meta_page = mngr.write_next(&mut meta_buf)?;
+          fmt0(meta_page, buf, mngr, 0);
+          assert!(r);
+        }
       } else {
         buf.fill(0);
         let next_page = create_new(buf, k, v, mngr)?;
@@ -511,6 +518,67 @@ fn delete(root: u32, buf: &mut[u8], key: u32, mngr: &mut StorageManager) -> Res<
   }
 }
 
+#[derive(Debug)]
+struct Statistics {
+  max_block_id: u32,
+  num_data_pages: usize,
+  num_meta_pages: usize,
+  max_depth: usize,
+  max_data_len: usize,
+}
+
+// Finds the max block id stored in the page table
+fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Res<Statistics> {
+  let mut data_pages = Vec::new(); // vector to keep data pages stored in a meta page
+
+  let mut stats = Statistics {
+    max_block_id: 0,
+    num_data_pages: 0,
+    num_meta_pages: 0,
+    max_depth: 0,
+    max_data_len: 0,
+  };
+
+  mngr.read(root, buf)?;
+
+  if is_data_page(&buf) {
+    loop {
+      stats.num_data_pages += 1;
+      stats.max_data_len += 1;
+      let mut iter = key_value_iter(&buf);
+      while let Some((key, _)) = iter.next() {
+        stats.max_block_id = stats.max_block_id.max(key);
+      }
+
+      if let Some(overflow) = get_overflow_page(&buf) {
+        root = overflow;
+        mngr.read(root, buf)?;
+      } else {
+        break;
+      }
+    }
+  } else {
+    stats.num_meta_pages += 1;
+    data_pages.clear();
+    let mut iter = key_value_iter(&buf);
+    while let Some((_, page)) = iter.next() {
+      data_pages.push(page);
+    }
+
+    for &page in &data_pages {
+      let tmp_stats = collect_stats(page, buf, mngr)?;
+      stats.max_block_id = stats.max_block_id.max(tmp_stats.max_block_id);
+      stats.num_data_pages += tmp_stats.num_data_pages;
+      stats.num_meta_pages += tmp_stats.num_meta_pages;
+      stats.max_depth = stats.max_depth.max(tmp_stats.max_depth);
+      stats.max_data_len = stats.max_data_len.max(tmp_stats.max_data_len);
+    }
+    stats.max_depth += 1;
+  }
+
+  Ok(stats)
+}
+
 pub struct PageTable {
   mngr: StorageManager,
   root: Option<u32>,
@@ -592,26 +660,26 @@ impl PageTable {
 }
 
 // For debugging only
-fn fmt0(pt: &mut PageTable, root: u32, off: usize) {
-  pt.mngr.read(root, &mut pt.buf).unwrap();
-  if is_data_page(&pt.buf) {
-    print!("{:width$}*[{}] ({})", "", root, get_count(&pt.buf), width = off);
-    if let Some(overflow) = get_overflow_page(&pt.buf) {
+fn fmt0(root: u32, buf: &mut [u8], mngr: &mut StorageManager, off: usize) {
+  mngr.read(root, buf).unwrap();
+  if is_data_page(&buf) {
+    print!("{:width$}*[{}] ({})", "", root, get_count(&buf), width = off);
+    if let Some(overflow) = get_overflow_page(&buf) {
       print!(" ->");
-      fmt0(pt, overflow, 1);
+      fmt0(overflow, buf, mngr, 1);
     } else {
       println!();
     }
   } else {
-    let mut iter = key_value_iter(&pt.buf);
+    let mut iter = key_value_iter(&buf);
     let mut values = Vec::new();
     while let Some((_, v)) = iter.next() {
       values.push(v);
     }
-    let hash_func = get_hash_func(&pt.buf);
+    let hash_func = get_hash_func(&buf);
     println!("{:width$}#[{}] ({}) hash({})", "", root, values.len(), hash_func, width = off);
     for &v in &values {
-      fmt0(pt, v, off + 2);
+      fmt0(v, buf, mngr, off + 2);
     }
   }
 }
@@ -619,7 +687,7 @@ fn fmt0(pt: &mut PageTable, root: u32, off: usize) {
 pub fn fmt(pt: &mut PageTable) {
   println!("PageTable(root: {:?}, max block: {})", pt.root, pt.max_block_id);
   if let Some(root) = pt.root {
-    fmt0(pt, root, 0);
+    fmt0(root, &mut pt.buf, &mut pt.mngr, 0);
   }
   println!("Storage: {} pages, {} free pages, {} mem",
     pt.mngr().num_pages().unwrap(),
@@ -635,6 +703,7 @@ mod tests {
   use std::collections::HashSet;
   use rand::prelude::*;
   use crate::storage::Options;
+  use std::time::Instant;
 
   #[test]
   fn test_table_debug() {
@@ -657,6 +726,33 @@ mod tests {
     }
 
     fmt(&mut pt);
+
+    assert!(false);
+  }
+
+  #[test]
+  fn test_table_collect_stats_debug() {
+    // TODO: fails with 128 byte pages
+    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
+    // let opts = Options::new().as_disk("./test.db").with_page_size(4096).build().unwrap();
+    let mngr = StorageManager::new(&opts).unwrap();
+    let mut pt = PageTable::new(mngr);
+
+    for _ in 0..1000 {
+      let block = pt.next_block_id();
+      pt.put(block, block).unwrap();
+      // if block > 20696 {
+      //   let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+      //   println!("Stats: {:?}", stats);
+      // }
+    }
+
+    let now = Instant::now();
+
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+
+    println!("Stats: {:?}, took {} ms", stats, now.elapsed().as_millis());
+    // Stats: Statistics { max_block_id: 3000000, num_data_pages: 259077, num_meta_pages: 510, max_depth: 2, max_data_len: 1 }, took 26438 ms
 
     assert!(false);
   }
@@ -965,6 +1061,56 @@ mod tests {
   }
 
   // PageTable tests
+
+  #[test]
+  fn test_table_collect_stats() {
+    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
+    let mngr = StorageManager::new(&opts).unwrap();
+    let mut pt = PageTable::new(mngr);
+
+    let mut blocks = Vec::new();
+
+    for _ in 0..1000 {
+      let block = pt.next_block_id();
+      blocks.push(block);
+      pt.put(block, block).unwrap();
+    }
+
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    assert_eq!(stats.max_block_id, *blocks.iter().max().unwrap());
+    assert_eq!(stats.max_block_id, pt.max_block_id - 1);
+    assert_eq!(stats.num_data_pages, 108);
+    assert_eq!(stats.num_meta_pages, 4);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.max_data_len, 6);
+
+    for &block in &blocks[..500] {
+      pt.del(block).unwrap();
+      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+      assert_eq!(stats.max_block_id, *blocks.iter().max().unwrap());
+      assert_eq!(stats.max_block_id, pt.max_block_id - 1);
+    }
+
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    assert_eq!(stats.max_block_id, pt.max_block_id - 1);
+    assert_eq!(stats.num_data_pages, 82);
+    assert_eq!(stats.num_meta_pages, 4);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.max_data_len, 4);
+
+    for &block in blocks[501..1000].iter().rev() {
+      pt.del(block).unwrap();
+      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+      assert_eq!(stats.max_block_id, block - 1);
+    }
+
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    assert_eq!(stats.max_block_id, 501);
+    assert_eq!(stats.num_data_pages, 1);
+    assert_eq!(stats.num_meta_pages, 1);
+    assert_eq!(stats.max_depth, 1);
+    assert_eq!(stats.max_data_len, 1);
+  }
 
   #[test]
   fn test_table_put_get_correctness() {
