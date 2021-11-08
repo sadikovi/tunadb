@@ -110,17 +110,24 @@ impl Descriptor {
   fn estimated_mem_usage(&self) -> usize {
     match self {
       Descriptor::Disk { .. } => 0,
-      Descriptor::Mem { data } => data.len(), // TODO: should probably be capacity
+      // This is indicator of memory used, not allocated.
+      // Technically, this should probably be capacity of the underlying vector;
+      // however, we use length for debugging purposes
+      Descriptor::Mem { data } => data.len(),
     }
   }
 }
 
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
+
 // We have a fixed metadata size, see sync() method for more information.
 const METADATA_LEN: usize = 32;
 const MIN_PAGE_SIZE: u32 = 16;
 const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
+
+// Whether or not the page table id is set and valid
+const FLAG_PAGE_TABLE_IS_SET: u32 = 0x1;
 
 // Calculates the absolute position of a page depending on the page size.
 // This is needed so we can account for the metadata length.
@@ -189,12 +196,13 @@ impl OptionsBuilder {
 }
 
 pub struct StorageManager {
-  page_size: u32, // page size on disk
   desc: Descriptor,
+  flags: u32,
+  page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list, represents the absolute position of a page
   free_count: u32, // number of pages in the free list
   free_map: BTreeMap<u32, (Option<u32>, Option<u32>)>, // page id -> (prev, next), keys are sorted
-  counter: u64, // general monotonically increasing counter
+  page_table_root: u32, // root page for the page table
 }
 
 impl StorageManager {
@@ -215,18 +223,20 @@ impl StorageManager {
         let mut desc = Descriptor::disk(opts.disk_path.as_ref());
         desc.read(0, &mut page_buf[..]);
 
+        let flags = u8_u32!(&page_buf[4..8]);
+
         if &page_buf[..4] != MAGIC {
           panic!("Corrupt database file, invalid MAGIC");
         }
 
-        let page_size = u8_u32!(&page_buf[4..8]);
+        let page_size = u8_u32!(&page_buf[8..12]);
         if page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
           panic!("Corrupt database file, invalid page size {}", page_size);
         }
 
-        let free_page_id = u8_u32!(&page_buf[8..12]);
-        let free_count = u8_u32!(&page_buf[12..16]);
-        let counter = u8_u64!(&page_buf[16..24]);
+        let free_page_id = u8_u32!(&page_buf[12..16]);
+        let free_count = u8_u32!(&page_buf[16..20]);
+        let page_table_root = u8_u32!(&page_buf[20..24]);
         let mut free_map = BTreeMap::new();
 
         // Reconstruct the in-memory map
@@ -248,43 +258,58 @@ impl StorageManager {
 
           cnt += 1;
         }
-        Self { page_size, desc, free_page_id, free_count, free_map, counter }
+        Self { desc, flags, page_size, free_page_id, free_count, free_map, page_table_root }
       } else {
         let mut mngr = Self {
-          page_size: opts.page_size,
           desc: Descriptor::disk(opts.disk_path.as_ref()),
+          flags: 0,
+          page_size: opts.page_size,
           free_page_id: 0,
           free_count: 0,
           free_map: BTreeMap::new(),
-          counter: 0,
+          page_table_root: 0,
         };
         mngr.sync();
         mngr
       }
     } else {
       let mut mngr = Self {
-        page_size: opts.page_size,
         desc: Descriptor::mem(opts.mem_capacity),
+        flags: 0,
+        page_size: opts.page_size,
         free_page_id: 0,
         free_count: 0,
         free_map: BTreeMap::new(),
-        counter: 0,
+        page_table_root: 0,
       };
       mngr.sync(); // stores metadata in page 0 and advances descriptor
       mngr
     }
   }
 
-  // Returns the next counter.
-  pub fn next_id(&mut self) -> u64 {
-    let value = self.counter;
-    self.counter += 1;
-    self.sync();
-    value
+  // Returns the currently set page table root.
+  pub fn page_table_root(&self) -> Option<u32> {
+    if self.flags & FLAG_PAGE_TABLE_IS_SET != 0 {
+      Some(self.page_table_root)
+    } else {
+      None
+    }
   }
 
-  pub fn update_page_table(&mut self, root: Option<u32>, max_block_id: u32) {
+  // Updates page table root in memory.
+  // Call sync() to persist data on disk.
+  pub fn update_page_table(&mut self, root_opt: Option<u32>) {
     // TODO: implement this method
+    match root_opt {
+      Some(root) => {
+        self.page_table_root = root;
+        self.flags |= FLAG_PAGE_TABLE_IS_SET;
+      },
+      None => {
+        self.page_table_root = 0;
+        self.flags &= !FLAG_PAGE_TABLE_IS_SET;
+      }
+    }
   }
 
   // Reads the content of the page with `page_id` into the buffer.
@@ -391,17 +416,18 @@ impl StorageManager {
       self.free_count += 1;
     }
 
-    self.sync()
+    self.sync();
   }
 
   // Sync metadata + free pages in page 0.
   pub fn sync(&mut self) {
     let mut buf = [0u8; METADATA_LEN];
     res!((&mut buf[0..]).write(MAGIC));
-    res!((&mut buf[4..]).write(&u32_u8!(self.page_size)));
-    res!((&mut buf[8..]).write(&u32_u8!(self.free_page_id)));
-    res!((&mut buf[12..]).write(&u32_u8!(self.free_count)));
-    res!((&mut buf[16..]).write(&u64_u8!(self.counter)));
+    res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
+    res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
+    res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
+    res!((&mut buf[16..]).write(&u32_u8!(self.free_count)));
+    res!((&mut buf[20..]).write(&u32_u8!(self.page_table_root)));
     self.desc.write(0, &buf[..]);
   }
 
@@ -707,10 +733,11 @@ mod tests {
   #[test]
   fn test_storage_manager_init_mem() {
     let mngr = storage_mem(24);
+    assert_eq!(mngr.flags, 0);
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, 0);
     assert_eq!(mngr.free_count, 0);
-    assert_eq!(mngr.counter, 0);
+    assert_eq!(mngr.page_table_root, 0);
     assert_eq!(mngr.num_pages(), 0);
     assert_eq!(mngr.estimated_mem_usage(), METADATA_LEN);
   }
@@ -719,10 +746,11 @@ mod tests {
   fn test_storage_manager_init_disk() {
     with_tmp_file(|path| {
       let mngr = storage_disk(24, path);
+      assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
-      assert_eq!(mngr.counter, 0);
+      assert_eq!(mngr.page_table_root, 0);
       assert_eq!(mngr.num_pages(), 0);
       assert_eq!(mngr.estimated_mem_usage(), 0);
       assert_eq!(Path::new(path).metadata().unwrap().len(), METADATA_LEN as u64);
@@ -735,10 +763,11 @@ mod tests {
       let _mngr = storage_disk(24, path);
       let mngr = storage_disk(32, path);
 
+      assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, 0);
       assert_eq!(mngr.free_count, 0);
-      assert_eq!(mngr.counter, 0);
+      assert_eq!(mngr.page_table_root, 0);
       assert_eq!(mngr.num_pages(), 0);
       assert_eq!(mngr.estimated_mem_usage(), 0);
     })
@@ -754,32 +783,35 @@ mod tests {
         mngr.write_next(&buf[..]);
         mngr.write_next(&buf[..]);
         mngr.free(0);
-        mngr.next_id();
+        mngr.update_page_table(Some(1));
 
         mngr.sync();
       }
       {
         let mngr = storage_disk(32, path);
+        assert_eq!(mngr.flags, FLAG_PAGE_TABLE_IS_SET);
         assert_eq!(mngr.page_size, 32);
         assert_eq!(mngr.free_page_id, 0);
         assert_eq!(mngr.free_count, 1);
-        assert_eq!(mngr.counter, 1);
+        assert_eq!(mngr.page_table_root, 1);
       }
     })
   }
 
   #[test]
-  fn test_storage_manager_counter_persist() {
+  fn test_storage_manager_page_table_persist() {
     with_tmp_file(|path| {
       {
         let mut mngr = storage_disk(32, path);
-        for i in 0..10 {
-          assert_eq!(mngr.next_id(), i);
-        }
+        assert_eq!(mngr.page_table_root(), None);
+
+        mngr.update_page_table(Some(100));
+        assert_eq!(mngr.page_table_root(), Some(100));
+        mngr.sync();
       }
       {
-        let mut mngr = storage_disk(32, path);
-        assert_eq!(mngr.next_id(), 10);
+        let mngr = storage_disk(32, path);
+        assert_eq!(mngr.page_table_root(), Some(100));
       }
     })
   }
