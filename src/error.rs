@@ -46,3 +46,9 @@ macro_rules! err {
 
 // Internal type for the Result.
 pub type Res<T> = Result<T, Error>;
+
+macro_rules! res {
+  ($e:expr) => ($e.unwrap());
+  ($e:expr, $fmt:expr) => ($e.expect(&format!($fmt)));
+  ($e:expr, $fmt:expr, $($args:expr),*) => ($e.expect(&format!($fmt, $($args),*)));
+}
