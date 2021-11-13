@@ -1,5 +1,5 @@
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -120,8 +120,8 @@ impl Descriptor {
 
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 
-// We have a fixed metadata size, see sync() method for more information.
-const METADATA_LEN: usize = 32;
+// We have a fixed header size, see sync() method for more information.
+const DB_HEADER_SIZE: usize = 32;
 const MIN_PAGE_SIZE: u32 = 16;
 const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
@@ -133,7 +133,7 @@ const FLAG_PAGE_TABLE_IS_SET: u32 = 0x1;
 // This is needed so we can account for the metadata length.
 #[inline]
 fn pos(page_id: u32, page_size: u32) -> u64 {
-  METADATA_LEN as u64 + page_id as u64 * page_size as u64
+  DB_HEADER_SIZE as u64 + page_id as u64 * page_size as u64
 }
 
 // StorageManager options.
@@ -197,68 +197,82 @@ impl OptionsBuilder {
 
 pub struct StorageManager {
   desc: Descriptor,
-  flags: u32,
+  flags: u32, //
   page_size: u32, // page size on disk
-  free_page_id: u32, // pointer to the free list, represents the absolute position of a page
-  free_count: u32, // number of pages in the free list
-  free_map: BTreeMap<u32, (Option<u32>, Option<u32>)>, // page id -> (prev, next), keys are sorted
-  page_table_root: u32, // root page for the page table
+  free_page_id: u32, // pointer to the free list as the first meta block
+  free_count: u32, // how many free pages are stored in meta blocks
+  page_table_root: Option<u32>, // root page for the page table
+  free_list: Vec<u32>, // in-memory free list, contains pages available for reuse
+  free_set: HashSet<u32>, // in-memory set of all of the free pages, cleared on sync
 }
 
 impl StorageManager {
+  // Creates a new StorageManager with the provided options.
+  // The method opens or creates a corresponding database.
   pub fn new(opts: &Options) -> Self {
     if opts.is_disk {
       let path = Path::new(&opts.disk_path);
 
       if path.exists() {
-        if !path.is_file() {
-          panic!("Not a file: {}", path.display());
-        }
+        assert!(path.is_file(), "Not a file: {}", path.display());
+        assert!(
+          res!(path.metadata()).len() < DB_HEADER_SIZE as u64,
+          "Corrupt database file, header is too small"
+        );
 
-        if res!(path.metadata()).len() < METADATA_LEN as u64 {
-          panic!("Corrupt database file, header is too small");
-        }
-
-        let mut page_buf = vec![0u8; METADATA_LEN];
+        let mut buf = vec![0u8; DB_HEADER_SIZE];
         let mut desc = Descriptor::disk(opts.disk_path.as_ref());
-        desc.read(0, &mut page_buf[..]);
+        desc.read(0, &mut buf[..]);
 
-        let flags = u8_u32!(&page_buf[4..8]);
+        assert_eq!(&buf[0..4], MAGIC, "Corrupt database file, invalid MAGIC");
 
-        if &page_buf[..4] != MAGIC {
-          panic!("Corrupt database file, invalid MAGIC");
+        let flags = u8_u32!(&buf[4..8]);
+        let page_size = u8_u32!(&buf[8..12]);
+        assert!(
+          page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE,
+          "Corrupt database file, invalid page size {}", page_size
+        );
+
+        let mut free_page_id = u8_u32!(&buf[12..16]);
+        let mut free_count = u8_u32!(&buf[16..20]);
+
+        let mut free_list = Vec::new();
+        let mut free_set = HashSet::new();
+
+        if free_count > 0 {
+          let mut i = 4;
+          let mut meta_buf = vec![0u8; page_size as usize];
+          desc.read(pos(free_page_id, page_size), &mut buf[..]);
+
+          while free_count > 0 {
+            let page_id = u8_u32!(&meta_buf[i..]);
+            free_list.push(page_id);
+            free_set.insert(page_id);
+            free_count -= 1;
+            i += 4;
+            if i >= meta_buf.len() && free_count > 0 {
+              free_page_id = u8_u32!(&meta_buf[0..4]);
+              desc.read(pos(free_page_id, page_size), &mut meta_buf[..]);
+            }
+          }
         }
 
-        let page_size = u8_u32!(&page_buf[8..12]);
-        if page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
-          panic!("Corrupt database file, invalid page size {}", page_size);
+        let page_table_root = if flags & FLAG_PAGE_TABLE_IS_SET != 0 {
+          Some(u8_u32!(&buf[20..24]))
+        } else {
+          None
+        };
+
+        Self {
+          desc,
+          flags,
+          page_size,
+          free_page_id: 0, // mark free pages as non-existent
+          free_count: 0, // they will be saved on sync
+          page_table_root,
+          free_list,
+          free_set,
         }
-
-        let free_page_id = u8_u32!(&page_buf[12..16]);
-        let free_count = u8_u32!(&page_buf[16..20]);
-        let page_table_root = u8_u32!(&page_buf[20..24]);
-        let mut free_map = BTreeMap::new();
-
-        // Reconstruct the in-memory map
-        let mut cnt = 0;
-        let mut prev_opt = None;
-        let mut curr = free_page_id;
-        let mut page_buf = vec![0u8; page_size as usize];
-        while cnt < free_count {
-          let next_opt = if cnt + 1 < free_count {
-            desc.read(pos(curr, page_size), &mut page_buf[..]);
-            Some(u8_u32!(&page_buf[0..4]))
-          } else {
-            None
-          };
-
-          free_map.insert(curr, (prev_opt, next_opt));
-          prev_opt = Some(curr);
-          curr = next_opt.unwrap_or(u32::MAX);
-
-          cnt += 1;
-        }
-        Self { desc, flags, page_size, free_page_id, free_count, free_map, page_table_root }
       } else {
         let mut mngr = Self {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
@@ -266,8 +280,9 @@ impl StorageManager {
           page_size: opts.page_size,
           free_page_id: 0,
           free_count: 0,
-          free_map: BTreeMap::new(),
-          page_table_root: 0,
+          page_table_root: None,
+          free_list: Vec::new(),
+          free_set: HashSet::new(),
         };
         mngr.sync();
         mngr
@@ -279,156 +294,133 @@ impl StorageManager {
         page_size: opts.page_size,
         free_page_id: 0,
         free_count: 0,
-        free_map: BTreeMap::new(),
-        page_table_root: 0,
+        page_table_root: None,
+        free_list: Vec::new(),
+        free_set: HashSet::new(),
       };
       mngr.sync(); // stores metadata in page 0 and advances descriptor
       mngr
     }
   }
 
-  // Returns the currently set page table root.
+  // Returns page table root that is currently set.
+  // The value is the one that is in memory (most recent) in case disk and memory have diverged.
   pub fn page_table_root(&self) -> Option<u32> {
-    if self.flags & FLAG_PAGE_TABLE_IS_SET != 0 {
-      Some(self.page_table_root)
-    } else {
-      None
-    }
+    self.page_table_root
   }
 
   // Updates page table root in memory.
-  // Call sync() to persist data on disk.
+  // Does not sync data.
   pub fn update_page_table(&mut self, root_opt: Option<u32>) {
-    // TODO: implement this method
-    match root_opt {
-      Some(root) => {
-        self.page_table_root = root;
-        self.flags |= FLAG_PAGE_TABLE_IS_SET;
-      },
-      None => {
-        self.page_table_root = 0;
-        self.flags &= !FLAG_PAGE_TABLE_IS_SET;
-      }
-    }
+    self.page_table_root = root_opt;
   }
 
   // Reads the content of the page with `page_id` into the buffer.
+  // No sync is required for this method.
   pub fn read(&mut self, page_id: u32, buf: &mut [u8]) {
+    assert!(!self.free_set.contains(&page_id), "Attempt to read free page {}", page_id);
     self.desc.read(pos(page_id, self.page_size), &mut buf[..self.page_size as usize])
   }
 
   // Writes data in the page with `page_id`.
+  // No sync is required for this method.
   pub fn write(&mut self, page_id: u32, buf: &[u8]) {
+    assert!(!self.free_set.contains(&page_id), "Attempt to write to free page {}", page_id);
     self.desc.write(pos(page_id, self.page_size), &buf[..self.page_size as usize])
   }
 
   // Writes data to the next available page and returns its page id.
   pub fn write_next(&mut self, buf: &[u8]) -> u32 {
-    let page_id = if self.free_count > 0 {
-      let (&next_page_id, _) = res!(self.free_map.first_key_value());
-      self.remove_free_page(next_page_id);
-      self.sync();
-      next_page_id
-    } else {
-      self.num_pages() as u32
+    let next_page_id = match self.free_list.pop() {
+      Some(page_id) => page_id,
+      None => self.num_pages() as u32,
     };
-    self.write(page_id, buf);
-    page_id
+    self.write(next_page_id, buf);
+    next_page_id
   }
 
-  // Removes the provided page id from free list and free map.
-  // Does not perform sync.
-  fn remove_free_page(&mut self, page_id: u32) {
-    if let Some(value) = self.free_map.remove(&page_id) {
-      self.free_count -= 1;
-
-      match value {
-        (Some(prev), Some(next)) => {
-          // TODO: optimise this
-          let mut page_buf = vec![0u8; self.page_size as usize];
-          res!((&mut page_buf[0..]).write(&u32_u8!(next)));
-          self.write(prev, &page_buf);
-          // Point prev to next
-          res!(self.free_map.get_mut(&prev)).1 = Some(next);
-          res!(self.free_map.get_mut(&next)).0 = Some(prev);
-        },
-        (Some(prev), None) => {
-          // It is the tail of the free list, there is no need to override the page data.
-          res!(self.free_map.get_mut(&prev)).1 = None; // next = None
-        },
-        (None, Some(next)) => {
-          // Current head of the free list.
-          self.free_page_id = next;
-          res!(self.free_map.get_mut(&next)).0 = None; // prev = None
-        },
-        (None, None) => {
-          // Free list only had one element.
-          assert_eq!(self.free_count, 0);
-          assert_eq!(self.free_map.len(), 0);
-        },
-      }
-    } else {
-      panic!("Free page {} is not found", page_id);
-    }
-  }
-
-  // Marks page as free so it can be reused.
-  pub fn free(&mut self, page_id: u32) {
+  pub fn mark_as_free(&mut self, page_id: u32) {
     let num_pages = self.num_pages();
+    assert!(num_pages > page_id as usize, "Invalid page {} to free", page_id);
+    self.free_set.insert(page_id);
+  }
 
-    if page_id as usize >= num_pages {
-      panic!("Invalid page {} to free", page_id);
-    }
+  // Sync metadata + free pages.
+  pub fn sync(&mut self) {
+    // Metadata to hint if we can truncate the database file.
+    let mut can_truncate = false;
+    let mut trunc_page = 0;
 
-    // If the free map already contains the page, return to avoid double free issues.
-    if self.free_map.get(&page_id).is_some() {
-      return;
-    }
+    // If we have free pages (either collected with mark_as_free() or leftovers),
+    // we need to write again to meta blocks + determine if we even can truncate the file.
+    if self.free_set.len() > 0 {
+      self.free_list.clear();
+      for &page in self.free_set.iter() {
+        self.free_list.push(page);
+        trunc_page = cmp::max(page, trunc_page);
+      }
+      self.free_set.clear();
 
-    // If the page is the last page, truncate instead of adding to the free list.
-    if num_pages - 1 == page_id as usize {
-      let mut last_page_id = page_id;
-      while let Some((&curr, _)) = self.free_map.last_key_value() {
-        if curr + 1 == last_page_id {
-          last_page_id = curr;
-          self.remove_free_page(curr);
-        } else {
-          break;
+      can_truncate = trunc_page as usize == self.num_pages() - 1;
+
+      if can_truncate {
+        self.free_list.pop();
+        self.free_list.sort();
+
+        while let Some(page) = self.free_list.pop() {
+          if page + 1 != trunc_page {
+            self.free_list.push(page);
+            break;
+          } else {
+            trunc_page = page;
+          }
         }
       }
-      self.desc.truncate(pos(last_page_id, self.page_size));
-    } else {
-      if self.free_count > 0 {
-        // Update free map
-        res!(self.free_map.get_mut(&self.free_page_id)).0 = Some(page_id);
-        self.free_map.insert(page_id, (None, Some(self.free_page_id)));
 
-        // Update the page
-        // TODO: optimise this
-        let mut page_buf = vec![0u8; self.page_size as usize];
-        res!((&mut page_buf[0..]).write(&u32_u8!(self.free_page_id)));
-        self.write(page_id, &page_buf);
-      } else {
-        self.free_map.insert(page_id, (None, None));
+      self.free_page_id = 0;
+      self.free_count = 0;
+
+      let mut buf = vec![0u8; self.page_size as usize];
+      let mut i = 4; // the first 4 bytes are reserved for metadata
+      while let Some(page) = self.free_list.pop() {
+        res!((&mut buf[i..]).write(&u32_u8!(page)));
+        self.free_count += 1;
+        i += 4;
+        if i > buf.len() - 4 {
+          res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
+          self.free_page_id = self.num_pages() as u32;
+          self.write(self.free_page_id, &buf[..]);
+          i = 4;
+        }
       }
 
-      self.free_page_id = page_id;
-      self.free_count += 1;
+      // Write the remaining data into one more page
+      if i > 4 {
+        res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
+        self.free_page_id = self.num_pages() as u32;
+        self.write(self.free_page_id, &buf[..]);
+      }
     }
 
-    self.sync();
-  }
+    if self.page_table_root.is_some() {
+      self.flags |= FLAG_PAGE_TABLE_IS_SET;
+    } else {
+      self.flags &= !FLAG_PAGE_TABLE_IS_SET;
+    }
 
-  // Sync metadata + free pages in page 0.
-  pub fn sync(&mut self) {
-    let mut buf = [0u8; METADATA_LEN];
+    let mut buf = [0u8; DB_HEADER_SIZE];
     res!((&mut buf[0..]).write(MAGIC));
     res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
     res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
     res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
     res!((&mut buf[16..]).write(&u32_u8!(self.free_count)));
-    res!((&mut buf[20..]).write(&u32_u8!(self.page_table_root)));
+    res!((&mut buf[18..]).write(&u32_u8!(self.page_table_root.unwrap_or(0))));
     self.desc.write(0, &buf[..]);
+
+    // Optionally truncate the file
+    if can_truncate {
+      self.desc.truncate(pos(trunc_page, self.page_size));
+    }
   }
 
   // ==================
@@ -442,7 +434,7 @@ impl StorageManager {
 
   // Total number of pages that is managed by the storage manager.
   pub fn num_pages(&self) -> usize {
-    let num_pages = (self.desc.len() - METADATA_LEN as u64) / self.page_size as u64;
+    let num_pages = (self.desc.len() - DB_HEADER_SIZE as u64) / self.page_size as u64;
     num_pages as usize
   }
 
@@ -454,7 +446,7 @@ impl StorageManager {
   // The amount of memory (in bytes) used by the storage manager.
   pub fn estimated_mem_usage(&self) -> usize {
     let desc_mem_usage = self.desc.estimated_mem_usage();
-    let free_mem_usage = self.free_map.len() * (4 /* u32 key */ + 8 /* u32 prev and next */);
+    let free_mem_usage = self.free_set.len() * 4 + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
   }
 }
@@ -739,7 +731,7 @@ mod tests {
     assert_eq!(mngr.free_count, 0);
     assert_eq!(mngr.page_table_root, 0);
     assert_eq!(mngr.num_pages(), 0);
-    assert_eq!(mngr.estimated_mem_usage(), METADATA_LEN);
+    assert_eq!(mngr.estimated_mem_usage(), DB_HEADER_SIZE);
   }
 
   #[test]
@@ -753,7 +745,7 @@ mod tests {
       assert_eq!(mngr.page_table_root, 0);
       assert_eq!(mngr.num_pages(), 0);
       assert_eq!(mngr.estimated_mem_usage(), 0);
-      assert_eq!(Path::new(path).metadata().unwrap().len(), METADATA_LEN as u64);
+      assert_eq!(Path::new(path).metadata().unwrap().len(), DB_HEADER_SIZE as u64);
     })
   }
 
