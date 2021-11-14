@@ -140,8 +140,7 @@ const MIN_PAGE_SIZE: u32 = 16;
 const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
 
-// Whether or not the page table id is set and valid
-const FLAG_PAGE_TABLE_IS_SET: u32 = 0x1;
+const INVALID_PAGE_ID: u32 = u32::MAX;
 
 // Calculates the absolute position of a page depending on the page size.
 // This is needed so we can account for the metadata length.
@@ -214,7 +213,6 @@ pub struct StorageManager {
   flags: u32, //
   page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list as the first meta block
-  free_count: u32, // how many free pages are stored in meta blocks
   page_table_root: Option<u32>, // root page for the page table
   free_list: Vec<u32>, // in-memory free list, contains pages available for reuse
   free_set: HashSet<u32>, // in-memory set of all of the free pages, cleared on sync
@@ -240,7 +238,9 @@ impl StorageManager {
 
         assert_eq!(&buf[0..4], MAGIC, "Corrupt database file, invalid MAGIC");
 
+        // Reserved for database flags.
         let flags = u8_u32!(&buf[4..8]);
+
         let page_size = u8_u32!(&buf[8..12]);
         assert!(
           page_size >= MIN_PAGE_SIZE && page_size <= MAX_PAGE_SIZE,
@@ -248,48 +248,39 @@ impl StorageManager {
         );
 
         let mut free_page_id = u8_u32!(&buf[12..16]);
-        let mut free_count = u8_u32!(&buf[16..20]);
-
         let mut free_list = Vec::new();
         let mut free_set = HashSet::new();
 
-        if free_count > 0 {
-          let mut meta_buf = vec![0u8; page_size as usize];
+        let mut meta_buf = vec![0u8; page_size as usize];
+        while free_page_id != INVALID_PAGE_ID {
           desc.read(pos(free_page_id, page_size), &mut meta_buf[..]);
           // Add meta page to the free list, it can be reused.
           free_list.push(free_page_id);
           free_set.insert(free_page_id);
-
-          let mut i = 4;
-          while free_count > 0 {
+          // Update free page id to the next meta block.
+          free_page_id = u8_u32!(&meta_buf[0..4]);
+          // Load all of the pages in the current meta block.
+          let mut cnt = u8_u32!(&meta_buf[4..8]);
+          let mut i = 8;
+          while cnt > 0 {
             let page_id = u8_u32!(&meta_buf[i..]);
             free_list.push(page_id);
             free_set.insert(page_id);
-            free_count -= 1;
             i += 4;
-            if i >= meta_buf.len() && free_count > 0 {
-              free_page_id = u8_u32!(&meta_buf[0..4]);
-              desc.read(pos(free_page_id, page_size), &mut meta_buf[..]);
-              free_list.push(free_page_id);
-              free_set.insert(free_page_id);
-              // Reset the byte position.
-              i = 4;
-            }
+            cnt -= 1;
           }
         }
 
-        let page_table_root = if flags & FLAG_PAGE_TABLE_IS_SET != 0 {
-          Some(u8_u32!(&buf[20..24]))
-        } else {
-          None
+        let page_table_root = match u8_u32!(&buf[16..20]) {
+          INVALID_PAGE_ID => None,
+          page_id => Some(page_id)
         };
 
         Self {
           desc,
           flags,
           page_size,
-          free_page_id: 0, // mark free pages as non-existent
-          free_count: 0, // as they all will be saved on sync
+          free_page_id: INVALID_PAGE_ID, // free page id is updated in sync/drop
           page_table_root,
           free_list,
           free_set,
@@ -299,8 +290,7 @@ impl StorageManager {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
           flags: 0,
           page_size: opts.page_size,
-          free_page_id: 0,
-          free_count: 0,
+          free_page_id: INVALID_PAGE_ID,
           page_table_root: None,
           free_list: Vec::new(),
           free_set: HashSet::new(),
@@ -313,8 +303,7 @@ impl StorageManager {
         desc: Descriptor::mem(opts.mem_capacity),
         flags: 0,
         page_size: opts.page_size,
-        free_page_id: 0,
-        free_count: 0,
+        free_page_id: INVALID_PAGE_ID,
         page_table_root: None,
         free_list: Vec::new(),
         free_set: HashSet::new(),
@@ -339,6 +328,7 @@ impl StorageManager {
   // Reads the content of the page with `page_id` into the buffer.
   // No sync is required for this method.
   pub fn read(&mut self, page_id: u32, buf: &mut [u8]) {
+    assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
     assert!(!self.free_set.contains(&page_id), "Attempt to read free page {}", page_id);
     self.desc.read(pos(page_id, self.page_size), &mut buf[..self.page_size as usize])
   }
@@ -346,6 +336,7 @@ impl StorageManager {
   // Writes data in the page with `page_id`.
   // No sync is required for this method.
   pub fn write(&mut self, page_id: u32, buf: &[u8]) {
+    assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
     assert!(!self.free_set.contains(&page_id), "Attempt to write to free page {}", page_id);
     self.desc.write(pos(page_id, self.page_size), &buf[..self.page_size as usize])
   }
@@ -364,25 +355,19 @@ impl StorageManager {
   }
 
   pub fn mark_as_free(&mut self, page_id: u32) {
+    assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
     assert!(self.num_pages() > page_id as usize, "Invalid page {} to free", page_id);
     self.free_set.insert(page_id);
   }
 
   // Sync metadata + free pages.
   pub fn sync(&mut self) {
-    if self.page_table_root.is_some() {
-      self.flags |= FLAG_PAGE_TABLE_IS_SET;
-    } else {
-      self.flags &= !FLAG_PAGE_TABLE_IS_SET;
-    }
-
     let mut buf = [0u8; DB_HEADER_SIZE];
     res!((&mut buf[0..]).write(MAGIC));
     res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
     res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
     res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
-    res!((&mut buf[16..]).write(&u32_u8!(self.free_count)));
-    res!((&mut buf[20..]).write(&u32_u8!(self.page_table_root.unwrap_or(0))));
+    res!((&mut buf[16..]).write(&u32_u8!(self.page_table_root.unwrap_or(INVALID_PAGE_ID))));
     self.desc.write(0, &buf[..]);
 
     // Move all marked free pages into the free list.
@@ -451,47 +436,56 @@ impl Drop for StorageManager {
     //
     // We cannot use pages that were marked as free (free_set) since we may need to roll back in
     // case of a file write failure or other panic.
+
+    // Unset the free page id in case it was set inadvertently.
+    self.free_page_id = INVALID_PAGE_ID;
+
     if self.free_list.len() > 0 {
       // Calculate the number of pages (meta blocks) we need to store all of the free pages.
-      let meta_block_cnt =
-        (4 * self.free_list.len() + self.page_size as usize - 4) / self.page_size as usize;
+      let meta_block_cnt = {
+        let min_pages = 4f64 * self.free_list.len() as f64 / (self.page_size - 4) as f64;
+        min_pages.ceil() as usize
+      };
+
       // Check if our list of persisted free pages contains this amount.
       // We also need to sort array in case there are more pages than meta blocks so we use
       // the smallest page ids for meta blocks to make sure we can truncate the file later.
       if meta_block_cnt < self.free_list.len() {
-        self.free_list.sort_by(|a, b| b.cmp(a));
+        self.free_list.sort();
       }
-      let mut meta_blocks = Vec::new(); // (meta_block_cnt);
-      let mut i = 0;
-      while i < meta_block_cnt && self.free_list.len() > 0 {
+      let mut meta_blocks = Vec::with_capacity(meta_block_cnt);
+      let mut start_pos = 0;
+      while start_pos < cmp::min(meta_block_cnt, self.free_list.len()) {
         // Remove the page from the list; it will be used as a meta block and is not free anymore.
-        let page = self.free_list.pop().unwrap();
+        let page = self.free_list[start_pos];
         self.free_set.remove(&page);
         meta_blocks.push(page);
-        i += 1;
+        start_pos += 1;
       }
 
-      self.free_page_id = 0;
-      self.free_count = 0;
-
       let mut buf = vec![0u8; self.page_size as usize];
-      let mut i = 4; // the first 4 bytes are reserved for metadata
-      while let Some(page) = self.free_list.pop() {
+      let mut cnt: u32 = 0;
+      let mut i = 8; // the first 8 bytes are reserved for metadata
+      while start_pos < self.free_list.len() {
+        let page = self.free_list.pop().unwrap();
         res!((&mut buf[i..]).write(&u32_u8!(page)));
-        self.free_count += 1;
+        cnt += 1;
         i += 4;
-        if i > buf.len() - 4 {
+        if i > buf.len() - 4 /* u32 size */ || self.free_list.len() == start_pos {
           res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
+          res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
           self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
           self.write(self.free_page_id, &buf[..]);
-          i = 4;
+          i = 8;
+          cnt = 0;
         }
       }
 
-      // Write the remaining data into one more page
-      if i > 4 {
+      // Write the remaining data into one more page.
+      if meta_blocks.len() > 0 {
         res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
-        self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
+        res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
+        self.free_page_id = meta_blocks.pop().unwrap();
         self.write(self.free_page_id, &buf[..]);
       }
       // All meta blocks must have been used at this point.
@@ -791,8 +785,7 @@ mod tests {
     let mngr = storage_mem(24);
     assert_eq!(mngr.flags, 0);
     assert_eq!(mngr.page_size, 24);
-    assert_eq!(mngr.free_page_id, 0);
-    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
     assert_eq!(mngr.page_table_root, None);
     assert_eq!(mngr.free_list.len(), 0);
     assert_eq!(mngr.free_set.len(), 0);
@@ -806,8 +799,7 @@ mod tests {
       let mngr = storage_disk(24, path);
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
-      assert_eq!(mngr.free_page_id, 0);
-      assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
       assert_eq!(mngr.page_table_root, None);
       assert_eq!(mngr.free_list.len(), 0);
       assert_eq!(mngr.free_set.len(), 0);
@@ -825,8 +817,7 @@ mod tests {
 
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
-      assert_eq!(mngr.free_page_id, 0);
-      assert_eq!(mngr.free_count, 0);
+      assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
       assert_eq!(mngr.page_table_root, None);
       assert_eq!(mngr.free_list.len(), 0);
       assert_eq!(mngr.free_set.len(), 0);
@@ -881,7 +872,7 @@ mod tests {
     mngr.sync();
 
     // We don't persist free_count after sync
-    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
 
     mngr.mark_as_free(2);
     mngr.mark_as_free(0);
@@ -892,7 +883,7 @@ mod tests {
     mngr.sync();
 
     // We don't persist free pages after sync.
-    assert_eq!(mngr.free_count, 0);
+    assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
     assert_eq!(mngr.free_list, vec![2, 1, 0]);
     assert_eq!(mngr.free_set, [2, 1, 0].iter().cloned().collect());
     assert_eq!(mngr.num_free_pages(), 3);
@@ -927,14 +918,13 @@ mod tests {
   }
 
   #[test]
-  // #[should_panic(expected = "Attempt to write to free page")]
+  #[should_panic(expected = "Attempt to write to free page")]
   fn test_storage_manager_write_into_free_page() {
-    // let mut mngr = storage_mem(32);
-    // let buf = vec![5u8; mngr.page_size as usize];
-    // let page_id = mngr.write_next(&buf[..]);
-    // mngr.mark_as_free(page_id);
-    // mngr.write(page_id, &buf[..]);
-    assert!(false, "Test should be fixed!");
+    let mut mngr = storage_mem(32);
+    let buf = vec![5u8; mngr.page_size as usize];
+    let page_id = mngr.write_next(&buf[..]);
+    mngr.mark_as_free(page_id);
+    mngr.write(page_id, &buf[..]);
   }
 
   #[test]
@@ -1056,6 +1046,42 @@ mod tests {
   }
 
   #[test]
+  fn test_storage_manager_free_drop() {
+    with_tmp_file(|path| {
+      {
+        let mut mngr = storage_disk(32, path);
+        let buf = vec![1u8; mngr.page_size as usize];
+        for _ in 0..3 {
+          mngr.write_next(&buf[..]);
+        }
+
+        mngr.mark_as_free(0);
+
+        mngr.sync();
+      }
+      {
+        let mut mngr = storage_disk(32, path);
+
+        assert_eq!(mngr.num_free_pages(), 1);
+        assert_eq!(mngr.free_list, vec![0]);
+        assert_eq!(mngr.free_set, [0].iter().cloned().collect());
+
+        mngr.mark_as_free(2);
+        mngr.mark_as_free(1);
+
+        mngr.sync();
+      }
+      {
+        let mngr = storage_disk(32, path);
+
+        assert_eq!(mngr.num_free_pages(), 0);
+        assert_eq!(mngr.free_list.len(), 0);
+        assert_eq!(mngr.free_set.len(), 0);
+      }
+    });
+  }
+
+  #[test]
   fn test_storage_manager_free_manager_restart() {
     with_tmp_file(|path| {
       {
@@ -1071,14 +1097,19 @@ mod tests {
         }
 
         mngr.sync();
+
+        assert_eq!(mngr.num_pages(), 9);
+        assert_eq!(mngr.free_list, vec![7, 6, 5, 4, 3, 2, 1, 0]);
+        assert_eq!(mngr.free_set, [0, 1, 2, 3, 4, 5, 6, 7].iter().cloned().collect());
       }
       // Drop implementation should store free list on disk.
       {
         let mut mngr = storage_disk(32, path);
         assert_eq!(mngr.num_pages(), 9);
-        assert_eq!(mngr.free_count, 0);
-        assert_eq!(mngr.free_list.len(), 8);
-        assert_eq!(mngr.free_set.len(), 8);
+        assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
+        // We first add meta blocks (0, 1) and then pages in decreasing order.
+        assert_eq!(mngr.free_list, vec![0, 1, 7, 6, 5, 4, 3, 2]);
+        assert_eq!(mngr.free_set, [0, 1, 2, 3, 4, 5, 6, 7].iter().cloned().collect());
 
         mngr.mark_as_free(8);
 
@@ -1088,7 +1119,7 @@ mod tests {
       {
         let mngr = storage_disk(32, path);
         assert_eq!(mngr.num_pages(), 0);
-        assert_eq!(mngr.free_count, 0);
+        assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
         assert_eq!(mngr.free_list.len(), 0);
         assert_eq!(mngr.free_set.len(), 0);
       }
