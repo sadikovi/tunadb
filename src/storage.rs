@@ -364,8 +364,7 @@ impl StorageManager {
   }
 
   pub fn mark_as_free(&mut self, page_id: u32) {
-    let num_pages = self.num_pages();
-    assert!(num_pages > page_id as usize, "Invalid page {} to free", page_id);
+    assert!(self.num_pages() > page_id as usize, "Invalid page {} to free", page_id);
     self.free_set.insert(page_id);
   }
 
@@ -447,114 +446,60 @@ impl StorageManager {
 
 impl Drop for StorageManager {
   fn drop(&mut self) {
+    // When we drop StorageManager, either due to panic or going out of scope, we only need to
+    // write free_list that contains only persisted pages.
+    //
+    // We cannot use pages that were marked as free (free_set) since we may need to roll back in
+    // case of a file write failure or other panic.
+    if self.free_list.len() > 0 {
+      // Calculate the number of pages (meta blocks) we need to store all of the free pages.
+      let meta_block_cnt =
+        (4 * self.free_list.len() + self.page_size as usize - 4) / self.page_size as usize;
+      // Check if our list of persisted free pages contains this amount.
+      // We also need to sort array in case there are more pages than meta blocks so we use
+      // the smallest page ids for meta blocks to make sure we can truncate the file later.
+      if meta_block_cnt < self.free_list.len() {
+        self.free_list.sort_by(|a, b| b.cmp(a));
+      }
+      let mut meta_blocks = Vec::new(); // (meta_block_cnt);
+      let mut i = 0;
+      while i < meta_block_cnt && self.free_list.len() > 0 {
+        // Remove the page from the list; it will be used as a meta block and is not free anymore.
+        let page = self.free_list.pop().unwrap();
+        self.free_set.remove(&page);
+        meta_blocks.push(page);
+        i += 1;
+      }
 
-// // Sync metadata + free pages.
-// pub fn sync(&mut self) {
-//   // Metadata to hint if we can truncate the database file.
-//   let mut can_truncate = false;
-//   let mut trunc_page = 0;
-//
-//   // If we have free pages (either collected with mark_as_free() or leftovers),
-//   // we need to write again to meta blocks + determine if we even can truncate the file.
-//   if self.free_set.len() > 0 {
-//     // Calculate the number of pages (meta blocks) we need to store all of the free pages.
-//     let meta_block_cnt =
-//       (4 * self.free_set.len() + self.page_size as usize - 4) / self.page_size as usize;
-//     // Check if our list of persisted free pages contains this amount.
-//     // We cannot use pages that were marked as free since we may need to roll back in case of a
-//     // file write failure.
-//     // We also need to sort array in case there are more pages than meta blocks so we use
-//     // the smallest page ids for meta blocks to make sure we can truncate the file.
-//     if meta_block_cnt < self.free_list.len() {
-//       self.free_list.sort_by(|a, b| b.cmp(a));
-//     }
-//     let mut meta_blocks = Vec::with_capacity(meta_block_cnt);
-//     let mut i = 0;
-//     while i < meta_block_cnt && self.free_list.len() > 0 {
-//       // Remove the page from the free list and set that will be used as a meta block
-//       // since it is not free anymore.
-//       let page = self.free_list.pop().unwrap();
-//       self.free_set.remove(&page);
-//       meta_blocks.push(page);
-//       i += 1;
-//     }
-//
-//     self.free_list.clear();
-//     for &page in self.free_set.iter() {
-//       self.free_list.push(page);
-//       trunc_page = cmp::max(page, trunc_page);
-//     }
-//     self.free_set.clear();
-//
-//     // We can only truncate if all meta blocks come from free pages, otherwise we would need to
-//     // allocate pages at the end of the descriptor.
-//     can_truncate =
-//       meta_blocks.len() == meta_block_cnt &&
-//       trunc_page as usize == self.num_pages() - 1;
-//
-//     if can_truncate {
-//       // Remove the last page since it is a trunc_page.
-//       self.free_list.pop();
-//       self.free_list.sort();
-//
-//       while let Some(page) = self.free_list.pop() {
-//         if page + 1 != trunc_page {
-//           self.free_list.push(page);
-//           break;
-//         } else {
-//           trunc_page = page;
-//         }
-//       }
-//     }
-//
-//     self.free_page_id = 0;
-//     self.free_count = 0;
-//
-//     let mut buf = vec![0u8; self.page_size as usize];
-//     let mut i = 4; // the first 4 bytes are reserved for metadata
-//     while let Some(page) = self.free_list.pop() {
-//       res!((&mut buf[i..]).write(&u32_u8!(page)));
-//       self.free_count += 1;
-//       i += 4;
-//       if i > buf.len() - 4 {
-//         res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
-//         self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
-//         self.write(self.free_page_id, &buf[..]);
-//         i = 4;
-//       }
-//     }
-//
-//     // Write the remaining data into one more page
-//     if i > 4 {
-//       res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
-//       self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
-//       self.write(self.free_page_id, &buf[..]);
-//     }
-//     // All meta blocks must have been used at this point.
-//     assert_eq!(meta_blocks.len(), 0, "Meta blocks remain: {}", meta_blocks.len());
-//   }
-//
-//   if self.page_table_root.is_some() {
-//     self.flags |= FLAG_PAGE_TABLE_IS_SET;
-//   } else {
-//     self.flags &= !FLAG_PAGE_TABLE_IS_SET;
-//   }
-//
-//   let mut buf = [0u8; DB_HEADER_SIZE];
-//   res!((&mut buf[0..]).write(MAGIC));
-//   res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
-//   res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
-//   res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
-//   res!((&mut buf[16..]).write(&u32_u8!(self.free_count)));
-//   res!((&mut buf[20..]).write(&u32_u8!(self.page_table_root.unwrap_or(0))));
-//   self.desc.write(0, &buf[..]);
-//
-//   // Optionally truncate the file
-//   if can_truncate {
-//     self.desc.truncate(pos(trunc_page, self.page_size));
-//   }
-// }
+      self.free_page_id = 0;
+      self.free_count = 0;
 
+      let mut buf = vec![0u8; self.page_size as usize];
+      let mut i = 4; // the first 4 bytes are reserved for metadata
+      while let Some(page) = self.free_list.pop() {
+        res!((&mut buf[i..]).write(&u32_u8!(page)));
+        self.free_count += 1;
+        i += 4;
+        if i > buf.len() - 4 {
+          res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
+          self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
+          self.write(self.free_page_id, &buf[..]);
+          i = 4;
+        }
+      }
+
+      // Write the remaining data into one more page
+      if i > 4 {
+        res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
+        self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
+        self.write(self.free_page_id, &buf[..]);
+      }
+      // All meta blocks must have been used at this point.
+      assert_eq!(meta_blocks.len(), 0, "Meta blocks remain: {}", meta_blocks.len());
+    }
+
+    // Sync all of the metadata including free pages.
+    self.sync();
   }
 }
 
@@ -982,13 +927,14 @@ mod tests {
   }
 
   #[test]
-  #[should_panic(expected = "Attempt to write to free page")]
+  // #[should_panic(expected = "Attempt to write to free page")]
   fn test_storage_manager_write_into_free_page() {
-    let mut mngr = storage_mem(32);
-    let buf = vec![5u8; mngr.page_size as usize];
-    let page_id = mngr.write_next(&buf[..]);
-    mngr.mark_as_free(page_id);
-    mngr.write(page_id, &buf[..]);
+    // let mut mngr = storage_mem(32);
+    // let buf = vec![5u8; mngr.page_size as usize];
+    // let page_id = mngr.write_next(&buf[..]);
+    // mngr.mark_as_free(page_id);
+    // mngr.write(page_id, &buf[..]);
+    assert!(false, "Test should be fixed!");
   }
 
   #[test]
@@ -1123,12 +1069,28 @@ mod tests {
         for i in 0..8 {
           mngr.mark_as_free(i);
         }
+
+        mngr.sync();
       }
+      // Drop implementation should store free list on disk.
+      {
+        let mut mngr = storage_disk(32, path);
+        assert_eq!(mngr.num_pages(), 9);
+        assert_eq!(mngr.free_count, 0);
+        assert_eq!(mngr.free_list.len(), 8);
+        assert_eq!(mngr.free_set.len(), 8);
+
+        mngr.mark_as_free(8);
+
+        mngr.sync();
+      }
+      // The file should be truncated.
       {
         let mngr = storage_disk(32, path);
-        assert_eq!(mngr.num_pages(), 9);
-        assert_eq!(mngr.free_count, 8);
-        assert_eq!(mngr.free_set.len(), 8);
+        assert_eq!(mngr.num_pages(), 0);
+        assert_eq!(mngr.free_count, 0);
+        assert_eq!(mngr.free_list.len(), 0);
+        assert_eq!(mngr.free_set.len(), 0);
       }
     })
   }
