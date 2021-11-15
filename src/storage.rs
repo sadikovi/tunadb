@@ -17,11 +17,13 @@ enum Descriptor {
 }
 
 impl Descriptor {
+  // Creates a new descriptor backed by a file.
   fn disk(path: &str) -> Self {
     let fd = OpenOptions::new().read(true).write(true).create(true).open(path);
     Descriptor::Disk { fd: res!(fd, "Failed to open {}", path) }
   }
 
+  // Creates a new in-memory descriptor.
   fn mem(capacity: usize) -> Self {
     let data = Vec::with_capacity(capacity);
     Descriptor::Mem { data }
@@ -29,9 +31,7 @@ impl Descriptor {
 
   // Reads data into the provided buffer at the position.
   fn read(&mut self, pos: u64, buf: &mut [u8]) {
-    if pos + buf.len() as u64 > self.len() {
-      panic!("Read past EOF: pos {} len {}", pos, buf.len());
-    }
+    assert!(pos + buf.len() as u64 <= self.len(), "Read past EOF: pos {} len {}", pos, buf.len());
 
     match self {
       Descriptor::Disk { fd } => {
@@ -50,9 +50,7 @@ impl Descriptor {
 
   // Writes data at the specified position.
   fn write(&mut self, pos: u64, buf: &[u8]) {
-    if pos > self.len() {
-      panic!("Write past EOF: pos {} len {}", pos, buf.len());
-    }
+    assert!(pos <= self.len(), "Write past EOF: pos {} len {}", pos, buf.len());
 
     match self {
       Descriptor::Disk { fd } => {
@@ -80,9 +78,7 @@ impl Descriptor {
   // Truncates to the provided length, `len` must be less than or equal to length.
   fn truncate(&mut self, len: u64) {
     let curr_len = self.len();
-    if len > curr_len {
-      panic!("Failed to truncate to len {}, curr_len {}", len, curr_len);
-    }
+    assert!(len <= curr_len, "Failed to truncate to len {}, curr_len {}", len, curr_len);
 
     match self {
       Descriptor::Disk { fd } => {
@@ -98,7 +94,7 @@ impl Descriptor {
     }
   }
 
-  // Total length of the file or memory buffer, used for appends.
+  // Total length in bytes of the file or memory buffer, used for appends.
   fn len(&self) -> u64 {
     match self {
       Descriptor::Disk { fd } => res!(fd.metadata().map(|m| m.len())),
@@ -143,7 +139,7 @@ const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
 const INVALID_PAGE_ID: u32 = u32::MAX;
 
 // Calculates the absolute position of a page depending on the page size.
-// This is needed so we can account for the metadata length.
+// This is needed so we can account for the database header size.
 #[inline]
 fn pos(page_id: u32, page_size: u32) -> u64 {
   DB_HEADER_SIZE as u64 + page_id as u64 * page_size as u64
@@ -158,6 +154,7 @@ pub struct Options {
 }
 
 impl Options {
+  // Creates a new options builder.
   pub fn new() -> OptionsBuilder {
     OptionsBuilder {
       opts: Self {
@@ -198,12 +195,15 @@ impl OptionsBuilder {
   // Returns new options from the builder.
   // All options are validated here.
   pub fn build(self) -> Options {
-    if self.opts.is_disk && self.opts.disk_path.len() == 0 {
-      panic!("Empty file path");
+    if self.opts.is_disk {
+      assert_ne!(self.opts.disk_path.len(), 0, "Empty file path");
     }
-    if self.opts.page_size < MIN_PAGE_SIZE || self.opts.page_size > MAX_PAGE_SIZE {
-      panic!("Invalid page size {}", self.opts.page_size);
-    }
+
+    assert!(
+      self.opts.page_size >= MIN_PAGE_SIZE && self.opts.page_size <= MAX_PAGE_SIZE,
+      "Invalid page size {}", self.opts.page_size
+    );
+
     self.opts
   }
 }
@@ -295,7 +295,7 @@ impl StorageManager {
           free_list: Vec::new(),
           free_set: HashSet::new(),
         };
-        mngr.sync();
+        mngr.sync(); // stores header on disk and advances descriptor
         mngr
       }
     } else {
@@ -308,7 +308,7 @@ impl StorageManager {
         free_list: Vec::new(),
         free_set: HashSet::new(),
       };
-      mngr.sync(); // stores metadata in page 0 and advances descriptor
+      mngr.sync(); // stores header and advances descriptor
       mngr
     }
   }
@@ -354,6 +354,8 @@ impl StorageManager {
     next_page_id
   }
 
+  // Marks the page as free so it is not available for future writes, however, it is also not
+  // available yet for reuse. The page is finally freed and recycled after sync.
   pub fn mark_as_free(&mut self, page_id: u32) {
     assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
     assert!(self.num_pages() > page_id as usize, "Invalid page {} to free", page_id);
@@ -410,13 +412,14 @@ impl StorageManager {
     self.page_size as usize
   }
 
-  // Total number of pages that is managed by the storage manager.
+  // Total number of pages that are managed by the storage manager.
   pub fn num_pages(&self) -> usize {
     let num_pages = (self.desc.len() - DB_HEADER_SIZE as u64) / self.page_size as u64;
     num_pages as usize
   }
 
   // Number of free pages that were reclaimed and are available for use.
+  // This does not include pages that were marked as free but have not been released yet.
   pub fn num_free_pages(&self) -> usize {
     self.free_list.len() as usize
   }
@@ -424,7 +427,7 @@ impl StorageManager {
   // The amount of memory (in bytes) used by the storage manager.
   pub fn estimated_mem_usage(&self) -> usize {
     let desc_mem_usage = self.desc.estimated_mem_usage();
-    let free_mem_usage = self.free_set.len() * 4 + self.free_list.len() * 4;
+    let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
   }
 }
@@ -465,9 +468,9 @@ impl Drop for StorageManager {
 
       let mut buf = vec![0u8; self.page_size as usize];
       let mut cnt: u32 = 0;
-      let mut i = 8; // the first 8 bytes are reserved for metadata
+      let mut i = 8; // the first 8 bytes are reserved for metadata: page id and count
       while start_pos < self.free_list.len() {
-        let page = self.free_list.pop().unwrap();
+        let page = res!(self.free_list.pop());
         res!((&mut buf[i..]).write(&u32_u8!(page)));
         cnt += 1;
         i += 4;
@@ -485,11 +488,15 @@ impl Drop for StorageManager {
       if meta_blocks.len() > 0 {
         res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
         res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
-        self.free_page_id = meta_blocks.pop().unwrap();
+        self.free_page_id = res!(meta_blocks.pop());
         self.write(self.free_page_id, &buf[..]);
       }
       // All meta blocks must have been used at this point.
       assert_eq!(meta_blocks.len(), 0, "Meta blocks remain: {}", meta_blocks.len());
+      // All free pages must have been written, set both free list and set to empty.
+      self.free_list.clear();
+      // TODO: Log if there were pages marked as free but not synced.
+      self.free_set.clear();
     }
 
     // Sync all of the metadata including free pages.
@@ -713,7 +720,7 @@ mod tests {
   fn test_storage_descriptor_disk_truncate() {
     with_disk_descriptor(|desc| {
       desc.write(0, &[1, 2, 3]);
-      // Truncate with larger length
+      // Truncate with larger length.
       desc.truncate(100);
     });
   }
@@ -723,7 +730,7 @@ mod tests {
   fn test_storage_descriptor_mem_truncate() {
     with_mem_descriptor(|desc| {
       desc.write(0, &[1, 2, 3]);
-      // Truncate with larger length
+      // Truncate with larger length.
       desc.truncate(100);
     });
   }
@@ -733,13 +740,13 @@ mod tests {
     with_all_descriptors(|desc| {
       desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]);
 
-      // Truncate with smaller length
+      // Truncate with smaller length.
       desc.truncate(5);
       let mut res = vec![0; 10];
       desc.read(0, &mut res[0..5]);
       assert_eq!(&res[0..5], &[1, 2, 3, 4, 5]);
 
-      // Truncate the same length
+      // Truncate with the same length.
       desc.truncate(5);
       assert_eq!(desc.len(), 5);
     });
@@ -767,7 +774,7 @@ mod tests {
       assert_eq!(desc.estimated_mem_usage(), 2);
     });
 
-    // FileDescriptor has 0 memory usage
+    // FileDescriptor has 0 memory usage.
     with_disk_descriptor(|desc| {
       desc.write(0, &[1, 2, 3, 4, 5, 6, 7, 8]);
       assert_eq!(desc.estimated_mem_usage(), 0);
@@ -871,7 +878,7 @@ mod tests {
 
     mngr.sync();
 
-    // We don't persist free_count after sync
+    // We don't persist free_count after sync.
     assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
 
     mngr.mark_as_free(2);
@@ -997,7 +1004,7 @@ mod tests {
     let mut mngr = storage_mem(32);
     let buf = vec![1u8; mngr.page_size as usize];
 
-    // Write 10 pages in total
+    // Write 10 pages in total.
     for _ in 0..10 {
       mngr.write_next(&buf[..]);
     }
