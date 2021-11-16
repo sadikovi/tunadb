@@ -2,11 +2,11 @@ use std::io::Write;
 use crate::error::Res;
 use crate::storage::StorageManager;
 
-// Block id representing an empty slot
+// Block id representing an empty slot.
 const EMPTY: u32 = 0;
-// Block id representing a deleted entry in the table
+// Block id representing a deleted entry in the table.
 const TOMBSTONE: u32 = u32::MAX;
-// Block id representing a reserved key-value pair (header info)
+// Block id representing a reserved key-value pair (header info).
 const RESERVED: u32 = u32::MAX - 1;
 
 const TABLE_MAX_LOAD: f64 = 0.75;
@@ -19,10 +19,12 @@ const HASH_FUNC_CNT: usize = 4; // Must be a power of 2
 const HASH_FUNC_CNT_MINUS_1: usize = HASH_FUNC_CNT - 1;
 const HASH_FUNC: [fn(u32) -> u32; HASH_FUNC_CNT] = [hash_func1, hash_func2, hash_func3, hash_func4];
 
-// Hash functions:
+//===============
+// Hash functions
+//===============
 
 // https://burtleburtle.net/bob/hash/integer.html
-// Full avalanche
+// Full avalanche.
 #[inline]
 fn hash_func1(mut a: u32) -> u32 {
   a = a.wrapping_add(0x7ed55d16).wrapping_add(a << 12);
@@ -34,7 +36,7 @@ fn hash_func1(mut a: u32) -> u32 {
   return a;
 }
 
-// Full avalanche
+// Full avalanche.
 #[inline]
 fn hash_func2(mut a: u32) -> u32 {
   a = a.wrapping_add(0x7fb9b1ee).wrapping_add(a << 12);
@@ -46,7 +48,7 @@ fn hash_func2(mut a: u32) -> u32 {
   return a;
 }
 
-// Full avalanche
+// Full avalanche.
 #[inline]
 fn hash_func3(mut a: u32) -> u32 {
   a = a.wrapping_sub(a << 6);
@@ -59,7 +61,7 @@ fn hash_func3(mut a: u32) -> u32 {
   return a;
 }
 
-// Half avalanche
+// Half avalanche.
 #[inline]
 fn hash_func4(mut a: u32) -> u32 {
   a = a.wrapping_add(0x479ab41d).wrapping_add(a << 8);
@@ -75,7 +77,9 @@ fn valid_key(key: u32) -> bool {
   key != EMPTY && key != TOMBSTONE && key != RESERVED
 }
 
+//======================
 // Hash table operations
+//======================
 
 #[inline]
 fn init_header(buf: &mut [u8]) {
@@ -161,10 +165,10 @@ fn find_pos(buf: &[u8], key: u32) -> (usize, Option<u32>) {
     if entry == key {
       return (pos, Some(u8_u32!(&buf[pos + 4..pos + 8])));
     } else if entry == EMPTY {
-      // We found an empty entry, return either previously found tombstone or the position itself
+      // We found an empty entry, return either previously found tombstone or the position itself.
       return (tombstone.unwrap_or(pos), None);
     } else if entry == TOMBSTONE {
-      // We found a tombstone, record the position and keep moving
+      // We found a tombstone, record the position and keep moving.
       if tombstone.is_none() {
         tombstone = Some(pos);
       }
@@ -290,11 +294,13 @@ fn key_value_iter<'a>(buf: &'a [u8]) -> KeyValueIter<'a> {
   KeyValueIter { pos: 0, buf }
 }
 
+//======================
 // Page table operations
+//======================
 
 // Creates new data page.
 #[inline]
-fn create_new(buf: &mut[u8], key: u32, value: u32, mngr: &mut StorageManager) -> Res<u32> {
+fn create_new(buf: &mut[u8], key: u32, value: u32, mngr: &mut StorageManager) -> u32 {
   init_header(buf);
   set_is_data_page(buf, true);
   data_set(buf, key, value);
@@ -309,29 +315,28 @@ fn insert_data(
   key: u32,
   value: u32,
   mngr: &mut StorageManager
-) -> Res<bool> {
+) -> bool {
   assert!(is_data_page(&buf));
 
   let mut num_overflow = 0;
   loop {
     if data_set(buf, key, value) {
-      mngr.write(page_id, &buf)?;
-      return Ok(true); // the value was inserted into the current page
+      mngr.write(page_id, &buf);
+      return true; // the value was inserted into the current page
     } else if let Some(overflow_page_id) = get_overflow_page(&buf) {
       page_id = overflow_page_id;
-      mngr.read(page_id, buf)?;
-      assert!(is_data_page(&buf));
+      mngr.read(page_id, buf);
       num_overflow += 1;
     } else if num_overflow + 1 < MAX_DATA_PAGES {
-      // Create a new page, insert the value
+      // Create a new page, insert the value.
       let mut new_buf = vec![0u8; buf.len()];
-      let overflow_page_id = create_new(&mut new_buf, key, value, mngr)?;
-      // Update the current page with the overflow
+      let overflow_page_id = create_new(&mut new_buf, key, value, mngr);
+      // Update the current page with the overflow.
       set_overflow_page(buf, overflow_page_id);
-      mngr.write(page_id, &buf)?;
-      return Ok(true); // the value was inserted into the overflow page
+      mngr.write(page_id, &buf);
+      return true; // the value was inserted into the overflow page
     } else {
-      return Ok(false);
+      return false;
     }
   }
 }
@@ -344,9 +349,9 @@ fn rebalance(
   key: u32, value: u32,
   hash_func: usize,
   mngr: &mut StorageManager
-) -> Res<u32> {
+) -> u32 {
+  // Create a new meta page.
   let mut meta_buf = vec![0u8; buf.len()];
-  // Create a new meta page
   init_header(&mut meta_buf);
   set_is_data_page(&mut meta_buf, false);
   set_hash_func(&mut meta_buf, hash_func);
@@ -354,11 +359,10 @@ fn rebalance(
   let mut all_keys = Vec::new();
   all_keys.push((key, value));
 
-  let mut free_pages = Vec::with_capacity(MAX_DATA_PAGES);
-
   loop {
-    mngr.read(root, buf)?;
-    free_pages.push(root);
+    mngr.read(root, buf);
+    mngr.mark_as_free(root); // we are not going to use the page
+
     let overflow = get_overflow_page(&buf);
     // Iterate over the keys in the page
     let mut iter = key_value_iter(&buf);
@@ -368,18 +372,11 @@ fn rebalance(
 
     for &(k, v) in &all_keys {
       if let Some(next) = meta_get(&meta_buf, k) {
-        mngr.read(next, buf)?;
-        // assert!(insert_data(next, buf, k, v, mngr)?);
-        let r = insert_data(next, buf, k, v, mngr)?;
-        if !r {
-          println!("Trying to insert k: {}, v: {}, all keys: {:?}, hash: {}", k, v, all_keys, get_hash_func(&meta_buf));
-          let meta_page = mngr.write_next(&mut meta_buf)?;
-          fmt0(meta_page, buf, mngr, 0);
-          assert!(r);
-        }
+        mngr.read(next, buf);
+        assert!(insert_data(next, buf, k, v, mngr));
       } else {
         buf.fill(0);
-        let next_page = create_new(buf, k, v, mngr)?;
+        let next_page = create_new(buf, k, v, mngr);
         meta_set(&mut meta_buf, k, next_page);
       }
     }
@@ -392,13 +389,7 @@ fn rebalance(
     }
   }
 
-  let meta_page = mngr.write_next(&mut meta_buf)?;
-
-  // TODO: We don't particularly care if free calls fail, maybe we can ignore the Res.
-  for free_page in free_pages {
-    mngr.free(free_page)?;
-  }
-  Ok(meta_page)
+  mngr.write_next(&mut meta_buf)
 }
 
 // Returns the existing page id if the root has not changed, otherwise a new page id is returned.
@@ -409,38 +400,42 @@ fn insert(
   value: u32,
   depth: usize,
   mngr: &mut StorageManager
-) -> Res<u32> {
+) -> u32 {
   let hash_func = depth & HASH_FUNC_CNT_MINUS_1;
 
-  mngr.read(root, buf)?;
+  mngr.read(root, buf);
 
   if is_data_page(&buf) {
-    if insert_data(root, buf, key, value, mngr)? {
-      Ok(root)
+    if insert_data(root, buf, key, value, mngr) {
+      root
     } else {
-      let new_root = rebalance(root, buf, key, value, hash_func, mngr)?;
-      Ok(new_root)
+      rebalance(root, buf, key, value, hash_func, mngr)
     }
   } else if let Some(next) = meta_get(&buf, key) {
-    let new_next = insert(next, buf, key, value, depth + 1, mngr)?;
+    let new_next = insert(next, buf, key, value, depth + 1, mngr);
     if new_next != next {
-      mngr.read(root, buf)?;
+      mngr.read(root, buf);
       meta_set(buf, key, new_next);
-      mngr.write(root, &buf)?;
+      mngr.write(root, &buf);
     }
-    Ok(root)
+    root
   } else {
     // There is no such next page in the meta page, so we need to create one and add the key
-    // to the meta page
+    // to the meta page.
     let mut new_buf = vec![0u8; buf.len()];
-    let next_page = create_new(&mut new_buf, key, value, mngr)?;
+    let next_page = create_new(&mut new_buf, key, value, mngr);
     meta_set(buf, key, next_page);
-    mngr.write(root, &buf)?;
-    Ok(root) // root has not changed
+    mngr.write(root, &buf);
+    root // root has not changed
   }
 }
 
-fn delete_data(root: u32, buf: &mut [u8], key: u32, mngr: &mut StorageManager) -> Res<(Option<u32>, bool)> {
+fn delete_data(
+  root: u32,
+  buf: &mut [u8],
+  key: u32,
+  mngr: &mut StorageManager
+) -> (Option<u32>, bool) {
   assert!(is_data_page(&buf));
 
   let mut maybe_parent = None;
@@ -449,7 +444,7 @@ fn delete_data(root: u32, buf: &mut [u8], key: u32, mngr: &mut StorageManager) -
 
   loop {
     if data_del(buf, key) {
-      mngr.write(curr, &buf)?;
+      mngr.write(curr, &buf);
       delete_ok = true;
       break;
     }
@@ -457,64 +452,66 @@ fn delete_data(root: u32, buf: &mut [u8], key: u32, mngr: &mut StorageManager) -
     if let Some(overflow) = get_overflow_page(&buf) {
       maybe_parent = Some(curr);
       curr = overflow;
-      mngr.read(curr, buf)?;
+      mngr.read(curr, buf);
     } else {
       break;
     }
   };
 
-  // Perform rebalancing for the data page chain
+  // Perform rebalancing for the data page chain.
   if get_count(&buf) > 0 {
-    Ok((Some(root), delete_ok))
+    (Some(root), delete_ok)
   } else {
     let maybe_overflow = get_overflow_page(&buf);
     if let Some(parent) = maybe_parent {
-      mngr.read(parent, buf)?;
+      mngr.read(parent, buf);
       if let Some(overflow) = maybe_overflow {
         set_overflow_page(buf, overflow);
       } else {
         unset_overflow_page(buf);
       }
-      // TODO: Free the current page
-      mngr.write(parent, buf)?;
-      Ok((Some(root), delete_ok))
+      // Free the current page since the parent has been re-linked.
+      mngr.write(parent, buf);
+      mngr.mark_as_free(curr);
+      (Some(root), delete_ok)
     } else {
-      // Deleting the root page of the chain
+      // Delete the first page in the chain of data pages
       // TODO: Free the current page
-      Ok((maybe_overflow, delete_ok))
+      mngr.mark_as_free(curr);
+      (maybe_overflow, delete_ok)
     }
   }
 }
 
-fn delete(root: u32, buf: &mut[u8], key: u32, mngr: &mut StorageManager) -> Res<(Option<u32>, bool)> {
-  mngr.read(root, buf)?;
+fn delete(root: u32, buf: &mut[u8], key: u32, mngr: &mut StorageManager) -> (Option<u32>, bool) {
+  mngr.read(root, buf);
 
   if is_data_page(&buf) {
-    let res = delete_data(root, buf, key, mngr)?;
-    Ok(res)
+    delete_data(root, buf, key, mngr)
   } else if let Some(next) = meta_get(&buf, key) {
-    let (maybe_new_page, delete_ok) = delete(next, buf, key, mngr)?;
+    let (maybe_new_page, delete_ok) = delete(next, buf, key, mngr);
     if let Some(new_page) = maybe_new_page {
       if new_page != next {
-        mngr.read(root, buf)?;
+        mngr.read(root, buf);
         meta_set(buf, key, new_page);
-        mngr.write(root, &buf)?;
+        mngr.write(root, &buf);
       }
-      Ok((Some(root), delete_ok))
+      (Some(root), delete_ok)
     } else {
-      mngr.read(root, buf)?;
+      mngr.read(root, buf);
       meta_del(buf, key);
-      mngr.write(root, &buf)?;
+      mngr.write(root, &buf);
       if get_count(&buf) == 0 {
-        // TODO: Free the current page
-        Ok((None, delete_ok))
+        // Free the current page.
+        mngr.mark_as_free(root);
+        (None, delete_ok)
       } else {
-        Ok((Some(root), delete_ok))
+        (Some(root), delete_ok)
       }
     }
   } else {
-    // No such key
-    Ok((Some(root), false))
+    // No such key.
+    (Some(root), false)
   }
 }
 
@@ -527,8 +524,8 @@ struct Statistics {
   max_data_len: usize,
 }
 
-// Finds the max block id stored in the page table
-fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Res<Statistics> {
+// Finds the max block id stored in the page table.
+fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Statistics {
   let mut data_pages = Vec::new(); // vector to keep data pages stored in a meta page
 
   let mut stats = Statistics {
@@ -539,7 +536,7 @@ fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Re
     max_data_len: 0,
   };
 
-  mngr.read(root, buf)?;
+  mngr.read(root, buf);
 
   if is_data_page(&buf) {
     loop {
@@ -552,7 +549,7 @@ fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Re
 
       if let Some(overflow) = get_overflow_page(&buf) {
         root = overflow;
-        mngr.read(root, buf)?;
+        mngr.read(root, buf);
       } else {
         break;
       }
@@ -566,7 +563,7 @@ fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Re
     }
 
     for &page in &data_pages {
-      let tmp_stats = collect_stats(page, buf, mngr)?;
+      let tmp_stats = collect_stats(page, buf, mngr);
       stats.max_block_id = stats.max_block_id.max(tmp_stats.max_block_id);
       stats.num_data_pages += tmp_stats.num_data_pages;
       stats.num_meta_pages += tmp_stats.num_meta_pages;
@@ -576,7 +573,7 @@ fn collect_stats(mut root: u32, buf: &mut [u8], mngr: &mut StorageManager) -> Re
     stats.max_depth += 1;
   }
 
-  Ok(stats)
+  stats
 }
 
 pub struct PageTable {
@@ -598,60 +595,60 @@ impl PageTable {
     next
   }
 
-  pub fn get(&mut self, key: u32) -> Res<Option<u32>> {
+  pub fn get(&mut self, key: u32) -> Option<u32> {
     match self.root {
       Some(mut root) => {
         loop {
-          self.mngr.read(root, &mut self.buf)?;
+          self.mngr.read(root, &mut self.buf);
           if is_data_page(&self.buf) {
             let res = data_get(&self.buf, key);
             if res.is_some() {
-              return Ok(res);
+              return res;
             }
             if let Some(overflow) = get_overflow_page(&self.buf) {
               root = overflow;
             } else {
-              return Ok(None);
+              return None;
             }
           } else if let Some(next) = meta_get(&self.buf, key) {
             root = next;
           } else {
-            return Ok(None);
+            return None;
           }
         }
       },
-      None => Ok(None),
+      None => None,
     }
   }
 
-  pub fn put(&mut self, key: u32, value: u32) -> Res<()> {
+  pub fn put(&mut self, key: u32, value: u32) {
     let new_root = match self.root {
-      Some(root) => insert(root, &mut self.buf, key, value, 1, &mut self.mngr)?,
+      Some(root) => insert(root, &mut self.buf, key, value, 1, &mut self.mngr),
       None => {
         self.buf.fill(0);
-        create_new(&mut self.buf, key, value, &mut self.mngr)?
+        create_new(&mut self.buf, key, value, &mut self.mngr)
       },
     };
 
     if Some(new_root) != self.root {
       self.root = Some(new_root);
-      self.mngr.update_page_table(self.root, self.max_block_id)?;
+      self.mngr.update_page_table(self.root);
     }
-    self.mngr.sync()
+    self.mngr.sync();
   }
 
-  pub fn del(&mut self, key: u32) -> Res<bool> {
+  pub fn del(&mut self, key: u32) -> bool {
     let (new_root, delete_ok) = match self.root {
-      Some(root) => delete(root, &mut self.buf, key, &mut self.mngr)?,
+      Some(root) => delete(root, &mut self.buf, key, &mut self.mngr),
       None => (None, false),
     };
 
     if new_root != self.root {
       self.root = new_root;
-      self.mngr.update_page_table(self.root, self.max_block_id)?;
+      self.mngr.update_page_table(self.root);
     }
-    self.mngr.sync()?;
-    Ok(delete_ok)
+    self.mngr.sync();
+    delete_ok
   }
 
   pub fn mngr(&self) -> &StorageManager {
@@ -661,7 +658,7 @@ impl PageTable {
 
 // For debugging only
 fn fmt0(root: u32, buf: &mut [u8], mngr: &mut StorageManager, off: usize) {
-  mngr.read(root, buf).unwrap();
+  mngr.read(root, buf);
   if is_data_page(&buf) {
     print!("{:width$}*[{}] ({})", "", root, get_count(&buf), width = off);
     if let Some(overflow) = get_overflow_page(&buf) {
@@ -690,8 +687,8 @@ pub fn fmt(pt: &mut PageTable) {
     fmt0(root, &mut pt.buf, &mut pt.mngr, 0);
   }
   println!("Storage: {} pages, {} free pages, {} mem",
-    pt.mngr().num_pages().unwrap(),
-    pt.mngr().num_free_pages().unwrap(),
+    pt.mngr().num_pages(),
+    pt.mngr().num_free_pages(),
     pt.mngr().estimated_mem_usage()
   );
   println!();
@@ -707,13 +704,13 @@ mod tests {
 
   #[test]
   fn test_table_debug() {
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     for i in 1..501 {
       // let block = pt.next_block_id();
-      pt.put(i, i).unwrap();
+      pt.put(i, i);
     }
 
     fmt(&mut pt);
@@ -721,7 +718,7 @@ mod tests {
     for i in (1..501).rev() {
       // println!();
       // println!("Deleting key {}", i);
-      assert!(pt.del(i).unwrap());
+      assert!(pt.del(i));
       // fmt(&mut pt);
     }
 
@@ -733,14 +730,14 @@ mod tests {
   #[test]
   fn test_table_collect_stats_debug() {
     // TODO: fails with 128 byte pages
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
     // let opts = Options::new().as_disk("./test.db").with_page_size(4096).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     for _ in 0..1000 {
       let block = pt.next_block_id();
-      pt.put(block, block).unwrap();
+      pt.put(block, block);
       // if block > 20696 {
       //   let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
       //   println!("Stats: {:?}", stats);
@@ -749,7 +746,7 @@ mod tests {
 
     let now = Instant::now();
 
-    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
 
     println!("Stats: {:?}, took {} ms", stats, now.elapsed().as_millis());
     // Stats: Statistics { max_block_id: 3000000, num_data_pages: 259077, num_meta_pages: 510, max_depth: 2, max_data_len: 1 }, took 26438 ms
@@ -1064,8 +1061,8 @@ mod tests {
 
   #[test]
   fn test_table_collect_stats() {
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     let mut blocks = Vec::new();
@@ -1073,10 +1070,10 @@ mod tests {
     for _ in 0..1000 {
       let block = pt.next_block_id();
       blocks.push(block);
-      pt.put(block, block).unwrap();
+      pt.put(block, block);
     }
 
-    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
     assert_eq!(stats.max_block_id, *blocks.iter().max().unwrap());
     assert_eq!(stats.max_block_id, pt.max_block_id - 1);
     assert_eq!(stats.num_data_pages, 108);
@@ -1085,13 +1082,13 @@ mod tests {
     assert_eq!(stats.max_data_len, 6);
 
     for &block in &blocks[..500] {
-      pt.del(block).unwrap();
-      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+      pt.del(block);
+      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
       assert_eq!(stats.max_block_id, *blocks.iter().max().unwrap());
       assert_eq!(stats.max_block_id, pt.max_block_id - 1);
     }
 
-    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
     assert_eq!(stats.max_block_id, pt.max_block_id - 1);
     assert_eq!(stats.num_data_pages, 82);
     assert_eq!(stats.num_meta_pages, 4);
@@ -1099,12 +1096,12 @@ mod tests {
     assert_eq!(stats.max_data_len, 4);
 
     for &block in blocks[501..1000].iter().rev() {
-      pt.del(block).unwrap();
-      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+      pt.del(block);
+      let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
       assert_eq!(stats.max_block_id, block - 1);
     }
 
-    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
+    let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
     assert_eq!(stats.max_block_id, 501);
     assert_eq!(stats.num_data_pages, 1);
     assert_eq!(stats.num_meta_pages, 1);
@@ -1114,50 +1111,50 @@ mod tests {
 
   #[test]
   fn test_table_put_get_correctness() {
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     for i in 1..1000 {
-      pt.put(i, i).unwrap();
+      pt.put(i, i);
     }
 
     for i in 1..1000 {
-      assert_eq!(pt.get(i).unwrap(), Some(i));
+      assert_eq!(pt.get(i), Some(i));
     }
 
     for i in 1000..2000 {
-      assert_eq!(pt.get(i).unwrap(), None);
+      assert_eq!(pt.get(i), None);
     }
   }
 
   #[test]
   fn test_table_put_del_correctness() {
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     for i in 1..1000 {
-      pt.put(i, i).unwrap();
+      pt.put(i, i);
     }
 
     for i in 1000..2000 {
-      assert!(!pt.del(i).unwrap());
+      assert!(!pt.del(i));
     }
 
     for i in 1..1000 {
-      assert!(pt.del(i).unwrap());
+      assert!(pt.del(i));
     }
 
     for i in 1..2000 {
-      assert!(!pt.del(i).unwrap());
+      assert!(!pt.del(i));
     }
   }
 
   #[test]
   fn test_table_page_allocation() {
-    let opts = Options::new().as_mem(0).with_page_size(128).build().unwrap();
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     // We can only fit 12 key-value pairs in a 128 byte page
@@ -1168,33 +1165,33 @@ mod tests {
     for i in 1..12 * MAX_DATA_PAGES + 1 {
       let block = pt.next_block_id();
       blocks.push(block);
-      pt.put(block, block).unwrap();
+      pt.put(block, block);
       if i % 12 == 0 {
-        assert_eq!(pt.mngr().num_pages().unwrap(), i / 12);
-        assert_eq!(pt.mngr().num_free_pages().unwrap(), 0);
+        assert_eq!(pt.mngr().num_pages(), i / 12);
+        assert_eq!(pt.mngr().num_free_pages(), 0);
       }
     }
 
-    assert_eq!(pt.mngr().num_pages().unwrap(), MAX_DATA_PAGES);
-    assert_eq!(pt.mngr().num_free_pages().unwrap(), 0);
+    assert_eq!(pt.mngr().num_pages(), MAX_DATA_PAGES);
+    assert_eq!(pt.mngr().num_free_pages(), 0);
 
     // The next put will result in page rebalancing
     let block = pt.next_block_id();
-    pt.put(block, block).unwrap();
+    pt.put(block, block);
 
     let num_pages = 1 /* meta page */ + 13 /* root data pages */ + 1 /* overflow page */;
     let num_free_pages = 6;
-    assert_eq!(pt.mngr().num_pages().unwrap() - num_free_pages, num_pages);
-    assert_eq!(pt.mngr().num_free_pages().unwrap(), num_free_pages);
+    assert_eq!(pt.mngr().num_pages() - num_free_pages, num_pages);
+    assert_eq!(pt.mngr().num_free_pages(), num_free_pages);
 
     // When we delete pages, those pages need to be reclaimed by the storage manager
 
     for &block in blocks.iter().rev() {
-      assert!(pt.del(block).unwrap());
+      assert!(pt.del(block));
     }
 
-    assert_eq!(pt.mngr().num_pages().unwrap(), 0);
-    assert_eq!(pt.mngr().num_free_pages().unwrap(), 0);
+    assert_eq!(pt.mngr().num_pages(), 0);
+    assert_eq!(pt.mngr().num_free_pages(), 0);
   }
 
   // Fuzzing tests
@@ -1292,23 +1289,23 @@ mod tests {
       input.push(value);
     }
 
-    let opts = Options::new().as_mem(0).with_page_size(4096).build().unwrap(); // 4KB page
-    let mngr = StorageManager::new(&opts).unwrap();
+    let opts = Options::new().as_mem(0).with_page_size(4096).build(); // 4KB page
+    let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
     for &elem in &input[..] {
-      pt.put(elem, elem).unwrap();
+      pt.put(elem, elem);
     }
 
     assert!(pt.root.is_some());
 
     for &elem in &input[..] {
-      assert_eq!(pt.get(elem).unwrap(), Some(elem));
+      assert_eq!(pt.get(elem), Some(elem));
     }
 
     let mut deleted = HashSet::new();
     for &elem in &input[..] {
-      assert_eq!(pt.del(elem).unwrap(), !deleted.contains(&elem));
+      assert_eq!(pt.del(elem), !deleted.contains(&elem));
       deleted.insert(elem);
     }
 
