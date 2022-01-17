@@ -129,14 +129,12 @@ impl Drop for Descriptor {
 }
 
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
-
 // We have a fixed header size, see sync() method for more information.
 const DB_HEADER_SIZE: usize = 32;
-const MIN_PAGE_SIZE: u32 = 16;
-const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
-const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
-
-const INVALID_PAGE_ID: u32 = u32::MAX;
+pub const MIN_PAGE_SIZE: u32 = 16;
+pub const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
+pub const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
+pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
 // Calculates the absolute position of a page depending on the page size.
 // This is needed so we can account for the database header size.
@@ -408,6 +406,7 @@ impl StorageManager {
   // ==================
 
   // Returns the configured page size for the storage manager.
+  // This will never exceed 4 bytes (u32::MAX)
   pub fn page_size(&self) -> usize {
     self.page_size as usize
   }
