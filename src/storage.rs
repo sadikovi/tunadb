@@ -360,6 +360,11 @@ impl StorageManager {
     self.free_set.insert(page_id);
   }
 
+  // Returns true if the page is accessible, e.g. not freed or outside the bounds.
+  pub fn is_accessible(&self, page_id: u32) -> bool {
+    (page_id as usize) < self.num_pages() && !self.free_set.contains(&page_id)
+  }
+
   // Sync metadata + free pages.
   pub fn sync(&mut self) {
     let mut buf = [0u8; DB_HEADER_SIZE];
@@ -1130,6 +1135,33 @@ mod tests {
         assert_eq!(mngr.free_set.len(), 0);
       }
     })
+  }
+
+  #[test]
+  fn test_storage_manager_is_accessible() {
+    let mut mngr = storage_mem(32);
+    let buf = vec![1u8; mngr.page_size as usize];
+
+    // Write 10 pages in total.
+    for _ in 0..10 {
+      mngr.write_next(&buf[..]);
+    }
+
+    // Allocated pages are accessible.
+    for page_id in 0..10 {
+      assert!(mngr.is_accessible(page_id));
+    }
+
+    // Pages outside the bounds are not accessible.
+    for page_id in 10..20 {
+      assert!(!mngr.is_accessible(page_id));
+    }
+
+    // Freed pages are not accessible.
+    for page_id in 0..10 {
+      mngr.mark_as_free(page_id);
+      assert!(!mngr.is_accessible(page_id));
+    }
   }
 
   //============================
