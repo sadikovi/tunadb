@@ -14,6 +14,10 @@ const MAX_DATA_PAGES: usize = 6;
 
 const FLAG_IS_DATA_PAGE: u32 = 0x1;
 const FLAG_HAS_OVERFLOW: u32 = 0x2;
+const FLAG_META_HASH_FUNC_1: u32 = 0x4;
+const FLAG_META_HASH_FUNC_2: u32 = 0x8;
+const FLAG_META_HASH_FUNC_3: u32 = 0x10;
+const FLAG_META_HASH_FUNC_4: u32 = 0x20;
 
 const HASH_FUNC_CNT: usize = 4; // Must be a power of 2
 const HASH_FUNC_CNT_MINUS_1: usize = HASH_FUNC_CNT - 1;
@@ -82,13 +86,23 @@ fn valid_key(key: u32) -> bool {
 //======================
 
 #[inline]
-fn init_header(buf: &mut [u8]) {
+fn init_data_header(buf: &mut [u8]) {
   (&mut buf[0..4]).write(&u32_u8!(RESERVED)).unwrap();
   (&mut buf[4..8]).write(&u32_u8!(FLAG_IS_DATA_PAGE)).unwrap(); // flags
   (&mut buf[8..12]).write(&u32_u8!(RESERVED)).unwrap();
   (&mut buf[12..16]).write(&u32_u8!(0u32)).unwrap(); // count
   (&mut buf[16..20]).write(&u32_u8!(RESERVED)).unwrap();
-  (&mut buf[20..24]).write(&u32_u8!(0u32)).unwrap(); // (data) overflow page | (meta) hash func
+  (&mut buf[20..24]).write(&u32_u8!(0u32)).unwrap(); // (data) overflow page | (meta) page length
+}
+
+#[inline]
+fn init_meta_header(buf: &mut [u8]) {
+  (&mut buf[0..4]).write(&u32_u8!(RESERVED)).unwrap();
+  (&mut buf[4..8]).write(&u32_u8!(FLAG_IS_DATA_PAGE)).unwrap(); // flags
+  (&mut buf[8..12]).write(&u32_u8!(RESERVED)).unwrap();
+  (&mut buf[12..16]).write(&u32_u8!(0u32)).unwrap(); // count
+  (&mut buf[16..20]).write(&u32_u8!(RESERVED)).unwrap();
+  (&mut buf[20..24]).write(&u32_u8!(0u32)).unwrap(); // (data) overflow page | (meta) page length
 }
 
 #[inline]
@@ -99,6 +113,36 @@ fn is_data_page(buf: &[u8]) -> bool {
 #[inline]
 fn set_is_data_page(buf: &mut [u8], value: bool) {
   let flags = (u8_u32!(&buf[4..8]) & !FLAG_IS_DATA_PAGE) | value as u32;
+  (&mut buf[4..8]).write(&u32_u8!(flags)).unwrap();
+}
+
+#[inline]
+fn get_hash_func(buf: &[u8]) -> usize {
+  let flags = u8_u32!(&buf[4..8]);
+  if flags & FLAG_META_HASH_FUNC_1 != 0 {
+    0
+  } else if flags & FLAG_META_HASH_FUNC_2 != 0 {
+    1
+  } else if flags & FLAG_META_HASH_FUNC_3 != 0 {
+    2
+  } else if flags & FLAG_META_HASH_FUNC_4 != 0 {
+    3
+  } else {
+    panic!("Could not find hash function");
+  }
+}
+
+#[inline]
+fn set_hash_func(buf: &mut [u8], hash_func: usize) {
+  let mut flags = u8_u32!(&buf[4..8]);
+  flags &= !(FLAG_META_HASH_FUNC_1 | FLAG_META_HASH_FUNC_2 | FLAG_META_HASH_FUNC_3 | FLAG_META_HASH_FUNC_4);
+  match hash_func {
+    0 => flags |= FLAG_META_HASH_FUNC_1,
+    1 => flags |= FLAG_META_HASH_FUNC_2,
+    2 => flags |= FLAG_META_HASH_FUNC_3,
+    3 => flags |= FLAG_META_HASH_FUNC_4,
+    _ => panic!("Invalid hash function {}", hash_func),
+  }
   (&mut buf[4..8]).write(&u32_u8!(flags)).unwrap();
 }
 
@@ -135,13 +179,13 @@ fn unset_overflow_page(buf: &mut [u8]) {
 }
 
 #[inline]
-fn get_hash_func(buf: &[u8]) -> usize {
+fn get_meta_page_len(buf: &[u8]) -> usize {
   u8_u32!(&buf[20..24]) as usize
 }
 
 #[inline]
-fn set_hash_func(buf: &mut [u8], hash_func: usize) {
-  (&mut buf[20..24]).write(&u32_u8!(hash_func as u32)).unwrap();
+fn set_meta_page_len(buf: &mut [u8], len: usize) {
+  (&mut buf[20..24]).write(&u32_u8!(len as u32)).unwrap();
 }
 
 // Finds position where the key is or the next empty slot in the table.
@@ -216,12 +260,13 @@ fn data_del(buf: &mut [u8], key: u32) -> bool {
 
 #[inline]
 fn meta_find_pos(buf: &[u8], key: u32, hash_func: usize) -> (usize, Option<u32>) {
-  assert!((buf.len() - 1) & buf.len() == 0, "Table length is not power of 2");
-  assert!(buf.len() >= 8, "Table length needs to be at least 8 bytes");
+  let len = get_meta_page_len(buf);
+  assert!((len - 1) & len == 0, "Table length is not power of 2");
+  assert!(len >= 8, "Table length needs to be at least 8 bytes");
   assert!(valid_key(key), "Unsupported key: {}", key);
 
-  let len_minus_1 = buf.len() - 1;
-  let size_minus_1 = (buf.len() >> 3) - 1; // len / 8 - 1
+  let len_minus_1 = len - 1;
+  let size_minus_1 = (len >> 3) - 1; // len / 8 - 1
 
   let hash = HASH_FUNC[hash_func](key);
   let mut pos = (hash as usize & size_minus_1) << 3;
@@ -269,8 +314,9 @@ fn meta_del(buf: &mut [u8], key: u32) -> bool {
 }
 
 struct KeyValueIter<'a> {
-  pos: usize,
   buf: &'a [u8],
+  pos: usize,
+  len: usize,
 }
 
 impl<'a> Iterator for KeyValueIter<'a> {
@@ -291,7 +337,8 @@ impl<'a> Iterator for KeyValueIter<'a> {
 
 #[inline]
 fn key_value_iter<'a>(buf: &'a [u8]) -> KeyValueIter<'a> {
-  KeyValueIter { pos: 0, buf }
+  let page_len = if is_data_page(buf) { buf.len() } else { get_meta_page_len(buf) };
+  KeyValueIter { buf, pos: 0, len: page_len }
 }
 
 //======================
@@ -346,7 +393,8 @@ fn insert_data(
 fn rebalance(
   mut root: u32,
   buf: &mut[u8],
-  key: u32, value: u32,
+  key: u32,
+  value: u32,
   hash_func: usize,
   mngr: &mut StorageManager
 ) -> u32 {
@@ -355,6 +403,7 @@ fn rebalance(
   init_header(&mut meta_buf);
   set_is_data_page(&mut meta_buf, false);
   set_hash_func(&mut meta_buf, hash_func);
+  set_meta_page_len(&mut meta_buf, buf.len());
 
   let mut all_keys = Vec::new();
   all_keys.push((key, value));
@@ -702,12 +751,13 @@ mod tests {
   use crate::storage::Options;
   use std::time::Instant;
 
-  #[test]
+  // #[test]
   fn test_table_debug() {
     let opts = Options::new().as_mem(0).with_page_size(128).build();
     let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
+    // 500 values: Storage: 56 pages, 0 free pages, 7200 mem
     for i in 1..501 {
       // let block = pt.next_block_id();
       pt.put(i, i);
@@ -715,39 +765,40 @@ mod tests {
 
     fmt(&mut pt);
 
-    for i in (1..501).rev() {
-      // println!();
-      // println!("Deleting key {}", i);
-      assert!(pt.del(i));
-      // fmt(&mut pt);
-    }
-
-    fmt(&mut pt);
+    // for i in (1..400).rev() {
+    //   // println!();
+    //   // println!("Deleting key {}", i);
+    //   assert!(pt.del(i));
+    //   // fmt(&mut pt);
+    // }
+    //
+    // fmt(&mut pt);
 
     assert!(false);
   }
 
-  #[test]
+  // #[test]
   fn test_table_collect_stats_debug() {
     // TODO: fails with 128 byte pages
-    let opts = Options::new().as_mem(0).with_page_size(128).build();
-    // let opts = Options::new().as_disk("./test.db").with_page_size(4096).build().unwrap();
+    // let opts = Options::new().as_mem(0).with_page_size(128).build();
+    let opts = Options::new().as_disk("./test.db").with_page_size(4096).build();
     let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
-    for _ in 0..1000 {
+    let now = Instant::now();
+
+    for _ in 0..50000 {
       let block = pt.next_block_id();
       pt.put(block, block);
-      // if block > 20696 {
-      //   let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr).unwrap();
-      //   println!("Stats: {:?}", stats);
-      // }
     }
+
+    println!("Insertion took {} ms", now.elapsed().as_millis());
 
     let now = Instant::now();
 
     let stats = collect_stats(pt.root.unwrap(), &mut pt.buf, &mut pt.mngr);
 
+    fmt(&mut pt);
     println!("Stats: {:?}, took {} ms", stats, now.elapsed().as_millis());
     // Stats: Statistics { max_block_id: 3000000, num_data_pages: 259077, num_meta_pages: 510, max_depth: 2, max_data_len: 1 }, took 26438 ms
 
@@ -955,7 +1006,9 @@ mod tests {
     assert_eq!(res.len(), get_count(&buf) as usize);
   }
 
+  //================
   // Meta page tests
+  //================
 
   #[test]
   #[should_panic(expected = "Table length is not power of 2")]
@@ -993,16 +1046,31 @@ mod tests {
   }
 
   #[test]
-  fn test_table_meta_page_set_hash_func() {
+  fn test_table_meta_page_set_get_hash_func() {
     let mut buf = vec![0u8; 128];
     init_header(&mut buf);
-    assert_eq!(get_hash_func(&buf), 0);
+    set_is_data_page(&mut buf, false);
 
-    set_hash_func(&mut buf, 1);
-    assert_eq!(get_hash_func(&buf), 1);
+    for i in 0..HASH_FUNC_CNT {
+      set_hash_func(&mut buf, i);
+      assert_eq!(get_hash_func(&buf), i);
+    }
+  }
 
+  #[test]
+  #[should_panic(expected = "Invalid hash function 4")]
+  fn test_table_meta_page_set_hash_func_invalid() {
+    let mut buf = vec![0u8; 128];
+    init_header(&mut buf);
     set_hash_func(&mut buf, 4);
-    assert_eq!(get_hash_func(&buf), 4);
+  }
+
+  #[test]
+  #[should_panic(expected = "Could not find hash function")]
+  fn test_table_meta_page_get_hash_func_invalid() {
+    let mut buf = vec![0x21u8; 128];
+    init_header(&mut buf);
+    get_hash_func(&buf);
   }
 
   #[test]
@@ -1157,8 +1225,8 @@ mod tests {
     let mngr = StorageManager::new(&opts);
     let mut pt = PageTable::new(mngr);
 
-    // We can only fit 12 key-value pairs in a 128 byte page
-    // Our chain is MAX_DATA_PAGES long
+    // We can only fit 12 key-value pairs in a 128 byte page.
+    // Our chain is MAX_DATA_PAGES long.
 
     let mut blocks = Vec::new();
 
@@ -1175,26 +1243,40 @@ mod tests {
     assert_eq!(pt.mngr().num_pages(), MAX_DATA_PAGES);
     assert_eq!(pt.mngr().num_free_pages(), 0);
 
-    // The next put will result in page rebalancing
+    // The next put will result in page rebalancing.
     let block = pt.next_block_id();
+    blocks.push(block);
     pt.put(block, block);
 
     let num_pages = 1 /* meta page */ + 13 /* root data pages */ + 1 /* overflow page */;
     let num_free_pages = 6;
-    assert_eq!(pt.mngr().num_pages() - num_free_pages, num_pages);
+    assert_eq!(pt.mngr().num_pages(), num_pages + num_free_pages);
     assert_eq!(pt.mngr().num_free_pages(), num_free_pages);
 
-    // When we delete pages, those pages need to be reclaimed by the storage manager
+    // When we delete pages, those pages need to be reclaimed by the storage manager.
 
-    for &block in blocks.iter().rev() {
+    // Initially, delete all but the last page. This should result in 1 meta page and 1 data page
+    // that contains the last block id.
+    for &block in blocks[..blocks.len() - 1].iter().rev() {
       assert!(pt.del(block));
     }
 
+    assert_eq!(pt.mngr().num_pages(), num_pages + num_free_pages);
+    assert_eq!(
+      pt.mngr().num_free_pages(),
+      num_pages + num_free_pages - 1 /* meta page */ - 1 /* data page */
+    );
+    assert_eq!(pt.get(blocks[blocks.len() - 1]), Some(block));
+
+    // Finally, delete the remaining block, storage manager should reclaim all of the pages.
+    assert!(pt.del(block));
     assert_eq!(pt.mngr().num_pages(), 0);
     assert_eq!(pt.mngr().num_free_pages(), 0);
   }
 
+  //==============
   // Fuzzing tests
+  //==============
 
   #[test]
   fn test_table_fuzz_data_page_set_get_data_del() {

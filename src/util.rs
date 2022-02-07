@@ -33,6 +33,24 @@ macro_rules! u64_u8 {
   }};
 }
 
+macro_rules! write_u32 {
+  ($slice:expr, $num:expr) => {{
+    res!(($slice).write(&u32_u8!($num)));
+  }}
+}
+
+macro_rules! write_u64 {
+  ($slice:expr, $num:expr) => {{
+    res!(($slice).write(&u64_u8!($num)));
+  }}
+}
+
+macro_rules! write_bytes {
+  ($slice:expr, $data:expr) => {{
+    res!(($slice).write($data));
+  }}
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LruCacheEntry<T: Copy + Debug + PartialEq> {
   prev: Option<T>,

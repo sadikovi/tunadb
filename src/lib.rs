@@ -7,4 +7,6 @@ pub mod util;
 pub mod error;
 pub mod btree;
 pub mod storage;
-pub mod table;
+// pub mod table;
+// pub mod pagedir;
+pub mod page;
