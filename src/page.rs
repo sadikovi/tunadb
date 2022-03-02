@@ -19,9 +19,9 @@ const FLAG_INTERNAL_PAGE: u32 = 0x4;
 // Page structure
 //===============
 // leaf page
-// + header (16 bytes):
+// + header (32 bytes):
 //   |-- flags (4 bytes)
-//   |-- num keys (4 bytes)
+//   |-- num slots (4 bytes)
 //   |-- overflow page (4 bytes)
 //   |-- reserved (4 bytes)
 // + body (remaining bytes)
@@ -55,8 +55,12 @@ const FLAG_INTERNAL_PAGE: u32 = 0x4;
 // Since internal page takes less space for values, it can hold as many keys as a leaf page.
 #[inline]
 pub fn max_keys(page_size: usize) -> usize {
-  (page_size - PAGE_HEADER_SIZE) / (2 /* key + value */ * (4 /* varlen size */ + VARLEN_SIZE))
+  (page_size - PAGE_HEADER_SIZE) / (2 /* key + value */ * VARLEN_SIZE)
 }
+
+//============
+// Page header
+//============
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PageType {
@@ -65,6 +69,7 @@ pub enum PageType {
   Overflow,
 }
 
+// Returns page type.
 #[inline]
 pub fn page_type(page: &[u8]) -> PageType {
   let flags = u8_u32!(&page[0..4]);
@@ -77,18 +82,51 @@ pub fn page_type(page: &[u8]) -> PageType {
   }
 }
 
-// Returns number of slots in the overflow page.
+// Returns number of slots in the page.
 #[inline]
 pub fn num_slots(page: &[u8]) -> usize {
-  assert_eq!(page_type(page), PageType::Overflow);
   u8_u32!(&page[4..8]) as usize
 }
 
-// Sets number of slots in the overflow page.
+// Sets number of slots in the page.
 #[inline]
 pub fn set_num_slots(page: &mut [u8], num_slots: usize) {
-  assert_eq!(page_type(page), PageType::Overflow);
   write_u32!(&mut page[4..8], num_slots as u32);
+}
+
+// Returns the overflow page stored in the header.
+#[inline]
+pub fn overflow_page(page: &[u8]) -> u32 {
+  u8_u32!(&page[8..12])
+}
+
+// Sets overflow page in the header.
+#[inline]
+pub fn set_overflow_page(page: &mut [u8], page_id: u32) {
+  write_u32!(&mut page[8..12], page_id);
+}
+
+// Returns used space for the overflow page.
+#[inline]
+pub fn used_space(page: &[u8]) -> usize {
+  assert_eq!(page_type(page), PageType::Overflow);
+  u8_u32!(&page[12..16]) as usize
+}
+
+// Sets used space for the overflow page.
+#[inline]
+pub fn set_used_space(page: &mut [u8], value: usize) {
+  assert_eq!(page_type(page), PageType::Overflow);
+  write_u32!(&mut page[12..16], value as u32);
+}
+
+// Free space in bytes in the overflow page.
+#[inline]
+pub fn free_space(page: &[u8]) -> usize {
+  assert_eq!(page_type(page), PageType::Overflow);
+  let num_slots = num_slots(page);
+  let used_space = used_space(page);
+  page.len() - PAGE_HEADER_SIZE - num_slots * OVERFLOW_SLOT_SIZE - used_space
 }
 
 // Returns the next largest slot id for insertion into overflow page.
@@ -103,6 +141,7 @@ pub fn next_slot_id(page: &[u8]) -> u32 {
   next_slot_id + 1
 }
 
+// Overflow slot information
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Slot {
   pos: usize, // index within slot array
@@ -142,47 +181,32 @@ fn slot_info(page: &[u8], slot_id: u32) -> Slot {
 }
 
 #[inline]
-pub fn get_overflow_page(page: &[u8]) -> u32 {
-  u8_u32!(&page[8..12])
-}
-
-#[inline]
-pub fn set_overflow_page(page: &mut [u8], page_id: u32) {
-  write_u32!(&mut page[8..12], page_id);
-}
-
-#[inline]
 pub fn init_overflow_page(page: &mut[u8]) {
   let tmp = &mut page[0..PAGE_HEADER_SIZE];
   write_u32!(&mut tmp[0..4], FLAG_OVERFLOW_PAGE);
-  write_u32!(&mut tmp[4..8], 0u32 /* number of slots */);
-  write_u32!(&mut tmp[8..12], INVALID_PAGE_ID /* overflow page */);
-  write_u32!(&mut tmp[12..16], 0u32 /* used space */);
+  set_num_slots(tmp, 0);
+  set_overflow_page(tmp, INVALID_PAGE_ID);
+  set_used_space(tmp, 0);
 }
 
 #[inline]
-pub fn used_space(page: &[u8]) -> usize {
-  u8_u32!(&page[12..16]) as usize
+pub fn init_leaf_page(page: &mut [u8]) {
+  let tmp = &mut page[0..PAGE_HEADER_SIZE];
+  write_u32!(&mut tmp[0..4], FLAG_LEAF_PAGE);
+  set_num_slots(tmp, 0); // number of keys
+  set_overflow_page(tmp, INVALID_PAGE_ID);
+  // The last 4 bytes are reserved for leaf page
+  write_u32!(&mut tmp[12..16], 0u32);
 }
 
-#[inline]
-pub fn set_used_space(page: &mut [u8], value: usize) {
-  write_u32!(&mut page[12..16], value as u32);
-}
-
-// Free space in bytes in the overflow page.
-#[inline]
-pub fn free_space(page: &[u8]) -> usize {
-  assert_eq!(page_type(page), PageType::Overflow);
-  let num_slots = num_slots(page);
-  let used_space = used_space(page);
-  page.len() - PAGE_HEADER_SIZE - num_slots * OVERFLOW_SLOT_SIZE - used_space
-}
+//==================
+// Varlen management
+//==================
 
 // Writes data into varlen buffer.
 // If data does not fit, overflow pages are created.
 // Updates the input overflow page if that has changed, e.g. new page was created.
-pub fn set_varlen(buf: &mut [u8], data: &[u8], overflow_page: &mut u32, mngr: &mut StorageManager) {
+fn set_varlen(buf: &mut [u8], data: &[u8], overflow_page: &mut u32, mngr: &mut StorageManager) {
   assert_eq!(buf.len(), VARLEN_SIZE, "Invalid varlen length: {}", buf.len());
   let len = data.len();
   if len <= VARLEN_MAX_LEN {
@@ -262,7 +286,7 @@ fn set_varlen_overflow(mut page_id: u32, data: &[u8], mngr: &mut StorageManager)
   } else if free_len > OVERFLOW_SLOT_SIZE {
     // Data fits partially.
     let actual_len = (free_len - OVERFLOW_SLOT_SIZE).min(len);
-    let next_page_id = get_overflow_page(&page);
+    let next_page_id = overflow_page(&page);
     let (res_page, res_slot) = set_varlen_overflow(next_page_id, &data[actual_len..], mngr);
 
     // Write as much data as we can.
@@ -294,7 +318,7 @@ fn set_varlen_overflow(mut page_id: u32, data: &[u8], mngr: &mut StorageManager)
   } else {
     assert_ne!(page_id, INVALID_PAGE_ID, "Allocated page does not have enough space");
     // Data does not fit, move to the next page.
-    let next_page_id = get_overflow_page(&page);
+    let next_page_id = overflow_page(&page);
     let (res_page, res_slot) = set_varlen_overflow(next_page_id, data, mngr);
     if next_page_id == INVALID_PAGE_ID {
       set_overflow_page(&mut page, res_page);
@@ -304,7 +328,8 @@ fn set_varlen_overflow(mut page_id: u32, data: &[u8], mngr: &mut StorageManager)
   }
 }
 
-pub fn del_varlen(buf: &[u8], overflow_page: u32, mngr: &mut StorageManager) {
+// Deletes varlen and overflow data.
+fn del_varlen(buf: &[u8], overflow_page: u32, mngr: &mut StorageManager) {
   assert_eq!(buf.len(), VARLEN_SIZE, "Invalid varlen length: {}", buf.len());
   let len = u8_u32!(&buf[0..4]) as usize;
 
@@ -317,6 +342,7 @@ pub fn del_varlen(buf: &[u8], overflow_page: u32, mngr: &mut StorageManager) {
   }
 }
 
+// Helper method to recursively delete the remaining overflow data.
 fn del_overflow(mut page_id: u32, tpage_id: u32, tslot_id: u32, mngr: &mut StorageManager) -> u32 {
   if page_id == INVALID_PAGE_ID {
     return INVALID_PAGE_ID;
@@ -331,7 +357,7 @@ fn del_overflow(mut page_id: u32, tpage_id: u32, tslot_id: u32, mngr: &mut Stora
     if page_id == tpage_id {
       break;
     }
-    page_id = get_overflow_page(&page);
+    page_id = overflow_page(&page);
   }
 
   // Find the slot to delete.
@@ -360,7 +386,7 @@ fn del_overflow(mut page_id: u32, tpage_id: u32, tslot_id: u32, mngr: &mut Stora
   set_num_slots(&mut page, num_slots - 1);
   set_used_space(&mut page, page_size - free_ptr - slot.len);
 
-  let mut next_overflow_page = get_overflow_page(&page);
+  let mut next_overflow_page = overflow_page(&page);
 
   if slot.is_overflow {
     assert_ne!(next_overflow_page, INVALID_PAGE_ID, "Invalid overflow page for slot {}", slot.id);
@@ -378,8 +404,9 @@ fn del_overflow(mut page_id: u32, tpage_id: u32, tslot_id: u32, mngr: &mut Stora
   }
 }
 
-// Returns prefix and is_overflow flag
-pub fn get_varlen_prefix(buf: &[u8]) -> (&[u8], bool) {
+// Returns prefix and is_overflow flag.
+// If `is_overflow` is true, then there is more data available in the overflow page.
+fn get_varlen_prefix(buf: &[u8]) -> (&[u8], bool) {
   assert_eq!(buf.len(), VARLEN_SIZE, "Invalid varlen length: {}", buf.len());
   let len = u8_u32!(&buf[0..4]) as usize;
   if len <= VARLEN_MAX_LEN {
@@ -390,7 +417,7 @@ pub fn get_varlen_prefix(buf: &[u8]) -> (&[u8], bool) {
 }
 
 // Returns full varlen data as a vector.
-pub fn get_varlen(buf: &[u8], mngr: &mut StorageManager) -> Vec<u8> {
+fn get_varlen(buf: &[u8], mngr: &mut StorageManager) -> Vec<u8> {
   assert_eq!(buf.len(), VARLEN_SIZE, "Invalid varlen length: {}", buf.len());
   let len = u8_u32!(&buf[0..4]) as usize;
   let mut data = Vec::with_capacity(len);
@@ -414,6 +441,60 @@ pub fn get_varlen(buf: &[u8], mngr: &mut StorageManager) -> Vec<u8> {
   data
 }
 
+//==========
+// Leaf page
+//==========
+
+// Private method to return slot (key + value) for the position `pos` in the leaf page.
+fn get_slot(page: &[u8], pos: usize) -> &[u8] {
+  assert_eq!(page_type(page), PageType::Leaf);
+  let num_slots = num_slots(page);
+  assert!(pos < num_slots, "Index {} is out of bounds for {} slots", pos, num_slots);
+  let off = pos * (2 /* key + value */ * VARLEN_SIZE); // offset into page buffer
+  &page[PAGE_HEADER_SIZE + off..PAGE_HEADER_SIZE + off + 2 * VARLEN_SIZE]
+}
+
+// Returns key prefix and `is_overflow` flag for position `pos`.
+pub fn get_key_prefix(page: &[u8], pos: usize) -> (&[u8], bool) {
+  let slot = get_slot(page, pos);
+  get_varlen_prefix(&slot[..VARLEN_SIZE])
+}
+
+// Returns full key stored at position `pos`.
+pub fn get_key(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
+  let slot = get_slot(page, pos);
+  get_varlen(&slot[..VARLEN_SIZE], mngr)
+}
+
+// Returns full value stored at position `pos`.
+pub fn get_val(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
+  let slot = get_slot(page, pos);
+  get_varlen(&slot[VARLEN_SIZE..], mngr)
+}
+
+fn set_slot(page: &mut [u8], pos: usize) -> &mut [u8] {
+  let num_slots = num_slots(page);
+  assert!(pos < num_slots, "Index {} is out of bounds for {} slots", pos, num_slots);
+  let off = pos * (2 /* key + value */ * VARLEN_SIZE); // offset into page buffer
+  &mut page[PAGE_HEADER_SIZE + off..PAGE_HEADER_SIZE + off + 2 * VARLEN_SIZE]
+}
+
+// Sets the key for the position.
+pub fn set_key(page: &mut [u8], pos: usize, data: &[u8], mngr: &mut StorageManager) {
+  let mut overflow_page = overflow_page(page);
+  let buf = set_slot(page, pos);
+  set_varlen(&mut buf[..VARLEN_SIZE], data, &mut overflow_page, mngr);
+  set_overflow_page(page, overflow_page);
+}
+
+// Sets the value for the position.
+pub fn set_val(page: &mut [u8], pos: usize, data: &[u8], mngr: &mut StorageManager) {
+  let mut overflow_page = overflow_page(page);
+  let buf = set_slot(page, pos);
+  set_varlen(&mut buf[VARLEN_SIZE..], data, &mut overflow_page, mngr);
+  set_overflow_page(page, overflow_page);
+}
+
 // Print debug information of the page.
 pub fn debug_page(page_id: u32, page: &[u8]) {
   let mut output = String::new();
@@ -426,7 +507,7 @@ pub fn debug_page(page_id: u32, page: &[u8]) {
     PageType::Overflow => {
       let num_slots = num_slots(page);
       res!(writeln!(&mut output, "  num slots: {}", num_slots));
-      let overflow_page = get_overflow_page(page);
+      let overflow_page = overflow_page(page);
       if overflow_page == INVALID_PAGE_ID {
         res!(writeln!(&mut output, "  overflow page: N/A"));
       } else {
@@ -514,5 +595,12 @@ mod tests {
     }
 
     assert!(false, "OK");
+  }
+
+  #[test]
+  fn test_page_max_keys() {
+    assert_eq!(max_keys(128), 3);
+    assert_eq!(max_keys(4 * 1024), 127);
+    assert_eq!(max_keys(8 * 1024), 255);
   }
 }
