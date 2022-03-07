@@ -5,7 +5,7 @@
 pub mod util;
 #[macro_use]
 pub mod error;
-pub mod btree;
+// pub mod btree;
 pub mod storage;
 // pub mod table;
 // pub mod pagedir;
