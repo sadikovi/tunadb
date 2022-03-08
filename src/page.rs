@@ -142,9 +142,10 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
   let prefix_len = key.len().min(PAGE_MAX_PREFIX_SIZE);
   let overflow_len = 4 /* prefix len */ + prefix_len + 4 /* key len */ + 4 /* val len */ + 4 /* overflow page */;
 
-  let mut ptr = free_ptr(page) - cell_len;
+  let ptr;
   let mut key_flags = 0;
   if 4 /* slot len */ + cell_len <= max_cell_len {
+    ptr = free_ptr(page) - cell_len;
     let mut off = ptr;
     write_u32!(&mut page[off..off + 4], key.len() as u32);
     off += 4;
@@ -237,6 +238,78 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
 }
 
 #[inline]
+pub fn leaf_get_prefix(page: &[u8], pos: usize) -> &[u8] {
+  let num_slots = num_slots(page);
+  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
+
+  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
+  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
+  let off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
+  let len = u8_u32!(&page[off..off + 4]) as usize; // either prefix or key
+  &page[off + 4..off + 4 + len]
+}
+
+#[inline]
+pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
+  let num_slots = num_slots(page);
+  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
+
+  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
+  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
+  let off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
+  let len = u8_u32!(&page[off..off + 4]) as usize;
+
+  if ptr & FLAG_IS_KEY_OVERFLOW == 0 {
+    // There is no overflow.
+    (&page[off + 4..off + 4 + len]).to_vec()
+  } else {
+    // We need to figure out if the key fits within the page.
+    let key_len = u8_u32!(&page[off + 4 + len..off + 4 + len + 4]) as usize;
+    if len == key_len {
+      // The key is the same as prefix and fits within the page, return as is.
+      (&page[off + 4..off + 4 + len]).to_vec()
+    } else {
+      let mut key = vec![0u8; key_len];
+      let overflow_page = u8_u32!(&page[off + 4 + len + 8..off + 4 + len + 8 + 4]);
+      overflow_read(mngr, overflow_page, 0, &mut key);
+      key
+    }
+  }
+}
+
+#[inline]
+pub fn leaf_get_value(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
+  let num_slots = num_slots(page);
+  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
+
+  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
+  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
+  let mut off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
+  let len = u8_u32!(&page[off..off + 4]) as usize;
+
+  if ptr & FLAG_IS_KEY_OVERFLOW == 0 {
+    // There is no overflow.
+    off += 4;
+    off += len;
+    let val_len = u8_u32!(&page[off..off + 4]) as usize;
+    off += 4;
+    (&page[off..off + val_len]).to_vec()
+  } else {
+    // We need to figure out if the key fits within the page.
+    off += 4;
+    off += len;
+    let key_len = u8_u32!(&page[off..off + 4]) as usize;
+    off += 4;
+    let val_len = u8_u32!(&page[off..off + 4]) as usize;
+    off += 4;
+    let overflow_page = u8_u32!(&page[off..off + 4]);
+    let mut val = vec![0u8; val_len];
+    overflow_read(mngr, overflow_page, key_len, &mut val);
+    val
+  }
+}
+
+#[inline]
 fn overflow_init(page: &mut [u8]) {
   set_flags(page, FLAG_IS_OVERFLOW);
   set_num_slots(page, 0); // it is always 0 for overflow
@@ -295,7 +368,7 @@ fn overflow_write(mngr: &mut StorageManager, key: &[u8], val: &[u8]) -> u32 {
 }
 
 #[inline]
-fn overflow_read(mngr: &mut StorageManager, mut page_id: u32, buf: &mut [u8]) {
+fn overflow_read(mngr: &mut StorageManager, mut page_id: u32, mut start: usize, buf: &mut [u8]) {
   let mut page = vec![0u8; mngr.page_size()];
   let mut off = 0;
   let len = buf.len();
@@ -303,9 +376,16 @@ fn overflow_read(mngr: &mut StorageManager, mut page_id: u32, buf: &mut [u8]) {
   while off < len && page_id != INVALID_PAGE_ID {
     mngr.read(page_id, &mut page);
     assert_eq!(page_type(&page), PageType::Overflow, "Invalid page type for overflow data");
-    let read_len = free_ptr(&page).min(len - off);
-    write_bytes!(&mut buf[off..off + read_len], &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + read_len]);
-    off += read_len;
+    let ptr = free_ptr(&page);
+    if ptr > start {
+      let page_off = PAGE_HEADER_SIZE + start;
+      let read_len = (ptr - start).min(len - off);
+      write_bytes!(&mut buf[off..off + read_len], &page[page_off..page_off + read_len]);
+      off += read_len;
+      start = 0;
+    } else {
+      start -= ptr;
+    }
     page_id = next_page(&page);
   }
   assert!(off == len, "Could not read requested data: off {}, len {}", off, len);
@@ -393,15 +473,12 @@ pub fn debug(page: &[u8]) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::storage::Options;
 
   #[test]
   fn test_page_overflow_write_read() {
-    let page_size = 128;
-    let opts = Options::new().as_mem(0).with_page_size(page_size).build();
-    let mut mngr = StorageManager::new(&opts);
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
 
-    let max_size = (page_size * 10) as usize;
+    let max_size = mngr.page_size() * 10;
     for i in 0..max_size {
       let key = vec![6u8; i];
       let val = vec![7u8; max_size - i];
@@ -409,7 +486,7 @@ mod tests {
       let page_id = overflow_write(&mut mngr, &key, &val);
 
       let mut expected = vec![0u8; key.len() + val.len()];
-      overflow_read(&mut mngr, page_id, &mut expected);
+      overflow_read(&mut mngr, page_id, 0, &mut expected);
 
       assert_eq!(&expected[..key.len()], &key);
       assert_eq!(&expected[key.len()..key.len() + val.len()], &val);
@@ -417,12 +494,10 @@ mod tests {
   }
 
   #[test]
-  fn test_page_leaf_insert() {
-    let page_size = 128;
-    let opts = Options::new().as_mem(0).with_page_size(page_size).build();
-    let mut mngr = StorageManager::new(&opts);
+  fn test_page_leaf_insert_delete() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
 
-    let mut page = vec![0u8; page_size as usize];
+    let mut page = vec![0u8; mngr.page_size()];
     leaf_init(&mut page);
 
     for i in 0..3 {
@@ -434,19 +509,43 @@ mod tests {
     }
     leaf_insert(&mut page, 3, &[9, 9], &[9, 9, 9], &mut mngr);
 
+    assert_eq!(num_slots(&page), 4);
+    assert_eq!(free_ptr(&page), 46);
+
     for _ in 0..4 {
       leaf_delete(&mut page, 0, &mut mngr);
     }
 
+    assert_eq!(num_slots(&page), 0);
+    assert_eq!(free_ptr(&page), mngr.page_size());
+
     mngr.write_next(&page);
+  }
 
-    for page_id in 0..mngr.num_pages() as u32 {
-      if mngr.is_accessible(page_id) {
-        mngr.read(page_id, &mut page);
-        debug(&page);
-      }
-    }
+  #[test]
+  fn test_page_leaf_insert_get_overflow() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(4096).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
 
-    assert!(false, "OK");
+    leaf_insert(&mut page, 0, &[1, 1, 1], &[10, 10, 10], &mut mngr);
+    leaf_insert(&mut page, 1, &vec![2; 100], &vec![20; 10000], &mut mngr);
+    leaf_insert(&mut page, 2, &[3], &vec![30; 10], &mut mngr);
+    leaf_insert(&mut page, 3, &vec![4; 10000], &vec![40], &mut mngr);
+
+    assert_eq!(leaf_get_prefix(&page, 0), &[1, 1, 1]);
+    assert_eq!(leaf_get_prefix(&page, 1), &vec![2; PAGE_MAX_PREFIX_SIZE]);
+    assert_eq!(leaf_get_prefix(&page, 2), &[3]);
+    assert_eq!(leaf_get_prefix(&page, 3), &vec![4; PAGE_MAX_PREFIX_SIZE]);
+
+    assert_eq!(leaf_get_key(&page, 0, &mut mngr), vec![1, 1, 1]);
+    assert_eq!(leaf_get_key(&page, 1, &mut mngr), vec![2; 100]);
+    assert_eq!(leaf_get_key(&page, 2, &mut mngr), vec![3; 1]);
+    assert_eq!(leaf_get_key(&page, 3, &mut mngr), vec![4; 10000]);
+
+    assert_eq!(leaf_get_value(&page, 0, &mut mngr), vec![10, 10, 10]);
+    assert_eq!(leaf_get_value(&page, 1, &mut mngr), vec![20; 10000]);
+    assert_eq!(leaf_get_value(&page, 2, &mut mngr), vec![30; 10]);
+    assert_eq!(leaf_get_value(&page, 3, &mut mngr), vec![40]);
   }
 }
