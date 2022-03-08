@@ -144,6 +144,7 @@ fn pos(page_id: u32, page_size: u32) -> u64 {
 }
 
 // StorageManager options.
+#[derive(Clone, Debug)]
 pub struct Options {
   page_size: u32,
   is_disk: bool,
@@ -152,24 +153,27 @@ pub struct Options {
 }
 
 impl Options {
-  // Creates a new options builder.
-  pub fn new() -> OptionsBuilder {
-    OptionsBuilder {
-      opts: Self {
-        page_size: DEFAULT_PAGE_SIZE,
-        is_disk: false,
-        disk_path: String::new(),
-        mem_capacity: 0,
-      }
+  // Creates Options struct with default values.
+  pub fn new() -> Self {
+    Self {
+      page_size: DEFAULT_PAGE_SIZE,
+      is_disk: false,
+      disk_path: String::new(),
+      mem_capacity: 0,
     }
   }
 }
 
-pub struct OptionsBuilder {
+pub struct StorageManagerBuilder {
   opts: Options,
 }
 
-impl OptionsBuilder {
+impl StorageManagerBuilder {
+  // Creates a new instance of StorageManagerBuilder.
+  pub fn new() -> Self {
+    Self { opts: Options::new() }
+  }
+
   // Creates options for disk-based storage manager.
   pub fn as_disk(mut self, path: &str) -> Self {
     self.opts.is_disk = true;
@@ -192,7 +196,7 @@ impl OptionsBuilder {
 
   // Returns new options from the builder.
   // All options are validated here.
-  pub fn build(self) -> Options {
+  pub fn build(self) -> StorageManager {
     if self.opts.is_disk {
       assert_ne!(self.opts.disk_path.len(), 0, "Empty file path");
     }
@@ -202,7 +206,7 @@ impl OptionsBuilder {
       "Invalid page size {}", self.opts.page_size
     );
 
-    self.opts
+    StorageManager::new(&self.opts)
   }
 }
 
@@ -217,8 +221,15 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
+  // Builder for StorageManager.
+  pub fn builder() -> StorageManagerBuilder {
+    StorageManagerBuilder::new()
+  }
+
   // Creates a new StorageManager with the provided options.
   // The method opens or creates a corresponding database.
+  //
+  // Consider using `builder()` method instead.
   pub fn new(opts: &Options) -> Self {
     if opts.is_disk {
       let path = Path::new(&opts.disk_path);
@@ -572,13 +583,11 @@ mod tests {
   }
 
   fn storage_mem(page_size: u32) -> StorageManager {
-    let opts = Options::new().as_mem(0).with_page_size(page_size).build();
-    StorageManager::new(&opts)
+    StorageManager::builder().as_mem(0).with_page_size(page_size).build()
   }
 
   fn storage_disk(page_size: u32, path: &str) -> StorageManager {
-    let opts = Options::new().as_disk(path).with_page_size(page_size).build();
-    StorageManager::new(&opts)
+    StorageManager::builder().as_disk(path).with_page_size(page_size).build()
   }
 
   //==============
@@ -587,14 +596,19 @@ mod tests {
 
   #[test]
   fn test_storage_options_default() {
-    let opts = Options::new().build();
+    let opts = Options::new();
     assert!(!opts.is_disk);
     assert_eq!(opts.page_size, DEFAULT_PAGE_SIZE);
   }
 
+  //============================
+  // StorageManagerBuilder tests
+  //============================
+
   #[test]
-  fn test_storage_options_mem() {
-    let opts = Options::new().as_mem(128).build();
+  fn test_storage_storage_builder_mem() {
+    let builder = StorageManagerBuilder::new().as_mem(128);
+    let opts = builder.opts;
     assert!(!opts.is_disk);
     assert_eq!(opts.mem_capacity, 128);
     assert_eq!(opts.page_size, DEFAULT_PAGE_SIZE);
@@ -603,7 +617,8 @@ mod tests {
   #[test]
   fn test_storage_options_disk() {
     with_tmp_file(|path| {
-      let opts = Options::new().as_disk(path).with_page_size(32).build();
+      let builder = StorageManagerBuilder::new().as_disk(path).with_page_size(32);
+      let opts = builder.opts;
       assert!(opts.is_disk);
       assert_eq!(opts.disk_path, path.to_owned());
       assert_eq!(opts.page_size, 32);
@@ -613,10 +628,10 @@ mod tests {
   #[test]
   fn test_storage_options_chaining() {
     with_tmp_file(|path| {
-      let opts = Options::new()
+      let builder = StorageManagerBuilder::new()
         .as_disk(path).with_page_size(32)
-        .as_mem(128).with_page_size(64)
-        .build();
+        .as_mem(128).with_page_size(64);
+      let opts = builder.opts;
       assert!(!opts.is_disk);
       assert_eq!(opts.mem_capacity, 128);
       assert_eq!(opts.page_size, 64);
@@ -626,19 +641,19 @@ mod tests {
   #[test]
   #[should_panic(expected = "Empty file path")]
   fn test_storage_options_invalid_empty_path() {
-    Options::new().as_disk(&"").build();
+    StorageManagerBuilder::new().as_disk(&"").build();
   }
 
   #[test]
   #[should_panic(expected = "Invalid page size")]
   fn test_storage_options_invalid_too_small_page() {
-    Options::new().as_mem(0).with_page_size(MIN_PAGE_SIZE - 1).build();
+    StorageManagerBuilder::new().as_mem(0).with_page_size(MIN_PAGE_SIZE - 1).build();
   }
 
   #[test]
   #[should_panic(expected = "Invalid page size")]
   fn test_storage_options_invalid_too_large_page() {
-    Options::new().as_mem(0).with_page_size(MAX_PAGE_SIZE + 1).build();
+    StorageManagerBuilder::new().as_mem(0).with_page_size(MAX_PAGE_SIZE + 1).build();
   }
 
   //=================
