@@ -24,6 +24,13 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager) -> BT
         if exists || page::leaf_can_insert(&page, key, val) {
           if exists {
             // TODO: optimise page updates
+            // We should always be able to insert a key with new value
+            // because either key + value will fit within the page or
+            // key will fit + overflow.
+            //
+            // Consider doing something like this:
+            // storing just an overflow page in 4 bytes of value length and setting flags
+            // whether the key is overflow or value is overflow.
             page::leaf_delete(&mut page, pos, mngr);
           }
           page::leaf_insert(&mut page, pos, key, val, mngr);

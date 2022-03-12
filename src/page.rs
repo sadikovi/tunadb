@@ -8,11 +8,10 @@ const PAGE_MIN_SLOTS: usize = 4;
 // Max prefix size allowed for the key (in bytes).
 const PAGE_MAX_PREFIX_SIZE: usize = 64;
 
-const FLAG_IS_LEAF: u32 = 0x1;
-const FLAG_IS_OVERFLOW: u32 = 0x2;
-const FLAG_IS_INTERNAL: u32 = 0x4;
-const FLAG_IS_KEY_OVERFLOW: u32 = 0x80000000;
-const FLAG_IS_KEY_OVERFLOW_2: u8 = 0x1;
+const FLAG_PAGE_IS_LEAF: u32 = 0x1;
+const FLAG_PAGE_IS_OVERFLOW: u32 = 0x2;
+const FLAG_PAGE_IS_INTERNAL: u32 = 0x4;
+const FLAG_CELL_IS_OVERFLOW: u8 = 0x1;
 
 //============
 // Page header
@@ -37,11 +36,11 @@ pub enum PageType {
 pub fn page_type(page: &[u8]) -> PageType {
   let header = &page[..PAGE_HEADER_SIZE];
   let flags = u8_u32!(&header[..4]);
-  if flags & FLAG_IS_LEAF != 0 {
+  if flags & FLAG_PAGE_IS_LEAF != 0 {
     PageType::Leaf
-  } else if flags & FLAG_IS_OVERFLOW != 0 {
+  } else if flags & FLAG_PAGE_IS_OVERFLOW != 0 {
     PageType::Overflow
-  } else if flags & FLAG_IS_INTERNAL != 0 {
+  } else if flags & FLAG_PAGE_IS_INTERNAL != 0 {
     PageType::Internal
   } else {
     panic!("Invalid page type");
@@ -108,7 +107,7 @@ fn set_next_page(page: &mut [u8], page_id: u32) {
 
 #[inline]
 pub fn leaf_init(page: &mut [u8]) {
-  set_flags(page, FLAG_IS_LEAF);
+  set_flags(page, FLAG_PAGE_IS_LEAF);
   set_num_slots(page, 0);
   set_free_ptr(page, page.len());
   set_prev_page(page, INVALID_PAGE_ID);
@@ -180,7 +179,7 @@ fn leaf_get_cell_len(page: &[u8], off: usize) -> usize {
   let flags = page[end];
   end += 1;
 
-  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
+  if flags & FLAG_CELL_IS_OVERFLOW == 0 {
     let key_len = u8_u32!(&page[end..end + 4]) as usize;
     end += 4;
     end += key_len;
@@ -295,7 +294,7 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
     let prefix_len = leaf_prefix_len(key);
     start = free_ptr(page) - leaf_cell_overflow_len(key);
     end = start;
-    page[end] = FLAG_IS_KEY_OVERFLOW_2; // overflow flag
+    page[end] = FLAG_CELL_IS_OVERFLOW; // overflow flag
     end += 1;
     write_u32!(&mut page[end..end + 4], prefix_len as u32);
     end += 4;
@@ -349,7 +348,7 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
   let buf = leaf_get_cell(&page, pos);
   let flags = buf[0];
 
-  if flags & FLAG_IS_KEY_OVERFLOW_2 != 0 {
+  if flags & FLAG_CELL_IS_OVERFLOW != 0 {
     // Get overflow page.
     let len = buf.len();
     let overflow_pid = u8_u32!(buf[len - 4..len]);
@@ -362,7 +361,7 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
 #[inline]
 pub fn leaf_is_full_key(page: &[u8], pos: usize) -> bool {
   let buf = leaf_get_cell(page, pos);
-  buf[0] & FLAG_IS_KEY_OVERFLOW_2 == 0
+  buf[0] & FLAG_CELL_IS_OVERFLOW == 0
 }
 
 pub fn leaf_get_prefix(page: &[u8], pos: usize) -> &[u8] {
@@ -378,7 +377,7 @@ pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u
   let off = 1;
   let len = u8_u32!(buf[off..off + 4]) as usize;
 
-  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
+  if flags & FLAG_CELL_IS_OVERFLOW == 0 {
     // There is no overflow.
     (&buf[off + 4..off + 4 + len]).to_vec()
   } else {
@@ -396,13 +395,13 @@ pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u
   }
 }
 
-pub fn leaf_get_value(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
+pub fn leaf_get_val(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
   let buf = leaf_get_cell(page, pos);
   let flags = buf[0];
   let mut off = 1;
   let len = u8_u32!(buf[off..off + 4]) as usize;
 
-  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
+  if flags & FLAG_CELL_IS_OVERFLOW == 0 {
     // There is no overflow.
     off += 4;
     off += len;
@@ -453,9 +452,13 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bo
   (start, false)
 }
 
+//==============
+// Overflow page
+//==============
+
 #[inline]
 fn overflow_init(page: &mut [u8]) {
-  set_flags(page, FLAG_IS_OVERFLOW);
+  set_flags(page, FLAG_PAGE_IS_OVERFLOW);
   set_num_slots(page, 0); // it is always 0 for overflow
   set_free_ptr(page, 0); // free ptr for overflow pages does not include the page header
   set_prev_page(page, INVALID_PAGE_ID);
@@ -551,6 +554,42 @@ fn overflow_delete(mngr: &mut StorageManager, mut page_id: u32) {
   }
 }
 
+//==============
+// Internal page
+//==============
+
+// Internal page structure is as follows:
+// [page header]
+// [slot0][slot1][slot2]...
+// [ptr1][key0][ptr2][key1][ptr3][key2]...
+// [ptr0] - end of the page
+
+#[inline]
+pub fn internal_init(page: &mut [u8]) {
+  set_flags(page, FLAG_PAGE_IS_INTERNAL);
+  set_num_slots(page, 0);
+  set_free_ptr(page, page.len() - 4); // the last 4 bytes are for ptr0
+  set_prev_page(page, INVALID_PAGE_ID);
+  set_next_page(page, INVALID_PAGE_ID);
+}
+
+pub fn internal_set_ptr(page: &mut [u8], pos: usize, pid: u32) {
+  // Position 0 is a special position, we store the page id for it at the end of the page.
+  if pos == 0 {
+    let len = page.len();
+    write_u32!(&mut page[len - 4..len], pid);
+  } else {
+    let slot = leaf_get_slot(&page, pos - 1); // ptr1 is in slot0
+    // We store ptr in the first 4 bytes, the key follows.
+    let off = slot as usize;
+    write_u32!(&mut page[off..off + 4], pid);
+  }
+}
+
+pub fn internal_insert_key(page: &mut [u8], pos: usize, key: &[u8]) {
+
+}
+
 pub fn debug(pid: u32, page: &[u8]) {
   let max_print_len = 16;
 
@@ -607,7 +646,7 @@ pub fn debug(pid: u32, page: &[u8]) {
         let buf = leaf_get_cell(page, i);
         let flags = buf[0];
         let mut off = 1;
-        if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
+        if flags & FLAG_CELL_IS_OVERFLOW == 0 {
           let key_len = u8_u32!(&buf[off..off + 4]) as usize;
           off += 4;
           let key = &buf[off..off + key_len];
@@ -725,7 +764,7 @@ mod tests {
       let key = vec![(9 - i) as u8; 9 - i];
       let val = vec![(9 - i) as u8; 9 - i];
       assert_eq!(leaf_get_key(&page, i, &mut mngr), key);
-      assert_eq!(leaf_get_value(&page, i, &mut mngr), val);
+      assert_eq!(leaf_get_val(&page, i, &mut mngr), val);
     }
   }
 
@@ -750,10 +789,59 @@ mod tests {
     assert_eq!(leaf_get_key(&page, 2, &mut mngr), vec![3; 1]);
     assert_eq!(leaf_get_key(&page, 3, &mut mngr), vec![4; 10000]);
 
-    assert_eq!(leaf_get_value(&page, 0, &mut mngr), vec![10, 10, 10]);
-    assert_eq!(leaf_get_value(&page, 1, &mut mngr), vec![20; 10000]);
-    assert_eq!(leaf_get_value(&page, 2, &mut mngr), vec![30; 10]);
-    assert_eq!(leaf_get_value(&page, 3, &mut mngr), vec![40]);
+    assert_eq!(leaf_get_val(&page, 0, &mut mngr), vec![10, 10, 10]);
+    assert_eq!(leaf_get_val(&page, 1, &mut mngr), vec![20; 10000]);
+    assert_eq!(leaf_get_val(&page, 2, &mut mngr), vec![30; 10]);
+    assert_eq!(leaf_get_val(&page, 3, &mut mngr), vec![40]);
+  }
+
+  #[test]
+  fn test_page_leaf_update_same_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    for i in 0..6 {
+      let key = vec![i as u8; 1];
+      let val = vec![i as u8; 2];
+      leaf_insert(&mut page, i, &key, &val, &mut mngr);
+    }
+
+    let key = vec![1; 1]; // key must be the same
+    let val = vec![1; 128]; // value causes an overflow
+
+    leaf_delete(&mut page, 1, &mut mngr);
+    leaf_insert(&mut page, 1, &key, &val, &mut mngr);
+
+    // Assert that the cell is an overflow cell.
+    let buf = leaf_get_cell(&page, 1);
+    assert!(buf[0] & FLAG_CELL_IS_OVERFLOW != 0);
+
+    assert_eq!(num_slots(&page), 6);
+    assert_eq!(leaf_get_key(&page, 1, &mut mngr), key);
+    assert_eq!(leaf_get_val(&page, 1, &mut mngr), val);
+  }
+
+  #[test]
+  fn test_page_leaf_update_extreme() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    for i in 0..7 {
+      leaf_insert(&mut page, i, &[1], &[1], &mut mngr);
+    }
+
+    // At this point, only this many bytes is left which is less than what overflow cell needs.
+    assert_eq!(leaf_free_space(&page), 3);
+
+    leaf_delete(&mut page, 0, &mut mngr);
+    // TODO: Fix leaf updates.
+    leaf_insert(&mut page, 0, &[1], &vec![2u8; 5], &mut mngr);
+    // leaf_insert(&mut page, 0, &[1], &vec![2u8; 128], &mut mngr);
+
+    debug(1, &page);
+    assert!(false, "OK");
   }
 
   #[test]
