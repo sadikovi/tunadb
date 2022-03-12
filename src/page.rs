@@ -12,6 +12,7 @@ const FLAG_IS_LEAF: u32 = 0x1;
 const FLAG_IS_OVERFLOW: u32 = 0x2;
 const FLAG_IS_INTERNAL: u32 = 0x4;
 const FLAG_IS_KEY_OVERFLOW: u32 = 0x80000000;
+const FLAG_IS_KEY_OVERFLOW_2: u8 = 0x1;
 
 //============
 // Page header
@@ -119,85 +120,67 @@ fn leaf_free_space(page: &[u8]) -> usize {
   free_ptr(page) - PAGE_HEADER_SIZE - num_slots(page) * 4 /* slot size */
 }
 
-// Whether or not we can insert key + val pair.
-// 1. If key + val fit in the page, insert fully.
-// 2. If key + val do not fit in the page, calculate overflow size and check.
+// Returns the maximum number of bytes available for a cell.
+// This takes 4 bytes of slot into account.
 #[inline]
-pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
-  let target_len = 4 /* slot */ + 4 /* key len */ + key.len() + 4 /* val len */ + val.len();
-  let overflow_len = 4 /* slot */ + 4 /* prefix len */ + key.len().min(PAGE_MAX_PREFIX_SIZE) +
-    4 /* key len */ + 4 /* val len */ + 4 /* overflow page */;
-  // Allowed max cell size.
-  let max_cell_len = leaf_free_space(page).min((page.len() - PAGE_HEADER_SIZE) / PAGE_MIN_SLOTS);
-  target_len <= max_cell_len || overflow_len <= max_cell_len
+fn leaf_max_cell_len(page: &[u8]) -> usize {
+  leaf_free_space(page).min((page.len() - PAGE_HEADER_SIZE) / PAGE_MIN_SLOTS)
+}
+
+// Calculates cell length based on the key and value.
+// This does not include slot bytes in the slot array.
+#[inline]
+fn leaf_cell_len(key: &[u8], val: &[u8]) -> usize {
+  1 /* flags */ +
+  4 /* key len */ + key.len() +
+  4 /* val len */ + val.len()
+}
+
+// Returns the prefix length of the key for overflow.
+#[inline]
+fn leaf_prefix_len(key: &[u8]) -> usize {
+  key.len().min(PAGE_MAX_PREFIX_SIZE)
+}
+
+// Calculates overflow cell length based on the key.
+// This does not include slot bytes in the slot array.
+#[inline]
+fn leaf_cell_overflow_len(key: &[u8]) -> usize {
+  1 /* flags */ +
+  4 /* prefix len */ + leaf_prefix_len(key) +
+  4 /* key len */ +
+  4 /* val len */ +
+  4 /* overflow page */
+}
+
+// Returns slot for the given position.
+#[inline]
+fn leaf_get_slot(page: &[u8], pos: usize) -> u32 {
+  let cnt = num_slots(page);
+  assert!(pos < cnt, "Invalid position {}, len {}", pos, cnt);
+  let slots = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + cnt * 4];
+  u8_u32!(&slots[pos * 4..pos * 4 + 4])
 }
 
 #[inline]
-pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
-  let num_slots = num_slots(&page);
-  assert!(pos <= num_slots, "Invalid position {}, len {}", pos, num_slots);
-
-  let max_cell_len = leaf_free_space(page).min((page.len() - PAGE_HEADER_SIZE) / PAGE_MIN_SLOTS);
-  let cell_len = 4 /* key len */ + key.len() + 4 /* val len */ + val.len();
-  let prefix_len = key.len().min(PAGE_MAX_PREFIX_SIZE);
-  let overflow_len = 4 /* prefix len */ + prefix_len + 4 /* key len */ + 4 /* val len */ + 4 /* overflow page */;
-
-  let ptr;
-  let mut key_flags = 0;
-  if 4 /* slot len */ + cell_len <= max_cell_len {
-    ptr = free_ptr(page) - cell_len;
-    let mut off = ptr;
-    write_u32!(&mut page[off..off + 4], key.len() as u32);
-    off += 4;
-    write_bytes!(&mut page[off..off + key.len()], key);
-    off += key.len();
-    write_u32!(&mut page[off..off + 4], val.len() as u32);
-    off += 4;
-    write_bytes!(&mut page[off..off + val.len()], val);
-  } else if 4 /* slot len */ + overflow_len <= max_cell_len {
-    let overflow_page = overflow_write(mngr, key, val);
-    ptr = free_ptr(page) - overflow_len;
-    key_flags |= FLAG_IS_KEY_OVERFLOW;
-    let mut off = ptr;
-    write_u32!(&mut page[off..off + 4], prefix_len as u32);
-    off += 4;
-    write_bytes!(&mut page[off..off + prefix_len], &key[..prefix_len]);
-    off += prefix_len;
-    write_u32!(&mut page[off..off + 4], key.len() as u32);
-    off += 4;
-    write_u32!(&mut page[off..off + 4], val.len() as u32);
-    off += 4;
-    write_u32!(&mut page[off..off + 4], overflow_page);
-  } else {
-    panic!("Not enough space to insert");
-  }
-
-  let slot_arr = &mut page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + (num_slots + 1) * 4];
-  for i in (pos..num_slots).rev() {
-    let off = i * 4;
-    let curr = u8_u32!(slot_arr[off..off + 4]);
-    write_u32!(&mut slot_arr[off + 4..off + 8], curr);
-  }
-  write_u32!(&mut slot_arr[pos * 4..pos * 4 + 4], key_flags | ptr as u32);
-
-  set_num_slots(page, num_slots + 1);
-  set_free_ptr(page, ptr);
+fn leaf_set_slot(page: &mut [u8], pos: usize, slot: u32) {
+  let cnt = num_slots(page);
+  assert!(pos < cnt, "Invalid position {}, len {}", pos, cnt);
+  let slots = &mut page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + cnt * 4];
+  write_u32!(&mut slots[pos * 4..pos * 4 + 4], slot);
 }
 
+// Returns the cell's length depending whether or not it is an overflow from the page.
 #[inline]
-pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
-  let num_slots = num_slots(&page);
-  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
-
-  let free_ptr = free_ptr(&page);
-  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
-  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
-
-  let is_overflow = ptr & FLAG_IS_KEY_OVERFLOW != 0;
-  let start = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
+fn leaf_get_cell_len(page: &[u8], off: usize) -> usize {
+  let start = off;
   let mut end = start;
 
-  if !is_overflow {
+  // The first byte is always flags.
+  let flags = page[end];
+  end += 1;
+
+  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
     let key_len = u8_u32!(&page[end..end + 4]) as usize;
     end += 4;
     end += key_len;
@@ -206,116 +189,282 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
     end += val_len;
   } else {
     let prefix_len = u8_u32!(&page[end..end + 4]) as usize;
-    end += 4;
+    end += 4; // prefix length
     end += prefix_len;
     end += 4; // key length
     end += 4; // val length
-    let overflow_page = u8_u32!(&page[end..end + 4]);
-    end += 4;
-    overflow_delete(mngr, overflow_page);
+    end += 4; // overflow page
   }
 
-  let len = end - start;
-  page.copy_within(free_ptr..start, free_ptr + len);
+  end - start
+}
+
+// // Returns the cell's slice.
+#[inline]
+fn leaf_get_cell(page: &[u8], pos: usize) -> &[u8] {
+  let off = leaf_get_slot(page, pos) as usize;
+  let len = leaf_get_cell_len(page, off);
+  &page[off..off + len]
+}
+
+// Inserts the cell at the position potentially shifting elements.
+#[inline]
+fn leaf_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
+  assert!(buf.len() <= leaf_free_space(&page), "Not enough space to insert the cell");
+
+  // Update the count to reflect insertion.
+  let cnt = num_slots(&page) + 1;
+  assert!(pos < cnt, "Invalid insertion slot {}", pos);
+  set_num_slots(page, cnt);
+
+  // Copy all slots to clear the space for the insertion.
+  for i in pos..cnt - 1 {
+    let off = leaf_get_slot(&page, i);
+    leaf_set_slot(page, i + 1, off);
+  }
+
+  // Write data into the page.
+  let mut free_ptr = free_ptr(&page);
+  free_ptr -= buf.len();
+  write_bytes!(&mut page[free_ptr..free_ptr + buf.len()], buf);
+
+  leaf_set_slot(page, pos, free_ptr as u32);
+  set_free_ptr(page, free_ptr);
+}
+
+// Deletes the cell and rearranges the space.
+#[inline]
+fn leaf_del_cell(page: &mut [u8], pos: usize) {
+  let cnt = num_slots(&page);
+  let free_ptr = free_ptr(&page);
+
+  let off = leaf_get_slot(&page, pos) as usize;
+  let len = leaf_get_cell_len(&page, off);
+
+  // Copy the data to cover the deleted cell.
+  page.copy_within(free_ptr..off, free_ptr + len);
 
   // Update all of the slots that have offset < ptr.
-  let slot_arr = &mut page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
-  for i in 0..num_slots {
-    let curr_ptr = u8_u32!(&slot_arr[i * 4..i * 4 + 4]);
-    if curr_ptr < ptr {
-      write_u32!(&mut slot_arr[i * 4..i * 4 + 4], curr_ptr + len as u32);
+  for i in 0..cnt {
+    let curr_off = leaf_get_slot(&page, i) as usize;
+    if curr_off < off {
+      leaf_set_slot(page, i, (curr_off + len) as u32);
     }
   }
+
   // Delete the slot at position `pos`.
-  for i in pos + 1..num_slots {
-    let off = i * 4;
-    let curr = u8_u32!(slot_arr[off..off + 4]);
-    write_u32!(&mut slot_arr[off - 4..off], curr);
+  for i in pos + 1..cnt {
+    let off = leaf_get_slot(&page, i);
+    leaf_set_slot(page, i - 1, off);
   }
 
   set_free_ptr(page, free_ptr + len);
-  set_num_slots(page, num_slots - 1);
+  set_num_slots(page, cnt - 1);
 }
 
+// Whether or not we can insert key + val pair.
+// 1. If key + val fit in the page, insert fully.
+// 2. If key + val do not fit in the page, calculate overflow size and check.
 #[inline]
+pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
+  let max_cell_len = leaf_max_cell_len(page);
+  leaf_cell_len(key, val) <= max_cell_len || leaf_cell_overflow_len(key) <= max_cell_len
+}
+
+pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
+  assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
+
+  // Insert the bytes into the page.
+  let max_cell_len = leaf_max_cell_len(&page);
+  let start;
+  let mut end;
+  if 4 /* slot */ + leaf_cell_len(key, val) <= max_cell_len {
+    start = free_ptr(page) - leaf_cell_len(key, val);
+    end = start;
+    page[end] = 0; // no flags
+    end += 1;
+    write_u32!(&mut page[end..end + 4], key.len() as u32);
+    end += 4;
+    write_bytes!(&mut page[end..end + key.len()], key);
+    end += key.len();
+    write_u32!(&mut page[end..end + 4], val.len() as u32);
+    end += 4;
+    write_bytes!(&mut page[end..end + val.len()], val);
+  } else if 4 /* slot len */ + leaf_cell_overflow_len(key) <= max_cell_len {
+    let overflow_page = overflow_write(mngr, key, val);
+    let prefix_len = leaf_prefix_len(key);
+    start = free_ptr(page) - leaf_cell_overflow_len(key);
+    end = start;
+    page[end] = FLAG_IS_KEY_OVERFLOW_2; // overflow flag
+    end += 1;
+    write_u32!(&mut page[end..end + 4], prefix_len as u32);
+    end += 4;
+    write_bytes!(&mut page[end..end + prefix_len], &key[..prefix_len]);
+    end += prefix_len;
+    write_u32!(&mut page[end..end + 4], key.len() as u32);
+    end += 4;
+    write_u32!(&mut page[end..end + 4], val.len() as u32);
+    end += 4;
+    write_u32!(&mut page[end..end + 4], overflow_page);
+  } else {
+    panic!("Not enough space to insert");
+  }
+
+  // Clear the space for position and insert new slot.
+  let cnt = num_slots(&page) + 1;
+  set_num_slots(page, cnt);
+
+  // Clear the space for position.
+  for i in (pos..cnt - 1).rev() {
+    let slot = leaf_get_slot(&page, i);
+    leaf_set_slot(page, i + 1, slot);
+  }
+  // Insert new slot.
+  leaf_set_slot(page, pos, start as u32);
+  set_free_ptr(page, start);
+}
+
+// Moves keys and values based on the provided position.
+// All values after the position are moved to the right page.
+pub fn leaf_split(left: &mut [u8], right: &mut [u8], pos: usize) {
+  assert_eq!(num_slots(&right), 0, "Right page is not empty");
+
+  let cnt = num_slots(&left);
+  let mut j = 0;
+
+  // Insert cells into the right page starting from `pos`.
+  for i in pos..cnt {
+    let buf = leaf_get_cell(&left, i);
+    leaf_ins_cell(right, j, buf);
+    j += 1;
+  }
+
+  // Delete all of the cells after `pos`.
+  for i in (pos..cnt).rev() {
+    leaf_del_cell(left, i);
+  }
+}
+
+pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
+  let buf = leaf_get_cell(&page, pos);
+  let flags = buf[0];
+
+  if flags & FLAG_IS_KEY_OVERFLOW_2 != 0 {
+    // Get overflow page.
+    let len = buf.len();
+    let overflow_pid = u8_u32!(buf[len - 4..len]);
+    overflow_delete(mngr, overflow_pid);
+  }
+  leaf_del_cell(page, pos);
+}
+
+// Returns true if prefix == key.
+#[inline]
+pub fn leaf_is_full_key(page: &[u8], pos: usize) -> bool {
+  let buf = leaf_get_cell(page, pos);
+  buf[0] & FLAG_IS_KEY_OVERFLOW_2 == 0
+}
+
 pub fn leaf_get_prefix(page: &[u8], pos: usize) -> &[u8] {
-  let num_slots = num_slots(page);
-  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
-
-  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
-  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
-  let off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
-  let len = u8_u32!(&page[off..off + 4]) as usize; // either prefix or key
-  &page[off + 4..off + 4 + len]
+  let buf = leaf_get_cell(page, pos);
+  let off = 1; // account for flags
+  let prefix_len = u8_u32!(buf[off..off + 4]) as usize;
+  &buf[off + 4..off + 4 + prefix_len]
 }
 
-#[inline]
 pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
-  let num_slots = num_slots(page);
-  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
+  let buf = leaf_get_cell(page, pos);
+  let flags = buf[0];
+  let off = 1;
+  let len = u8_u32!(buf[off..off + 4]) as usize;
 
-  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
-  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
-  let off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
-  let len = u8_u32!(&page[off..off + 4]) as usize;
-
-  if ptr & FLAG_IS_KEY_OVERFLOW == 0 {
+  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
     // There is no overflow.
-    (&page[off + 4..off + 4 + len]).to_vec()
+    (&buf[off + 4..off + 4 + len]).to_vec()
   } else {
     // We need to figure out if the key fits within the page.
-    let key_len = u8_u32!(&page[off + 4 + len..off + 4 + len + 4]) as usize;
+    let key_len = u8_u32!(&buf[off + 4 + len..off + 4 + len + 4]) as usize;
     if len == key_len {
       // The key is the same as prefix and fits within the page, return as is.
-      (&page[off + 4..off + 4 + len]).to_vec()
+      (&buf[off + 4..off + 4 + len]).to_vec()
     } else {
       let mut key = vec![0u8; key_len];
-      let overflow_page = u8_u32!(&page[off + 4 + len + 8..off + 4 + len + 8 + 4]);
+      let overflow_page = u8_u32!(&buf[off + 4 + len + 8..off + 4 + len + 8 + 4]);
       overflow_read(mngr, overflow_page, 0, &mut key);
       key
     }
   }
 }
 
-#[inline]
 pub fn leaf_get_value(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u8> {
-  let num_slots = num_slots(page);
-  assert!(pos < num_slots, "Invalid position {}, len {}", pos, num_slots);
+  let buf = leaf_get_cell(page, pos);
+  let flags = buf[0];
+  let mut off = 1;
+  let len = u8_u32!(buf[off..off + 4]) as usize;
 
-  let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
-  let ptr = u8_u32!(&slot_arr[pos * 4..pos * 4 + 4]);
-  let mut off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
-  let len = u8_u32!(&page[off..off + 4]) as usize;
-
-  if ptr & FLAG_IS_KEY_OVERFLOW == 0 {
+  if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
     // There is no overflow.
     off += 4;
     off += len;
-    let val_len = u8_u32!(&page[off..off + 4]) as usize;
+    let val_len = u8_u32!(&buf[off..off + 4]) as usize;
     off += 4;
-    (&page[off..off + val_len]).to_vec()
+    (&buf[off..off + val_len]).to_vec()
   } else {
     // We need to figure out if the key fits within the page.
     off += 4;
     off += len;
-    let key_len = u8_u32!(&page[off..off + 4]) as usize;
+    let key_len = u8_u32!(&buf[off..off + 4]) as usize;
     off += 4;
-    let val_len = u8_u32!(&page[off..off + 4]) as usize;
+    let val_len = u8_u32!(&buf[off..off + 4]) as usize;
     off += 4;
-    let overflow_page = u8_u32!(&page[off..off + 4]);
+    let overflow_page = u8_u32!(&buf[off..off + 4]);
     let mut val = vec![0u8; val_len];
     overflow_read(mngr, overflow_page, key_len, &mut val);
     val
   }
 }
 
+pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bool) {
+  assert_eq!(page_type(page), PageType::Leaf, "Invalid page type for bsearch");
+  let mut start = 0;
+  let mut end = num_slots(page);
+  // "start" would point to the insertion point where keys[start] >= key
+  while start < end {
+    let pivot = (start + end - 1) >> 1;
+    let pkey = leaf_get_prefix(page, pivot);
+    if key < pkey {
+      end = pivot;
+    } else if key > pkey {
+      start = pivot + 1;
+    } else if leaf_is_full_key(page, pivot) {
+      // At this point, we are done since the keys match fully
+      return (pivot, true);
+    } else {
+      let pkey = leaf_get_key(page, pivot, mngr);
+      if key < &pkey {
+        end = pivot;
+      } else if key > &pkey {
+        start = pivot + 1;
+      } else {
+        return (pivot, true);
+      }
+    }
+  }
+  (start, false)
+}
+
 #[inline]
 fn overflow_init(page: &mut [u8]) {
   set_flags(page, FLAG_IS_OVERFLOW);
   set_num_slots(page, 0); // it is always 0 for overflow
-  set_free_ptr(page, 0); // free ptr for overflow pages starts at the beginning of the page
+  set_free_ptr(page, 0); // free ptr for overflow pages does not include the page header
   set_prev_page(page, INVALID_PAGE_ID);
   set_next_page(page, INVALID_PAGE_ID);
+}
+
+#[inline]
+fn overflow_free_space(page: &[u8]) -> usize {
+  page.len() - PAGE_HEADER_SIZE - free_ptr(page)
 }
 
 #[inline]
@@ -402,15 +551,31 @@ fn overflow_delete(mngr: &mut StorageManager, mut page_id: u32) {
   }
 }
 
-pub fn debug(page: &[u8]) {
+pub fn debug(pid: u32, page: &[u8]) {
+  let max_print_len = 16;
+
   let page_type = page_type(page);
   let num_slots = num_slots(page);
   let prev_page = prev_page(page);
   let next_page = next_page(page);
+  println!("=============");
+  println!("PAGE {}", pid);
+  println!("=============");
   println!("Page Header:");
   println!("  page type: {:?}", page_type);
   println!("  num slots: {}", num_slots);
   println!("  free ptr: {}", free_ptr(page));
+  match page_type {
+    PageType::Leaf => {
+      println!("  free space left: {}", leaf_free_space(page));
+    },
+    PageType::Overflow => {
+      println!("  free space left: {}", overflow_free_space(page));
+    },
+    _ => {
+      println!("  ! Unsupported");
+    },
+  }
   if prev_page == INVALID_PAGE_ID {
     println!("  prev page: N/A");
   } else {
@@ -424,50 +589,71 @@ pub fn debug(page: &[u8]) {
   println!("Page Body:");
   match page_type {
     PageType::Overflow => {
-      println!("  Bytes written: {}", free_ptr(page));
+      let free_ptr = free_ptr(page);
+      println!("  Bytes written: {}", free_ptr);
       println!(
         "  Percentage: {0:.1$}%",
-        free_ptr(page) as f64 * 100f64 / (page.len() - PAGE_HEADER_SIZE) as f64,
+        free_ptr as f64 * 100f64 / (page.len() - PAGE_HEADER_SIZE) as f64,
         2
       );
-      println!("  Buf: {:?}", page);
+      if free_ptr > max_print_len {
+        println!("  Buf: {:?}...", &page[..max_print_len]);
+      } else {
+        println!("  Buf: {:?}", &page[..free_ptr]);
+      }
     },
     PageType::Leaf => {
-      let slot_arr = &page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + num_slots * 4];
       for i in 0..num_slots {
-        let ptr = u8_u32!(&slot_arr[i * 4..i * 4 + 4]);
-        let mut off = (ptr & !FLAG_IS_KEY_OVERFLOW) as usize;
-        if ptr & FLAG_IS_KEY_OVERFLOW == 0 {
-          let key_len = u8_u32!(&page[off..off + 4]) as usize;
+        let buf = leaf_get_cell(page, i);
+        let flags = buf[0];
+        let mut off = 1;
+        if flags & FLAG_IS_KEY_OVERFLOW_2 == 0 {
+          let key_len = u8_u32!(&buf[off..off + 4]) as usize;
           off += 4;
-          let key = &page[off..off + key_len];
+          let key = &buf[off..off + key_len];
           off += key_len;
-          let val_len = u8_u32!(&page[off..off + 4]) as usize;
+          let val_len = u8_u32!(&buf[off..off + 4]) as usize;
           off += 4;
-          let val = &page[off..off + val_len];
-          println!("  [{}] ({}) {:?} = ({}) {:?}", i, key_len, key, val_len, val);
+          let val = &buf[off..off + val_len];
+          println!("  [{}] ({}) {:?} = ({}) {:?}",
+            i,
+            key_len,
+            if key_len > max_print_len { &key[..max_print_len] } else { &key[..key_len] },
+            val_len,
+            if val_len > max_print_len { &val[..max_print_len] } else { &val[..val_len] },
+          );
         } else {
           // It is an overflow key.
-          let prefix_len = u8_u32!(&page[off..off + 4]) as usize;
+          let prefix_len = u8_u32!(&buf[off..off + 4]) as usize;
           off += 4;
-          let prefix = &page[off..off + prefix_len];
+          let prefix = &buf[off..off + prefix_len];
           off += prefix_len;
-          let key_len = u8_u32!(&page[off..off + 4]);
+          let key_len = u8_u32!(&buf[off..off + 4]);
           off += 4;
-          let val_len = u8_u32!(&page[off..off + 4]);
+          let val_len = u8_u32!(&buf[off..off + 4]);
           off += 4;
-          let overflow_page = u8_u32!(&page[off..off + 4]);
+          let overflow_page = u8_u32!(&buf[off..off + 4]);
           println!(
-            "  [{}] ({}) {:?} = (k {}, v {}) page {}",
-            i, prefix_len, prefix, key_len, val_len, overflow_page
+            "  [{}] ({}) {:?} = overflow {{ key len {}, val len {}, page {} }}",
+            i,
+            prefix_len,
+            if prefix_len > max_print_len {
+              &prefix[..max_print_len]
+            } else {
+              &prefix[..prefix_len]
+            },
+            key_len,
+            val_len,
+            overflow_page
           );
         }
       }
     },
     _ => {
-      println!("  Unsupported");
+      println!("  ! Unsupported");
     }
   }
+  println!();
 }
 
 #[cfg(test)]
@@ -495,7 +681,7 @@ mod tests {
 
   #[test]
   fn test_page_leaf_insert_delete() {
-    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
 
     let mut page = vec![0u8; mngr.page_size()];
     leaf_init(&mut page);
@@ -510,7 +696,7 @@ mod tests {
     leaf_insert(&mut page, 3, &[9, 9], &[9, 9, 9], &mut mngr);
 
     assert_eq!(num_slots(&page), 4);
-    assert_eq!(free_ptr(&page), 46);
+    assert_eq!(free_ptr(&page), 164);
 
     for _ in 0..4 {
       leaf_delete(&mut page, 0, &mut mngr);
@@ -520,6 +706,27 @@ mod tests {
     assert_eq!(free_ptr(&page), mngr.page_size());
 
     mngr.write_next(&page);
+  }
+
+  #[test]
+  fn test_page_insert_reverse_order() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    for i in 0..10 {
+      let key = vec![i as u8; i];
+      let val = vec![i as u8; i];
+      leaf_insert(&mut page, 0, &key, &val, &mut mngr);
+    }
+
+    for i in 0..10 {
+      let key = vec![(9 - i) as u8; 9 - i];
+      let val = vec![(9 - i) as u8; 9 - i];
+      assert_eq!(leaf_get_key(&page, i, &mut mngr), key);
+      assert_eq!(leaf_get_value(&page, i, &mut mngr), val);
+    }
   }
 
   #[test]
@@ -547,5 +754,30 @@ mod tests {
     assert_eq!(leaf_get_value(&page, 1, &mut mngr), vec![20; 10000]);
     assert_eq!(leaf_get_value(&page, 2, &mut mngr), vec![30; 10]);
     assert_eq!(leaf_get_value(&page, 3, &mut mngr), vec![40]);
+  }
+
+  #[test]
+  fn test_page_leaf_split() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    leaf_insert(&mut page, 0, &[1; 3], &[10; 10], &mut mngr);
+    leaf_insert(&mut page, 1, &[2; 3], &[20; 10], &mut mngr);
+    leaf_insert(&mut page, 2, &[3; 3], &[30; 10], &mut mngr);
+    leaf_insert(&mut page, 3, &[4; 3], &[40; 128], &mut mngr);
+    leaf_insert(&mut page, 4, &[5; 3], &[50; 128], &mut mngr);
+
+    debug(100, &page);
+
+    let mut right = vec![0u8; mngr.page_size()];
+    leaf_init(&mut right);
+
+    leaf_split(&mut page, &mut right, 0);
+
+    debug(200, &page);
+    debug(300, &right);
+
+    assert!(false, "OK");
   }
 }
