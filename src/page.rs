@@ -370,9 +370,9 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
 // Returns true if prefix == key.
 #[inline]
 pub fn leaf_is_full_key(page: &[u8], pos: usize) -> bool {
-  let buf = leaf_get_cell(page, pos);
-  let prefix_len = u8_u32!(&buf[0..4]);
-  let key_len = u8_u32!(&buf[4..8]);
+  let off = get_slot(page, pos) as usize;
+  let prefix_len = u8_u32!(&page[off..off + 4]);
+  let key_len = u8_u32!(&page[off + 4..off + 8]);
   // If prefix == key, then the full key is written regardless the overflow page.
   prefix_len == key_len
 }
@@ -416,33 +416,68 @@ pub fn leaf_get_val(page: &[u8], pos: usize, mngr: &mut StorageManager) -> Vec<u
   }
 }
 
+// Runs binary search on the page's keys.
+// Returns position of the match or position where the key is greater than the target and a
+// boolean to indicate whether the key exists or not.
 pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bool) {
-  assert_eq!(page_type(page), PageType::Leaf, "Invalid page type for bsearch");
   let mut start = 0;
   let mut end = num_slots(page);
-  // "start" would point to the insertion point where keys[start] >= key
-  while start < end {
-    let pivot = (start + end - 1) >> 1;
-    let pkey = leaf_get_prefix(page, pivot);
-    if key < pkey {
-      end = pivot;
-    } else if key > pkey {
-      start = pivot + 1;
-    } else if leaf_is_full_key(page, pivot) {
-      // At this point, we are done since the keys match fully
-      return (pivot, true);
-    } else {
-      let pkey = leaf_get_key(page, pivot, mngr);
-      if key < &pkey {
-        end = pivot;
-      } else if key > &pkey {
-        start = pivot + 1;
-      } else {
-        return (pivot, true);
+
+  match page_type(page) {
+    PageType::Leaf => {
+      // "start" would point to the insertion point where keys[start] >= key
+      while start < end {
+        let pivot = (start + end - 1) >> 1;
+        let pkey = leaf_get_prefix(page, pivot);
+        if key < pkey {
+          end = pivot;
+        } else if key > pkey {
+          start = pivot + 1;
+        } else if leaf_is_full_key(page, pivot) {
+          // At this point, we are done since the keys match fully
+          return (pivot, true);
+        } else {
+          let pkey = leaf_get_key(page, pivot, mngr);
+          if key < &pkey {
+            end = pivot;
+          } else if key > &pkey {
+            start = pivot + 1;
+          } else {
+            return (pivot, true);
+          }
+        }
       }
-    }
+      (start, false)
+    },
+    PageType::Internal => {
+      // "start" would point to the insertion point where keys[start] >= key
+      while start < end {
+        let pivot = (start + end - 1) >> 1;
+        let pkey = internal_get_prefix(page, pivot);
+        if key < pkey {
+          end = pivot;
+        } else if key > pkey {
+          start = pivot + 1;
+        } else if internal_is_full_key(page, pivot) {
+          // At this point, we are done since the keys match fully
+          return (pivot, true);
+        } else {
+          let pkey = internal_get_key(page, pivot, mngr);
+          if key < &pkey {
+            end = pivot;
+          } else if key > &pkey {
+            start = pivot + 1;
+          } else {
+            return (pivot, true);
+          }
+        }
+      }
+      (start, false)
+    },
+    PageType::Overflow => {
+      panic!("Unsupported page type for bsearch");
+    },
   }
-  (start, false)
 }
 
 //==============
@@ -543,6 +578,8 @@ pub fn internal_init(page: &mut [u8]) {
   set_free_ptr(page, page.len() - 4); // the last 4 bytes are for ptr0
   set_prev_page(page, INVALID_PAGE_ID);
   set_next_page(page, INVALID_PAGE_ID);
+  // Also, set ptr0 to invalid page
+  internal_set_ptr(page, 0, INVALID_PAGE_ID);
 }
 
 #[inline]
@@ -568,7 +605,7 @@ fn internal_overflow_key_len(key: &[u8]) -> usize {
 fn internal_get_cell(page: &[u8], pos: usize) -> &[u8] {
   let off = get_slot(page, pos) as usize;
   let prefix_len = u8_u32!(&page[off + 4..off + 8]) as usize;
-  &page[off + 16..off + 16 + prefix_len]
+  &page[off..off + 16 + prefix_len]
 }
 
 #[inline]
@@ -666,6 +703,15 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
   internal_del_cell(page, pos);
 }
 
+#[inline]
+pub fn internal_is_full_key(page: &[u8], pos: usize) -> bool {
+  let off = get_slot(page, pos) as usize;
+  let prefix_len = u8_u32!(&page[off + 4..off + 8]);
+  let key_len = u8_u32!(&page[off + 8..off + 12]);
+  // If prefix == key, then the full key is written regardless the overflow page.
+  prefix_len == key_len
+}
+
 pub fn internal_get_prefix(page: &[u8], pos: usize) -> &[u8] {
   let buf = internal_get_cell(page, pos);
   let prefix_len = u8_u32!(&buf[4..8]) as usize;
@@ -698,7 +744,7 @@ pub fn internal_set_ptr(page: &mut [u8], pos: usize, pid: u32) {
   }
 }
 
-pub fn internal_get_ptr(page: &mut [u8], pos: usize) -> u32 {
+pub fn internal_get_ptr(page: &[u8], pos: usize) -> u32 {
   // Position 0 is a special position, we store the page id for it at the end of the page.
   if pos == 0 {
     let len = page.len();
@@ -724,14 +770,11 @@ pub fn debug(pid: u32, page: &[u8]) {
   println!("  num slots: {}", num_slots);
   println!("  free ptr: {}", free_ptr(page));
   match page_type {
-    PageType::Leaf => {
+    PageType::Leaf | PageType::Internal => {
       println!("  free space left: {}", free_space(page));
     },
     PageType::Overflow => {
       println!("  free space left: {}", overflow_free_space(page));
-    },
-    _ => {
-      println!("  ! Unsupported");
     },
   }
   if prev_page == INVALID_PAGE_ID {
@@ -797,8 +840,40 @@ pub fn debug(pid: u32, page: &[u8]) {
         }
       }
     },
-    _ => {
-      println!("  ! Unsupported");
+    PageType::Internal => {
+      for i in 0..num_slots + 1 {
+        if i > 0 {
+          let buf = internal_get_cell(page, i - 1);
+          let prefix_len = u8_u32!(&buf[4..8]) as usize;
+          let key_len = u8_u32!(&buf[8..12]) as usize;
+          let overflow_pid = u8_u32!(&buf[12..16]);
+
+          if overflow_pid == INVALID_PAGE_ID {
+            println!(
+              "    [{}] ({}) {:?}",
+              i - 1,
+              key_len,
+              &buf[16..16 + key_len]
+            );
+          } else {
+            println!(
+              "    [{}] ({}) {:?}",
+              i - 1,
+              prefix_len,
+              if prefix_len > max_print_len {
+                &buf[16..16 + max_print_len]
+              } else {
+                &buf[16..16 + prefix_len]
+              }
+            );
+          }
+        }
+        let ptri = match internal_get_ptr(&page, i) {
+          INVALID_PAGE_ID => "INVALID".to_owned(),
+          other => format!("{}", other),
+        };
+        println!("  * ptr {} = {}", i, ptri);
+      }
     }
   }
   println!();
@@ -1022,5 +1097,70 @@ mod tests {
     assert_eq!(&leaf_get_key(&right, 0, &mut mngr), &[3; 3]);
     assert_eq!(&leaf_get_key(&right, 1, &mut mngr), &[4; 3]);
     assert_eq!(&leaf_get_key(&right, 2, &mut mngr), &[5; 3]);
+  }
+
+  #[test]
+  fn test_page_internal_init() {
+    let mut page = vec![0u8; 128];
+    internal_init(&mut page);
+
+    assert_eq!(num_slots(&page), 0);
+    assert_eq!(free_ptr(&page), 124);
+    assert_eq!(internal_get_ptr(&page, 0), INVALID_PAGE_ID);
+  }
+
+  #[test]
+  fn test_page_internal_insert() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    internal_insert(&mut page, 0, &[1, 2, 3], &mut mngr);
+
+    assert_eq!(num_slots(&page), 1);
+    assert_eq!(internal_get_prefix(&page, 0), &[1, 2, 3]);
+    assert_eq!(internal_get_key(&page, 0, &mut mngr), vec![1, 2, 3]);
+  }
+
+  #[test]
+  fn test_page_internal_insert_overflow() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    internal_insert(&mut page, 0, &[1, 2, 3], &mut mngr);
+    internal_insert(&mut page, 1, &[4; 128], &mut mngr);
+
+    assert_eq!(num_slots(&page), 2);
+
+    assert_eq!(internal_get_prefix(&page, 0), &[1, 2, 3]);
+    assert_eq!(internal_get_key(&page, 0, &mut mngr), vec![1, 2, 3]);
+
+    assert_eq!(internal_get_prefix(&page, 1), &[4; PAGE_MAX_PREFIX_SIZE]);
+    assert_eq!(internal_get_key(&page, 1, &mut mngr), vec![4; 128]);
+  }
+
+  #[test]
+  fn test_page_internal_delete() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    internal_insert(&mut page, 0, &[1; 128], &mut mngr);
+    internal_insert(&mut page, 1, &[2; 128], &mut mngr);
+    internal_insert(&mut page, 2, &[3; 128], &mut mngr);
+    internal_insert(&mut page, 3, &[4; 128], &mut mngr);
+    internal_insert(&mut page, 4, &[5; 4], &mut mngr);
+
+    assert_eq!(free_space(&page), 0);
+    assert_eq!(num_slots(&page), 5);
+
+    for i in 0..5 {
+      internal_delete(&mut page, 0, &mut mngr);
+      assert_eq!(num_slots(&page), 4 - i);
+    }
+
+    assert_eq!(num_slots(&page), 0);
+    assert_eq!(free_ptr(&page), page.len() - 4);
   }
 }
