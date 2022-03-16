@@ -270,7 +270,8 @@ fn leaf_del_cell(page: &mut [u8], pos: usize) {
 #[inline]
 pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
   let max_cell_len = max_cell_len(page);
-  leaf_cell_len(key, val) <= max_cell_len || leaf_cell_overflow_len(key) <= max_cell_len
+  4 /* slot len */ + leaf_cell_len(key, val) <= max_cell_len ||
+    4 /* slot len */ + leaf_cell_overflow_len(key) <= max_cell_len
 }
 
 pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
@@ -640,7 +641,8 @@ fn internal_del_cell(page: &mut [u8], pos: usize) {
 #[inline]
 pub fn internal_can_insert(page: &[u8], key: &[u8]) -> bool {
   let max_cell_len = max_cell_len(page);
-  internal_key_len(key) <= max_cell_len || internal_overflow_key_len(key) <= max_cell_len
+  4 /* slot len */ + internal_key_len(key) <= max_cell_len ||
+    4 /* slot len */ + internal_overflow_key_len(key) <= max_cell_len
 }
 
 pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
@@ -798,9 +800,9 @@ pub fn debug(pid: u32, page: &[u8]) {
         2
       );
       if free_ptr > max_print_len {
-        println!("  Buf: {:?}...", &page[..max_print_len]);
+        println!("  Buf: {:?}...", &page[..PAGE_HEADER_SIZE + max_print_len]);
       } else {
-        println!("  Buf: {:?}", &page[..free_ptr]);
+        println!("  Buf: {:?}", &page[..PAGE_HEADER_SIZE + free_ptr]);
       }
     },
     PageType::Leaf => {

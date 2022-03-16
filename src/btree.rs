@@ -77,7 +77,30 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
         }
       },
       page::PageType::Internal => {
-        unimplemented!()
+        let ptr = if exists { pos + 1 } else { pos };
+        // match recur_put(btree, page.ptrs[ptr], key, value)? {
+        let mut tmp = page.to_vec();
+        match recur_put(page::internal_get_ptr(&page, ptr), key, val, mngr, &mut tmp) {
+          BTreePut::Update(id) => {
+            page::internal_set_ptr(page, ptr, id);
+            let new_root = mngr.write_next(&page);
+            mngr.mark_as_free(root);
+            BTreePut::Update(new_root)
+          },
+          BTreePut::Split(left_id, right_id, key) => {
+            if page::internal_can_insert(&page, &key) {
+              page::internal_insert(page, pos, &key, mngr);
+              page::internal_set_ptr(page, pos, left_id);
+              page::internal_set_ptr(page, pos + 1, right_id);
+
+              let new_root = mngr.write_next(&page);
+              mngr.mark_as_free(root);
+              BTreePut::Update(new_root)
+            } else {
+              unimplemented!()
+            }
+          }
+        }
       },
       unsupported_type => {
         panic!("Invalid page type: {:?}", unsupported_type);
@@ -94,9 +117,10 @@ mod tests {
   fn test_btree_put() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
-    for i in 0..10 {
-      let key = vec![10 - i; i as usize];
-      let val = vec![10 - i; i as usize];
+    let num_keys = 25;
+    for i in 0..num_keys {
+      let key = vec![(num_keys - i) as u8; i];
+      let val = vec![(num_keys - i) as u8; i];
       root = put(root, &key, &val, &mut mngr);
     }
 
