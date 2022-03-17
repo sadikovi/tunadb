@@ -56,7 +56,7 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
           // We need to split the leaf page.
           let num_slots = page::num_slots(&page);
           // Split point.
-          let spos = num_slots / 2 + (num_slots & 1);
+          let spos = num_slots / 2;
           // Split key.
           let skey = if pos == spos { key.to_vec() } else { page::leaf_get_key(&page, spos, mngr) };
 
@@ -77,10 +77,10 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
         }
       },
       page::PageType::Internal => {
+        let mut right_page = page.to_vec(); // we reuse right_page as a temporary buffer
         let ptr = if exists { pos + 1 } else { pos };
-        // match recur_put(btree, page.ptrs[ptr], key, value)? {
-        let mut tmp = page.to_vec();
-        match recur_put(page::internal_get_ptr(&page, ptr), key, val, mngr, &mut tmp) {
+
+        match recur_put(page::internal_get_ptr(&page, ptr), key, val, mngr, &mut right_page) {
           BTreePut::Update(id) => {
             page::internal_set_ptr(page, ptr, id);
             let new_root = mngr.write_next(&page);
@@ -97,7 +97,33 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
               mngr.mark_as_free(root);
               BTreePut::Update(new_root)
             } else {
-              unimplemented!()
+              // We need to split internal page.
+              let num_slots = page::num_slots(&page);
+              // Split point.
+              let spos = num_slots / 2;
+              // Split key.
+              let skey = page::internal_get_key(&page, spos, mngr);
+
+              page::internal_init(&mut right_page);
+              page::internal_split(page, &mut right_page, spos);
+
+              // Decide where to insert the split key.
+              // Note that there must always be enough space to insert the key in either
+              // left or right page.
+              if pos >= spos {
+                page::internal_insert(&mut right_page, pos - spos, &key, mngr);
+                page::internal_set_ptr(&mut right_page, pos - spos, left_id);
+                page::internal_set_ptr(&mut right_page, pos - spos + 1, right_id);
+              } else {
+                page::internal_insert(page, pos, &key, mngr);
+                page::internal_set_ptr(page, pos, left_id);
+                page::internal_set_ptr(page, pos + 1, right_id);
+              }
+
+              let left_pid = mngr.write_next(&page);
+              let right_pid = mngr.write_next(&right_page);
+              mngr.mark_as_free(root);
+              BTreePut::Split(left_pid, right_pid, skey)
             }
           }
         }
@@ -117,7 +143,7 @@ mod tests {
   fn test_btree_put() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
-    let num_keys = 25;
+    let num_keys = 50;
     for i in 0..num_keys {
       let key = vec![(num_keys - i) as u8; i];
       let val = vec![(num_keys - i) as u8; i];

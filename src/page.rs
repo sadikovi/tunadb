@@ -212,7 +212,7 @@ fn leaf_get_cell(page: &[u8], pos: usize) -> &[u8] {
 // Inserts the cell at the position potentially shifting elements.
 #[inline]
 fn leaf_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
-  assert!(buf.len() <= free_space(&page), "Not enough space to insert the cell");
+  assert!(buf.len() <= free_space(&page), "leaf_ins_cell: not enough space to insert the cell");
 
   // Update the count to reflect insertion.
   let cnt = num_slots(&page) + 1;
@@ -341,12 +341,12 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
 // Moves keys and values based on the provided position.
 // All values after the position are moved to the right page.
 pub fn leaf_split(left: &mut [u8], right: &mut [u8], pos: usize) {
-  assert_eq!(num_slots(&right), 0, "Right page is not empty");
+  assert_eq!(num_slots(&right), 0, "Leaf split: right page is not empty");
 
   let cnt = num_slots(&left);
-  let mut j = 0;
 
   // Insert cells into the right page starting from `pos`.
+  let mut j = 0;
   for i in pos..cnt {
     let buf = leaf_get_cell(&left, i);
     leaf_ins_cell(right, j, buf);
@@ -610,6 +610,30 @@ fn internal_get_cell(page: &[u8], pos: usize) -> &[u8] {
 }
 
 #[inline]
+fn internal_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
+  assert!(buf.len() <= free_space(&page), "internal_ins_cell: not enough space to insert the cell");
+
+  // Update the count to reflect insertion.
+  let cnt = num_slots(&page) + 1;
+  assert!(pos < cnt, "Invalid insertion slot {}", pos);
+  set_num_slots(page, cnt);
+
+  // Copy all slots to clear the space for the insertion.
+  for i in pos..cnt - 1 {
+    let off = get_slot(&page, i);
+    set_slot(page, i + 1, off);
+  }
+
+  // Write data into the page.
+  let mut free_ptr = free_ptr(&page);
+  free_ptr -= buf.len();
+  write_bytes!(&mut page[free_ptr..free_ptr + buf.len()], buf);
+
+  set_slot(page, pos, free_ptr as u32);
+  set_free_ptr(page, free_ptr);
+}
+
+#[inline]
 fn internal_del_cell(page: &mut [u8], pos: usize) {
   let cnt = num_slots(&page);
   let free_ptr = free_ptr(&page);
@@ -703,6 +727,33 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
     overflow_delete(mngr, overflow_pid);
   }
   internal_del_cell(page, pos);
+}
+
+// Moves keys and pointers from the left page to the right page based on the provided position.
+// All values after the position are moved to the right page.
+pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize) {
+  assert_eq!(num_slots(&right), 0, "Internal split: right page is not empty");
+
+  let cnt = num_slots(&left);
+
+  // Internal pages do not include the separator key when split.
+  let mut j = 0;
+  for i in pos + 1..cnt {
+    let buf = internal_get_cell(&left, i);
+    internal_ins_cell(right, j, buf);
+    j += 1;
+  }
+
+  // We don't need to set pointers as they are copied as part of keys.
+
+  // Set ptr0 in the right page.
+  let ptr0 = internal_get_ptr(&left, pos + 1);
+  internal_set_ptr(right, 0, ptr0);
+
+  // Delete keys from the left page.
+  for i in (pos..cnt).rev() {
+    internal_del_cell(left, i);
+  }
 }
 
 #[inline]
@@ -1140,6 +1191,39 @@ mod tests {
 
     assert_eq!(internal_get_prefix(&page, 1), &[4; PAGE_MAX_PREFIX_SIZE]);
     assert_eq!(internal_get_key(&page, 1, &mut mngr), vec![4; 128]);
+  }
+
+  #[test]
+  fn test_page_internal_split() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    let num_keys = 9;
+
+    for i in 0..num_keys {
+      internal_insert(&mut page, i, &[i as u8; 5], &mut mngr);
+    }
+
+    for i in 0..num_keys + 1 {
+      internal_set_ptr(&mut page, i, i as u32);
+    }
+
+    let mut right = vec![0u8; mngr.page_size()];
+    internal_init(&mut right);
+
+    let spos = 5;
+    internal_split(&mut page, &mut right, spos);
+
+    assert_eq!(num_slots(&page), spos);
+    for i in 0..num_slots(&page) {
+      assert_ne!(internal_get_ptr(&page, i), INVALID_PAGE_ID);
+    }
+
+    assert_eq!(num_slots(&right), num_keys - spos - 1); // we drop the separator key
+    for i in 0..num_slots(&right) {
+      assert_ne!(internal_get_ptr(&right, i), INVALID_PAGE_ID);
+    }
   }
 
   #[test]
