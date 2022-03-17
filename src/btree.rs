@@ -135,6 +135,44 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
   }
 }
 
+pub fn btree_debug(root: u32, mngr: &mut StorageManager) {
+  let mut page = vec![0u8; mngr.page_size()];
+  btree_debug_recur(root, &mut page, mngr, 2);
+}
+
+fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut StorageManager, offset: usize) {
+  mngr.read(root, page);
+  let cnt = page::num_slots(&page);
+  match page::page_type(&page) {
+    page::PageType::Leaf => {
+      println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
+        "*",
+        root,
+        cnt,
+        page::leaf_get_key(&page, 0, mngr),
+        page::leaf_get_key(&page, cnt - 1, mngr),
+        width = offset
+      );
+    },
+    page::PageType::Internal => {
+      println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
+        "+",
+        root,
+        cnt,
+        page::internal_get_key(&page, 0, mngr),
+        page::internal_get_key(&page, cnt - 1, mngr),
+        width = offset
+      );
+      let cpage = page.to_vec(); // clone the buffer so recursive calls don't overwrite data
+      for i in 0..cnt + 1 {
+        let ptr = page::internal_get_ptr(&cpage, i);
+        btree_debug_recur(ptr, page, mngr, offset + 2);
+      }
+    },
+    _ => panic!("Cannot print btree: unexpected page type"),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -143,10 +181,10 @@ mod tests {
   fn test_btree_put() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
-    let num_keys = 50;
+    let num_keys = 100;
     for i in 0..num_keys {
-      let key = vec![(num_keys - i) as u8; i];
-      let val = vec![(num_keys - i) as u8; i];
+      let key = vec![(num_keys -i) as u8; 1];
+      let val = vec![(num_keys - i) as u8; 1];
       root = put(root, &key, &val, &mut mngr);
     }
 
@@ -157,6 +195,8 @@ mod tests {
         page::debug(pid, &tmp);
       }
     }
+
+    btree_debug(root, &mut mngr);
 
     assert!(false, "OK");
   }
