@@ -142,6 +142,10 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
 
 // Returns value for the key if the key exists, otherwise None.
 pub fn get(mut root: u32, key: &[u8], mngr: &mut StorageManager) -> Option<Vec<u8>> {
+  if root == INVALID_PAGE_ID {
+    return None;
+  }
+
   let mut page = vec![0u8; mngr.page_size()];
 
   loop {
@@ -417,6 +421,13 @@ mod tests {
   //   assert_eq!(get(&tree, &[3]).unwrap(), None);
   //   assert_eq!(get(&tree, &[4]).unwrap(), None);
   // }
+
+  #[test]
+  fn test_btree_get_empty() {
+    let mut root = INVALID_PAGE_ID;
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    assert_eq!(get(root, &[1], &mut mngr), None);
+  }
 
   #[test]
   fn test_btree_get_existent_key() {
