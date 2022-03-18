@@ -1,12 +1,6 @@
 use crate::storage::{INVALID_PAGE_ID, StorageManager};
 use crate::page;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum BTreePut {
-  Update(u32 /* page id */),
-  Split(u32 /* left page id */, u32 /* right page id */, Vec<u8> /* split key */)
-}
-
 // Inserts key and value in the btree and returns a new snapshot via a new root page.
 pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
@@ -21,6 +15,11 @@ pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager) -> u32 
       mngr.write_next(&page)
     },
   }
+}
+
+enum BTreePut {
+  Update(u32 /* page id */),
+  Split(u32 /* left page id */, u32 /* right page id */, Vec<u8> /* split key */)
 }
 
 // Puts key and value into btree.
@@ -158,6 +157,78 @@ pub fn get(mut root: u32, key: &[u8], mngr: &mut StorageManager) -> Option<Vec<u
       page::PageType::Internal => {
         let ptr = if exists { pos + 1 } else { pos };
         root = page::internal_get_ptr(&page, ptr);
+      },
+      unsupported_type => {
+        panic!("Invalid page type: {:?}", unsupported_type);
+      },
+    }
+  }
+}
+
+// Deletes the key in the btree and returns a new snapshot via a new root page.
+pub fn del(root: u32, key: &[u8], mngr: &mut StorageManager) -> u32 {
+  let mut page = vec![0u8; mngr.page_size()];
+  match recur_del(root, key, mngr, &mut page) {
+    BTreeDel::Empty => root,
+    BTreeDel::Update(pid, ..) => pid,
+  }
+}
+
+enum BTreeDel {
+  Empty, // indicates the key did not exist, tree should not be modified
+  Update(u32 /* page id */, Option<Vec<u8>> /* next smallest key */),
+}
+
+fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) -> BTreeDel {
+  if root == INVALID_PAGE_ID {
+    // Nothing to delete.
+    BTreeDel::Empty
+  } else {
+    mngr.read(root, page);
+    // Perform search to find the position of the key and whether or not it exists
+    let (pos, exists) = page::bsearch(&page, key, mngr);
+    match page::page_type(&page) {
+      page::PageType::Leaf => {
+        if exists {
+          // Delete an existing key.
+          page::leaf_delete(page, pos, mngr);
+          // We are deleting the smallest key, update parents to the next smallest
+          let mut next_smallest_key = None;
+          if pos == 0 && page::num_slots(&page) > 0 {
+            next_smallest_key = Some(page::leaf_get_key(&page, 0, mngr));
+          }
+
+          let new_root = mngr.write_next(&page);
+          mngr.mark_as_free(root);
+          BTreeDel::Update(new_root, next_smallest_key)
+        } else {
+          BTreeDel::Empty
+        }
+      },
+      page::PageType::Internal => {
+        let mut right_page = page.to_vec(); // we reuse right_page as a temporary buffer
+        let ptr = if exists { pos + 1 } else { pos };
+
+        match recur_del(page::internal_get_ptr(&page, ptr), key, mngr, &mut right_page) {
+          BTreeDel::Empty => BTreeDel::Empty,
+          BTreeDel::Update(pid, next_smallest_key) => {
+            page::internal_set_ptr(page, ptr, pid);
+            if exists && page::internal_get_key(&page, pos, mngr) == key {
+              if let Some(smallest_key) = next_smallest_key.as_ref() {
+                // Update the key. Because we can only delete and re-insert the key, we also
+                // need to update the pointer that is stored together with the key.
+                let uptr = page::internal_get_ptr(page, pos + 1);
+                page::internal_delete(page, pos, mngr);
+                page::internal_insert(page, pos, &smallest_key, mngr);
+                page::internal_set_ptr(page, pos + 1, uptr);
+              }
+            }
+
+            // TODO: implement split and merge.
+
+            BTreeDel::Update(INVALID_PAGE_ID, next_smallest_key)
+          },
+        }
       },
       unsupported_type => {
         panic!("Invalid page type: {:?}", unsupported_type);
@@ -424,7 +495,7 @@ mod tests {
 
   #[test]
   fn test_btree_get_empty() {
-    let mut root = INVALID_PAGE_ID;
+    let root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
     assert_eq!(get(root, &[1], &mut mngr), None);
   }
