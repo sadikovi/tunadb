@@ -3,8 +3,10 @@ use crate::storage::{INVALID_PAGE_ID, StorageManager};
 
 // Max page header size (in bytes).
 const PAGE_HEADER_SIZE: usize = 20;
+// Size of each slot in the slot array (byte offset within the page).
+const SLOT_SIZE: usize = 4;
 // Minimal number of slots per page (mostly for leaf pages).
-const PAGE_MIN_SLOTS: usize = 4;
+pub const PAGE_MIN_SLOTS: usize = 4;
 // Max prefix size allowed for the key (in bytes).
 const PAGE_MAX_PREFIX_SIZE: usize = 32;
 
@@ -124,7 +126,7 @@ fn set_slot(page: &mut [u8], pos: usize, slot: u32) {
 
 #[inline]
 fn free_space(page: &[u8]) -> usize {
-  free_ptr(page) - PAGE_HEADER_SIZE - num_slots(page) * 4 /* slot size */
+  free_ptr(page) - PAGE_HEADER_SIZE - num_slots(page) * SLOT_SIZE
 }
 
 // Returns the maximum number of bytes available for a cell.
@@ -138,6 +140,180 @@ fn max_cell_len(page: &[u8]) -> usize {
 #[inline]
 fn key_prefix_len(key: &[u8]) -> usize {
   key.len().min(PAGE_MAX_PREFIX_SIZE)
+}
+
+// Returns true if two pages can be combined into one page, i.e. all of the slots fit within
+// one page: all slot addresses + keys + values/pointers.
+// Both pages must be of the same type.
+#[inline]
+pub fn can_merge(page1: &[u8], page2: &[u8]) -> bool {
+  assert_eq!(page_type(page1), page_type(page2), "Different page types");
+  assert_eq!(page1.len(), page2.len(), "Different page size");
+
+  let page_size = page1.len();
+  let total_len =
+    num_slots(page1) * SLOT_SIZE + page_size - free_ptr(page1) +
+    num_slots(page2) * SLOT_SIZE + page_size - free_ptr(page2) +
+    if page_type(page1) == PageType::Internal { SLOT_SIZE + internal_merge_key_len() } else { 0 };
+
+  total_len < page_size - PAGE_HEADER_SIZE
+}
+
+// TODO: merge with other internal_key_len methods.
+#[inline]
+fn internal_merge_key_len() -> usize {
+  4 /* ptr */ +
+  4 /* prefix len */ +
+  4 /* key len */ +
+  4 /* overflow pid */ +
+  PAGE_MAX_PREFIX_SIZE
+}
+
+// Merges two pages (leaf or internal) and updates parent (internal page).
+// Moves all of the slots from the page `from` to the page `to` - it is assumed that we always
+// merge page on the right into the page on the left, e.g.
+//
+// `parent`:
+//   key[N + 1]
+//   ptr[N] (`to_ptr`)    ptr[N + 1]
+//    ^                       ^
+//    |                       |
+//   `to`                   `from`
+//
+// `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+#[inline]
+pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut StorageManager) {
+  assert_eq!(page_type(&to), page_type(&from), "Merge: different page type");
+
+  match page_type(&to) {
+    PageType::Leaf => {
+      let mut j = num_slots(&to);
+      for i in 0..num_slots(&from) {
+        let buf = leaf_get_cell(&from, i);
+        leaf_ins_cell(to, j, buf);
+        j += 1;
+      }
+      // Reset the `from` page.
+      leaf_init(from);
+      // Delete the link to `from` page from the parent.
+      internal_delete(parent, to_ptr, mngr);
+    },
+    PageType::Internal => {
+      //            Kp
+      //    k0 k1        K0 K1
+      // p0 p1 p2     P0 P1 P2
+
+      // Move the key from the parent to the curr.
+      let buf = internal_get_cell(&parent, to_ptr);
+      let ppos = num_slots(&to);
+      internal_ins_cell(to, ppos, buf);
+      internal_set_ptr(to, ppos + 1, internal_get_ptr(from, 0));
+
+      let mut j = num_slots(&to);
+      for i in 0..num_slots(&from) {
+        let buf = internal_get_cell(&from, i);
+        internal_ins_cell(to, j, buf);
+        j += 1;
+      }
+      // Reset the `from` page.
+      internal_init(from);
+      // Delete the link to `from` page from the parent.
+      internal_del_cell(parent, to_ptr);
+    },
+    unsupported_type => panic!("Merge: unsupported page type: {:?}", unsupported_type),
+  }
+}
+
+// Moves one slot (key + value/key + ptr) from `left` page into `to` page, left page must have
+// at least one key.
+// `left` page is the page to the left of the `to` page.
+// `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+#[inline]
+pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut StorageManager) {
+  assert_eq!(page_type(&to), page_type(&left), "Steal from left: different page type");
+
+  let left_cnt = num_slots(&left);
+
+  match page_type(&to) {
+    PageType::Leaf => {
+      // Move the last cell from `left` to `to`.
+      let key = leaf_get_key(&left, left_cnt - 1, mngr);
+      let buf = leaf_get_cell(&left, left_cnt - 1);
+      leaf_ins_cell(to, 0, buf);
+      leaf_del_cell(left, left_cnt - 1);
+
+      // Update the key in parent.
+      let pid = internal_get_ptr(&parent, to_ptr);
+      internal_delete(parent, to_ptr - 1, mngr);
+      internal_insert(parent, to_ptr - 1, &key, mngr);
+      internal_set_ptr(parent, to_ptr, pid);
+    },
+    PageType::Internal => {
+      // Update `to` page.
+      let buf = internal_get_cell(&parent, to_ptr - 1);
+      internal_ins_cell(to, 0, buf);
+      internal_set_ptr(to, 1, internal_get_ptr(to, 0));
+
+      // Set ptr0 for `to` page.
+      internal_set_ptr(to, 0, internal_get_ptr(left, left_cnt));
+
+      // Update the key in parent.
+      let pid = internal_get_ptr(&parent, to_ptr);
+      internal_del_cell(parent, to_ptr - 1);
+      let buf = internal_get_cell(&left, left_cnt - 1);
+      internal_ins_cell(parent, to_ptr - 1, buf);
+      internal_set_ptr(parent, to_ptr, pid);
+
+      // Update `left` page.
+      internal_del_cell(left, left_cnt - 1);
+    },
+    unsupported_type => panic!("Steal from left: unsupported page type: {:?}", unsupported_type),
+  }
+}
+
+// Moves one slot (key + value/key + ptr) from `right` page into `to` page, right page must have
+// at least one key.
+// `right` page is the page to the right of the `to` page.
+// `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+#[inline]
+pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut StorageManager) {
+  assert_eq!(page_type(&to), page_type(&right), "Steal from right: different page type");
+  assert!(num_slots(right) > 0, "Steal from right: right page is empty");
+
+  let to_cnt = num_slots(&to);
+
+  match page_type(&to) {
+    PageType::Leaf => {
+      // Move the first cell from `right` to `to`.
+      let buf = leaf_get_cell(&right, 0);
+      leaf_ins_cell(to, to_cnt, buf);
+      leaf_del_cell(right, 0);
+
+      // Update the key in parent.
+      let key = leaf_get_key(&right, 0, mngr);
+      let pid = internal_get_ptr(&parent, to_ptr);
+      internal_delete(parent, to_ptr, mngr);
+      internal_insert(parent, to_ptr, &key, mngr);
+      internal_set_ptr(parent, to_ptr + 1, pid);
+    },
+    PageType::Internal => {
+      // Update `to` by moving the parent cell to `to` page.
+      let buf = internal_get_cell(&parent, to_ptr);
+      internal_ins_cell(to, to_cnt, buf);
+      internal_set_ptr(to, to_cnt + 1, internal_get_ptr(right, 0));
+
+      // Update the key in parent.
+      let pid = internal_get_ptr(parent, to_ptr + 1);
+      internal_del_cell(parent, to_ptr);
+      internal_ins_cell(parent, to_ptr, internal_get_cell(right, 0));
+      internal_set_ptr(parent, to_ptr + 1, pid);
+
+      // Update `right` page.
+      internal_set_ptr(right, 0, internal_get_ptr(right, 1));
+      internal_del_cell(right, 0);
+    },
+    unsupported_type => panic!("Steal from right: unsupported page type: {:?}", unsupported_type),
+  }
 }
 
 //==========
@@ -270,8 +446,8 @@ fn leaf_del_cell(page: &mut [u8], pos: usize) {
 #[inline]
 pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
   let max_cell_len = max_cell_len(page);
-  4 /* slot len */ + leaf_cell_len(key, val) <= max_cell_len ||
-    4 /* slot len */ + leaf_cell_overflow_len(key) <= max_cell_len
+  SLOT_SIZE + leaf_cell_len(key, val) <= max_cell_len ||
+    SLOT_SIZE + leaf_cell_overflow_len(key) <= max_cell_len
 }
 
 pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
@@ -295,7 +471,7 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
     write_bytes!(&mut page[end..end + key.len()], key); // key
     end += key.len();
     write_bytes!(&mut page[end..end + val.len()], val); // val
-  } else if 4 /* slot len */ + leaf_cell_overflow_len(key) <= max_cell_len {
+  } else if SLOT_SIZE + leaf_cell_overflow_len(key) <= max_cell_len {
     let prefix_len = key_prefix_len(key);
 
     let overflow_page = if prefix_len == key.len() {
@@ -619,7 +795,7 @@ fn internal_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
   set_num_slots(page, cnt);
 
   // Copy all slots to clear the space for the insertion.
-  for i in pos..cnt - 1 {
+  for i in (pos..cnt - 1).rev() {
     let off = get_slot(&page, i);
     set_slot(page, i + 1, off);
   }
@@ -665,8 +841,8 @@ fn internal_del_cell(page: &mut [u8], pos: usize) {
 #[inline]
 pub fn internal_can_insert(page: &[u8], key: &[u8]) -> bool {
   let max_cell_len = max_cell_len(page);
-  4 /* slot len */ + internal_key_len(key) <= max_cell_len ||
-    4 /* slot len */ + internal_overflow_key_len(key) <= max_cell_len
+  SLOT_SIZE + internal_key_len(key) <= max_cell_len ||
+    SLOT_SIZE + internal_overflow_key_len(key) <= max_cell_len
 }
 
 pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
@@ -675,7 +851,8 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut Stora
   let avail_len = max_cell_len(&page);
   let start;
   let mut end;
-  if 4 /* slot len */ + internal_key_len(key) <= avail_len {
+  // TODO: improve this if-else statement - we potentially only need one branch here.
+  if SLOT_SIZE + internal_key_len(key) <= avail_len {
     start = free_ptr(page) - internal_key_len(key);
     end = start;
     write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // ptr
@@ -687,7 +864,7 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut Stora
     write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // overflow pid
     end += 4;
     write_bytes!(&mut page[end..end + key.len()], key);
-  } else if 4 /* slot len */ + internal_overflow_key_len(key) <= avail_len {
+  } else if SLOT_SIZE + internal_overflow_key_len(key) <= avail_len {
     let prefix_len = key_prefix_len(key);
     let overflow_page = overflow_write(mngr, key);
 
@@ -910,14 +1087,16 @@ pub fn debug(pid: u32, page: &[u8]) {
             );
           } else {
             println!(
-              "    [{}] ({}) {:?}",
+              "    [{}] ({}) {:?} overflow (k: {}, pid: {})",
               i - 1,
               prefix_len,
               if prefix_len > max_print_len {
                 &buf[16..16 + max_print_len]
               } else {
                 &buf[16..16 + prefix_len]
-              }
+              },
+              key_len,
+              overflow_pid
             );
           }
         }
@@ -1248,5 +1427,230 @@ mod tests {
 
     assert_eq!(num_slots(&page), 0);
     assert_eq!(free_ptr(&page), page.len() - 4);
+  }
+
+  #[test]
+  fn test_page_merge_leaf() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut from = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+    internal_init(&mut parent);
+    leaf_init(&mut from);
+    leaf_init(&mut to);
+
+    leaf_insert(&mut to, 0, &[1], &[1], &mut mngr);
+
+    leaf_insert(&mut from, 0, &[2; 128], &[2; 1], &mut mngr);
+    leaf_insert(&mut from, 1, &[3], &[3], &mut mngr);
+    leaf_insert(&mut from, 2, &[4], &[4], &mut mngr);
+
+    internal_insert(&mut parent, 0, &[2; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // to
+    internal_set_ptr(&mut parent, 1, 2); // from
+
+    merge(&mut parent, 0, &mut to, &mut from, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 0);
+    assert_eq!(internal_get_ptr(&parent, 0), 1);
+
+    assert_eq!(num_slots(&to), 4);
+    assert_eq!(leaf_get_key(&to, 0, &mut mngr), &[1]);
+    assert_eq!(leaf_get_key(&to, 1, &mut mngr), &[2; 128]);
+    assert_eq!(leaf_get_key(&to, 2, &mut mngr), &[3]);
+    assert_eq!(leaf_get_key(&to, 3, &mut mngr), &[4]);
+
+    assert_eq!(num_slots(&from), 0);
+
+    let mut num_pages = 0;
+    for i in 0..mngr.num_pages() {
+      if mngr.is_accessible(i as u32) {
+        num_pages += 1;
+      }
+    }
+
+    assert_eq!(num_pages, 1); // only one overflow page remains
+  }
+
+  #[test]
+  fn test_page_merge_internal() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut from = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+    internal_init(&mut parent);
+    internal_init(&mut from);
+    internal_init(&mut to);
+
+    internal_set_ptr(&mut to, 0, 100);
+    internal_insert(&mut to, 0, &[1], &mut mngr);
+    internal_set_ptr(&mut to, 1, 101);
+    internal_insert(&mut to, 1, &[2], &mut mngr);
+    internal_set_ptr(&mut to, 2, 102);
+
+    internal_set_ptr(&mut from, 0, 201);
+    internal_insert(&mut from, 0, &[4; 128], &mut mngr);
+    internal_set_ptr(&mut from, 1, 202);
+    internal_insert(&mut from, 1, &[5], &mut mngr);
+    internal_set_ptr(&mut from, 2, 203);
+    internal_insert(&mut from, 2, &[6; 128], &mut mngr);
+    internal_set_ptr(&mut from, 3, 204);
+
+    internal_insert(&mut parent, 0, &[3; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // to
+    internal_set_ptr(&mut parent, 1, 2); // from
+
+    merge(&mut parent, 0, &mut to, &mut from, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 0);
+    assert_eq!(internal_get_ptr(&parent, 0), 1);
+
+    assert_eq!(num_slots(&to), 6);
+    assert_eq!(internal_get_key(&to, 0, &mut mngr), &[1]);
+    assert_eq!(internal_get_key(&to, 1, &mut mngr), &[2]);
+    assert_eq!(internal_get_key(&to, 2, &mut mngr), &[3; 128]);
+    assert_eq!(internal_get_key(&to, 3, &mut mngr), &[4; 128]);
+    assert_eq!(internal_get_key(&to, 4, &mut mngr), &[5]);
+    assert_eq!(internal_get_key(&to, 5, &mut mngr), &[6; 128]);
+
+    assert_eq!(num_slots(&from), 0);
+
+    assert_eq!(mngr.num_pages(), 3); // 3 overflow pages, one for each key
+  }
+
+  #[test]
+  fn test_page_steal_from_left_leaf() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut left = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+
+    internal_init(&mut parent);
+    leaf_init(&mut left);
+    leaf_init(&mut to);
+
+    leaf_insert(&mut left, 0, &[1; 128], &[1], &mut mngr);
+    leaf_insert(&mut left, 1, &[2; 128], &[2], &mut mngr);
+    leaf_insert(&mut to, 0, &[4; 128], &[4], &mut mngr);
+    internal_insert(&mut parent, 0, &[3; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // left
+    internal_set_ptr(&mut parent, 1, 2); // to
+
+    steal_from_left(&mut parent, 1, &mut to, &mut left, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 1);
+    assert_eq!(internal_get_key(&parent, 0, &mut mngr), &[2; 128]);
+    internal_delete(&mut parent, 0, &mut mngr); // all overflow pages must be unique
+
+    assert_eq!(num_slots(&left), 1);
+    assert_eq!(leaf_get_key(&left, 0, &mut mngr), &[1; 128]);
+
+    assert_eq!(num_slots(&to), 2);
+    assert_eq!(leaf_get_key(&to, 0, &mut mngr), &[2; 128]);
+    assert_eq!(leaf_get_key(&to, 1, &mut mngr), &[4; 128]);
+  }
+
+  #[test]
+  fn test_page_steal_from_left_internal() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut left = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+
+    internal_init(&mut parent);
+    internal_init(&mut left);
+    internal_init(&mut to);
+
+    internal_insert(&mut left, 0, &[1; 128], &mut mngr);
+    internal_insert(&mut left, 1, &[2; 128], &mut mngr);
+    internal_insert(&mut to, 0, &[4; 128], &mut mngr);
+    internal_insert(&mut parent, 0, &[3; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // left
+    internal_set_ptr(&mut parent, 1, 2); // to
+
+    steal_from_left(&mut parent, 1, &mut to, &mut left, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 1);
+    assert_eq!(internal_get_key(&parent, 0, &mut mngr), &[2; 128]);
+    internal_delete(&mut parent, 0, &mut mngr); // all overflow pages must be unique
+
+    assert_eq!(num_slots(&left), 1);
+    assert_eq!(internal_get_key(&left, 0, &mut mngr), &[1; 128]);
+
+    assert_eq!(num_slots(&to), 2);
+    assert_eq!(internal_get_key(&to, 0, &mut mngr), &[3; 128]);
+    assert_eq!(internal_get_key(&to, 1, &mut mngr), &[4; 128]);
+  }
+
+  #[test]
+  fn test_page_steal_from_right_leaf() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut right = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+
+    internal_init(&mut parent);
+    leaf_init(&mut right);
+    leaf_init(&mut to);
+
+    leaf_insert(&mut to, 0, &[1; 128], &[4], &mut mngr);
+    leaf_insert(&mut right, 0, &[3; 128], &[1], &mut mngr);
+    leaf_insert(&mut right, 1, &[4; 128], &[2], &mut mngr);
+    internal_insert(&mut parent, 0, &[2; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // to
+    internal_set_ptr(&mut parent, 1, 2); // right
+
+    steal_from_right(&mut parent, 0, &mut to, &mut right, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 1);
+    assert_eq!(internal_get_key(&parent, 0, &mut mngr), &[4; 128]);
+    internal_delete(&mut parent, 0, &mut mngr); // all overflow pages must be unique
+
+    assert_eq!(num_slots(&right), 1);
+    assert_eq!(leaf_get_key(&right, 0, &mut mngr), &[4; 128]);
+
+    assert_eq!(num_slots(&to), 2);
+    assert_eq!(leaf_get_key(&to, 0, &mut mngr), &[1; 128]);
+    assert_eq!(leaf_get_key(&to, 1, &mut mngr), &[3; 128]);
+  }
+
+  #[test]
+  fn test_page_steal_from_right_internal() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut parent = vec![0u8; mngr.page_size()];
+    let mut right = vec![0u8; mngr.page_size()];
+    let mut to = vec![0u8; mngr.page_size()];
+
+    internal_init(&mut parent);
+    internal_init(&mut right);
+    internal_init(&mut to);
+
+    //     parent
+    //   /        \
+    // to         right
+    //
+    internal_insert(&mut to, 0, &[1; 128], &mut mngr);
+    internal_insert(&mut right, 0, &[3; 128], &mut mngr);
+    internal_insert(&mut right, 1, &[4; 128], &mut mngr);
+    internal_insert(&mut parent, 0, &[2; 128], &mut mngr);
+    internal_set_ptr(&mut parent, 0, 1); // to
+    internal_set_ptr(&mut parent, 1, 2); // right
+
+    steal_from_right(&mut parent, 0, &mut to, &mut right, &mut mngr);
+
+    assert_eq!(num_slots(&parent), 1);
+    assert_eq!(internal_get_key(&parent, 0, &mut mngr), &[3; 128]);
+    internal_delete(&mut parent, 0, &mut mngr); // all overflow pages must be unique
+
+    assert_eq!(num_slots(&right), 1);
+    assert_eq!(internal_get_key(&right, 0, &mut mngr), &[4; 128]);
+
+    assert_eq!(num_slots(&to), 2);
+    assert_eq!(internal_get_key(&to, 0, &mut mngr), &[1; 128]);
+    assert_eq!(internal_get_key(&to, 1, &mut mngr), &[2; 128]);
   }
 }
