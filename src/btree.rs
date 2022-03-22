@@ -374,30 +374,6 @@ mod tests {
   use rand::prelude::*;
 
   #[test]
-  fn test_btree_put() {
-    let mut root = INVALID_PAGE_ID;
-    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
-    let num_keys = 100;
-    for i in 0..num_keys {
-      let key = vec![(num_keys -i) as u8; 1];
-      let val = vec![(num_keys - i) as u8; 1];
-      root = put(root, &key, &val, &mut mngr);
-    }
-
-    let mut tmp = vec![0u8; mngr.page_size()];
-    for pid in 0..mngr.num_pages() as u32 {
-      if mngr.is_accessible(pid) {
-        mngr.read(pid, &mut tmp);
-        pg::debug(pid, &tmp);
-      }
-    }
-
-    btree_debug(root, &mut mngr);
-
-    assert!(false, "OK");
-  }
-
-  #[test]
   fn test_btree_put_insert_empty() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
