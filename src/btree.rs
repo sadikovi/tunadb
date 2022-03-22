@@ -98,7 +98,7 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
               let skey = pg::internal_get_key(&page, spos, mngr);
 
               pg::internal_init(&mut right_page);
-              pg::internal_split(page, &mut right_page, spos);
+              pg::internal_split(page, &mut right_page, spos, mngr);
 
               // Decide where to insert the split key.
               // Note that there must always be enough space to insert the key in either
@@ -170,7 +170,7 @@ pub fn del(root: u32, key: &[u8], mngr: &mut StorageManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   match recur_del(root, key, mngr, &mut page) {
     BTreeDel::Empty => root,
-    BTreeDel::Update(pid, num_slots, key) => {
+    BTreeDel::Update(pid, num_slots, ..) => {
       if num_slots == 0 {
         // Btree is empty, delete the current page and return invalid pointer.
         mngr.mark_as_free(pid);
@@ -223,6 +223,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
           BTreeDel::Update(child_id, child_num_slots, next_smallest_key) => {
             pg::internal_set_ptr(page, ptr, child_id);
             // Update the next smallest key.
+            // TODO: optimise key comparison.
             if exists && pg::internal_get_key(&page, pos, mngr) == key {
               if let Some(smallest_key) = next_smallest_key.as_ref() {
                 // Update the key. Because we can only delete and re-insert the key, we also
@@ -242,6 +243,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
               if ptr > 0 {
                 let sib_id = pg::internal_get_ptr(&page, ptr - 1);
                 mngr.read(sib_id, &mut sib_page);
+
                 if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS {
                   pg::steal_from_left(page, ptr, &mut child_page, &mut sib_page, mngr);
 
@@ -268,18 +270,38 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
                     return BTreeDel::Update(new_sib_id, pg::num_slots(&sib_page), next_smallest_key);
                   }
                 }
-              }
+              } else if ptr < pg::num_slots(&page) {
+                // Check the left sibling page.
+                let sib_id = pg::internal_get_ptr(&page, ptr + 1);
+                mngr.read(sib_id, &mut sib_page);
 
-              // Check the right sibling page.
-              // if ptr < pg::num_slots(&page) {
-              //   mngr.read(pg::internal_get_ptr(&page, ptr + 1), &mut sib_page);
-              //   if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS {
-              //     pg::steal_from_right(page, ptr, &mut child_page, &mut sib_page, mngr);
-              //   } else if pg::can_merge(&child_page, &sib_page) {
-              //     // Merge the right sibling page into current.
-              //     pg::merge(page, ptr, &mut child_page, &mut sib_page, mngr);
-              //   }
-              // }
+                if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS {
+                  pg::steal_from_right(page, ptr, &mut child_page, &mut sib_page, mngr);
+
+                  let new_child_id = mngr.write_next(&mut child_page);
+                  let new_sib_id = mngr.write_next(&mut sib_page);
+                  pg::internal_set_ptr(page, ptr, new_child_id);
+                  pg::internal_set_ptr(page, ptr + 1, new_sib_id);
+
+                  mngr.mark_as_free(child_id);
+                  mngr.mark_as_free(sib_id);
+                } else if pg::can_merge(&child_page, &sib_page) {
+                  // Merge the right sibling page into current.
+                  pg::merge(page, ptr, &mut child_page, &mut sib_page, mngr);
+
+                  let new_child_id = mngr.write_next(&mut child_page);
+                  pg::internal_set_ptr(page, ptr, new_child_id);
+
+                  mngr.mark_as_free(child_id);
+                  mngr.mark_as_free(sib_id);
+
+                  // If the page is empty, return the child
+                  if pg::num_slots(&page) == 0 {
+                    mngr.mark_as_free(root);
+                    return BTreeDel::Update(new_child_id, pg::num_slots(&child_page), next_smallest_key);
+                  }
+                }
+              }
             }
 
             let new_num_slots = pg::num_slots(&page);
@@ -528,18 +550,20 @@ mod tests {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
 
-    for i in 0..100 {
-      root = put(root, &[i], &[i; 10], &mut mngr);
+    let num_keys = 255;
+
+    for i in 0..num_keys {
+      let key = if i % 10 == 0 { vec![i; 100] } else { vec![i] };
+      root = put(root, &key, &[i; 10], &mut mngr);
     }
+
     assert_ne!(root, INVALID_PAGE_ID);
-    for i in 0..100 {
-      root = del(root, &[i], &mut mngr);
+    for i in 0..num_keys {
+      let key = if i % 10 == 0 { vec![i; 100] } else { vec![i] };
+      root = del(root, &key, &mut mngr);
     }
 
     assert_eq!(root, INVALID_PAGE_ID);
-    for i in 0..100 {
-      assert_eq!(get(root, &[i], &mut mngr), None);
-    }
 
     mngr.sync();
     assert_eq!(mngr.num_pages(), 0);
@@ -553,17 +577,16 @@ mod tests {
     let num_keys = 255;
 
     for i in 0..num_keys {
-      root = put(root, &[i], &[i; 10], &mut mngr);
+      let key = if i % 10 == 0 { vec![i; 100] } else { vec![i] };
+      root = put(root, &key, &[i; 10], &mut mngr);
     }
     assert_ne!(root, INVALID_PAGE_ID);
     for i in (0..num_keys).rev() {
-      root = del(root, &[i], &mut mngr);
+      let key = if i % 10 == 0 { vec![i; 100] } else { vec![i] };
+      root = del(root, &key, &mut mngr);
     }
 
     assert_eq!(root, INVALID_PAGE_ID);
-    for i in 0..num_keys {
-      assert_eq!(get(root, &[i], &mut mngr), None);
-    }
 
     mngr.sync();
     assert_eq!(mngr.num_pages(), 0);
@@ -759,7 +782,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_unique_put_get_del() {
-    let mut input = random_unique_key_seq(200);
+    let mut input = random_unique_key_seq(250);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
@@ -781,16 +804,18 @@ mod tests {
       // let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), i.clone())).collect();
       // exp.sort();
       // assert_eq!(res, exp);
-      //
-      // shuffle(&mut input);
-      // for i in 0..input.len() {
-      //   assert_find(&tree, &[input[i].clone()], true);
-      //   tree = del(&tree, &input[i]).unwrap();
-      //   assert_find(&tree, &[input[i].clone()], false);
-      // }
-      //
-      // assert_page_consistency(&cache);
-      // assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+
+      shuffle(&mut input);
+      for i in 0..input.len() {
+        assert_find(root, &[input[i].clone()], &mut mngr, true);
+        root = del(root, &input[i], &mut mngr);
+        assert_find(root, &[input[i].clone()], &mut mngr, false);
+      }
+      assert_eq!(root, INVALID_PAGE_ID);
+
+      // Assert page consistency.
+      mngr.sync();
+      assert_eq!(mngr.num_pages(), 0, "Pages were not freed fully");
     }
   }
 
@@ -816,19 +841,21 @@ mod tests {
       // let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), i.clone())).collect();
       // exp.sort();
       // assert_eq!(res, exp);
-      //
-      // shuffle(&mut input);
-      //
-      // for i in 0..input.len() {
-      //   assert!(get(&tree, &input[i]).unwrap().is_some());
-      // }
-      //
-      // for i in 0..input.len() {
-      //   tree = del(&tree, &input[i]).unwrap();
-      // }
-      //
-      // assert_page_consistency(&cache);
-      // assert_eq!(get_page(&cache, tree.root_page_id).keys.len(), 0);
+
+      shuffle(&mut input);
+
+      for i in 0..input.len() {
+        assert!(get(root, &input[i], &mut mngr).is_some());
+      }
+
+      for i in 0..input.len() {
+        root = del(root, &input[i], &mut mngr);
+      }
+      assert_eq!(root, INVALID_PAGE_ID);
+
+      // Assert page consistency.
+      mngr.sync();
+      assert_eq!(mngr.num_pages(), 0, "Pages were not freed fully");
     }
   }
 

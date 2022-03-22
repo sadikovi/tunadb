@@ -291,7 +291,7 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
 
       // Update the key in parent.
       let key = leaf_get_key(&right, 0, mngr);
-      let pid = internal_get_ptr(&parent, to_ptr);
+      let pid = internal_get_ptr(&parent, to_ptr + 1);
       internal_delete(parent, to_ptr, mngr);
       internal_insert(parent, to_ptr, &key, mngr);
       internal_set_ptr(parent, to_ptr + 1, pid);
@@ -396,7 +396,7 @@ fn leaf_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
   set_num_slots(page, cnt);
 
   // Copy all slots to clear the space for the insertion.
-  for i in pos..cnt - 1 {
+  for i in (pos..cnt - 1).rev() {
     let off = get_slot(&page, i);
     set_slot(page, i + 1, off);
   }
@@ -606,9 +606,11 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bo
       while start < end {
         let pivot = (start + end - 1) >> 1;
         let pkey = leaf_get_prefix(page, pivot);
-        if key < pkey {
+        let plen = key.len().min(pkey.len());
+
+        if &key[..plen] < &pkey[..plen] {
           end = pivot;
-        } else if key > pkey {
+        } else if &key[..plen] > &pkey[..plen] {
           start = pivot + 1;
         } else if leaf_is_full_key(page, pivot) {
           // At this point, we are done since the keys match fully
@@ -908,7 +910,7 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
 
 // Moves keys and pointers from the left page to the right page based on the provided position.
 // All values after the position are moved to the right page.
-pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize) {
+pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize, mngr: &mut StorageManager) {
   assert_eq!(num_slots(&right), 0, "Internal split: right page is not empty");
 
   let cnt = num_slots(&left);
@@ -928,9 +930,13 @@ pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize) {
   internal_set_ptr(right, 0, ptr0);
 
   // Delete keys from the left page.
-  for i in (pos..cnt).rev() {
+  for i in (pos + 1..cnt).rev() {
     internal_del_cell(left, i);
   }
+
+  // Because we never include separator key, it does not end up in left nor right page.
+  // It is important to delete to ensure that overflow pages are freed.
+  internal_delete(left, pos, mngr);
 }
 
 #[inline]
@@ -1044,25 +1050,25 @@ pub fn debug(pid: u32, page: &[u8]) {
         if overflow_pid == INVALID_PAGE_ID {
           let key = &buf[16..16 + key_len];
           let val = &buf[16 + key_len..16 + key_len + val_len];
-          println!("  [{}] ({}) {:?} = ({}) {:?}",
+          println!("  [{}] {:?} (LEN {}) = {:?} (LEN {})",
             i,
-            key_len,
             if key_len > max_print_len { &key[..max_print_len] } else { &key[..key_len] },
-            val_len,
+            key_len,
             if val_len > max_print_len { &val[..max_print_len] } else { &val[..val_len] },
+            val_len,
           );
         } else {
           // It is an overflow key.
           let prefix = &buf[16..16 + prefix_len];
           println!(
-            "  [{}] ({}) {:?} = overflow (k: {}, v: {}, pid: {})",
+            "  [{}] {:?} (LEN {}) = overflow (key len: {}, val len: {}, pid: {})",
             i,
-            prefix_len,
             if prefix_len > max_print_len {
               &prefix[..max_print_len]
             } else {
               &prefix[..prefix_len]
             },
+            prefix_len,
             key_len,
             val_len,
             overflow_pid
@@ -1080,21 +1086,21 @@ pub fn debug(pid: u32, page: &[u8]) {
 
           if overflow_pid == INVALID_PAGE_ID {
             println!(
-              "    [{}] ({}) {:?}",
+              "    [{}] {:?} (LEN {})",
               i - 1,
-              key_len,
-              &buf[16..16 + key_len]
+              &buf[16..16 + key_len],
+              key_len
             );
           } else {
             println!(
-              "    [{}] ({}) {:?} overflow (k: {}, pid: {})",
+              "    [{}] {:?} (LEN {}) overflow (key len: {}, pid: {})",
               i - 1,
-              prefix_len,
               if prefix_len > max_print_len {
                 &buf[16..16 + max_print_len]
               } else {
                 &buf[16..16 + prefix_len]
               },
+              prefix_len,
               key_len,
               overflow_pid
             );
@@ -1392,7 +1398,7 @@ mod tests {
     internal_init(&mut right);
 
     let spos = 5;
-    internal_split(&mut page, &mut right, spos);
+    internal_split(&mut page, &mut right, spos, &mut mngr);
 
     assert_eq!(num_slots(&page), spos);
     for i in 0..num_slots(&page) {
@@ -1403,6 +1409,46 @@ mod tests {
     for i in 0..num_slots(&right) {
       assert_ne!(internal_get_ptr(&right, i), INVALID_PAGE_ID);
     }
+  }
+
+  #[test]
+  fn test_page_internal_split_separator_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+
+    let num_keys = 9;
+    let split_pos = 5;
+
+    internal_init(&mut page);
+    for i in 0..num_keys {
+      // Make sure all keys are created with overflow pages
+      if i == split_pos {
+        internal_insert(&mut page, i, &[i as u8; 128], &mut mngr);
+      } else {
+        internal_insert(&mut page, i, &[i as u8; 1], &mut mngr);
+      }
+    }
+    for i in 0..num_keys + 1 {
+      internal_set_ptr(&mut page, i, i as u32);
+    }
+
+    let mut right = vec![0u8; mngr.page_size()];
+    internal_init(&mut right);
+
+    internal_split(&mut page, &mut right, split_pos, &mut mngr);
+
+    assert_eq!(num_slots(&page), split_pos);
+    assert_eq!(num_slots(&right), num_keys - split_pos - 1);
+
+    for _ in 0..num_slots(&page) {
+      internal_delete(&mut page, 0, &mut mngr);
+    }
+    for _ in 0..num_slots(&right) {
+      internal_delete(&mut right, 0, &mut mngr);
+    }
+
+    mngr.sync();
+    assert_eq!(mngr.num_pages(), 0);
   }
 
   #[test]
