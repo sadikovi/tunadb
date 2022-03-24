@@ -244,9 +244,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
                 let sib_id = pg::internal_get_ptr(&page, ptr - 1);
                 mngr.read(sib_id, &mut sib_page);
 
-                if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS {
-                  pg::steal_from_left(page, ptr, &mut child_page, &mut sib_page, mngr);
-
+                if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS &&
+                    pg::steal_from_left(page, ptr, &mut child_page, &mut sib_page, mngr) {
                   let new_child_id = mngr.write_next(&mut child_page);
                   let new_sib_id = mngr.write_next(&mut sib_page);
                   pg::internal_set_ptr(page, ptr - 1, new_sib_id);
@@ -254,10 +253,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
 
                   mngr.mark_as_free(child_id);
                   mngr.mark_as_free(sib_id);
-                } else if pg::can_merge(&child_page, &sib_page) {
+                } else if pg::merge(page, ptr - 1, &mut sib_page, &mut child_page, mngr) {
                   // Merge current into the left sibling page.
-                  pg::merge(page, ptr - 1, &mut sib_page, &mut child_page, mngr);
-
                   let new_sib_id = mngr.write_next(&mut sib_page);
                   pg::internal_set_ptr(page, ptr - 1, new_sib_id);
 
@@ -275,9 +272,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
                 let sib_id = pg::internal_get_ptr(&page, ptr + 1);
                 mngr.read(sib_id, &mut sib_page);
 
-                if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS {
-                  pg::steal_from_right(page, ptr, &mut child_page, &mut sib_page, mngr);
-
+                if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS &&
+                    pg::steal_from_right(page, ptr, &mut child_page, &mut sib_page, mngr) {
                   let new_child_id = mngr.write_next(&mut child_page);
                   let new_sib_id = mngr.write_next(&mut sib_page);
                   pg::internal_set_ptr(page, ptr, new_child_id);
@@ -285,10 +281,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
 
                   mngr.mark_as_free(child_id);
                   mngr.mark_as_free(sib_id);
-                } else if pg::can_merge(&child_page, &sib_page) {
+                } else if pg::merge(page, ptr, &mut child_page, &mut sib_page, mngr) {
                   // Merge the right sibling page into current.
-                  pg::merge(page, ptr, &mut child_page, &mut sib_page, mngr);
-
                   let new_child_id = mngr.write_next(&mut child_page);
                   pg::internal_set_ptr(page, ptr, new_child_id);
 
@@ -337,12 +331,14 @@ fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut StorageManager, offs
       println!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "*", root, cnt, width = offset);
     },
     pg::PageType::Leaf => {
+      let min_key = pg::leaf_get_key(&page, 0, mngr);
+      let max_key = pg::leaf_get_key(&page, cnt - 1, mngr);
       println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
         "*",
         root,
         cnt,
-        pg::leaf_get_key(&page, 0, mngr),
-        pg::leaf_get_key(&page, cnt - 1, mngr),
+        &min_key[..min_key.len().min(8)],
+        &max_key[..max_key.len().min(8)],
         width = offset
       );
     },
@@ -350,18 +346,20 @@ fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut StorageManager, offs
       println!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "+", root, cnt, width = offset);
     },
     pg::PageType::Internal => {
+      let min_key = pg::internal_get_key(&page, 0, mngr);
+      let max_key = pg::internal_get_key(&page, cnt - 1, mngr);
       println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
         "+",
         root,
         cnt,
-        pg::internal_get_key(&page, 0, mngr),
-        pg::internal_get_key(&page, cnt - 1, mngr),
+        &min_key[..min_key.len().min(8)],
+        &max_key[..max_key.len().min(8)],
         width = offset
       );
       let cpage = page.to_vec(); // clone the buffer so recursive calls don't overwrite data
       for i in 0..cnt + 1 {
-        let ptr = pg::internal_get_ptr(&cpage, i);
-        btree_debug_recur(ptr, page, mngr, offset + 2);
+        let pid = pg::internal_get_ptr(&cpage, i);
+        btree_debug_recur(pid, page, mngr, offset + 2);
       }
     },
     _ => panic!("Cannot print btree: unexpected page type"),
@@ -721,18 +719,23 @@ mod tests {
 
   // BTree fuzz testing
 
-  // A sequence of random byte keys that may contain duplicate values
-  fn random_byte_key_seq(len: usize) -> Vec<Vec<u8>> {
+  // A sequence of random byte keys that may contain duplicate values.
+  fn random_byte_key_seq(cnt: usize, min_key_len: usize, max_key_len: usize) -> Vec<Vec<u8>> {
     let mut rng = thread_rng();
-    let mut input = Vec::with_capacity(len);
-    for _ in 0..len {
-      input.push(rng.gen::<[u8; 10]>().to_vec());
+    let mut input = Vec::with_capacity(cnt);
+    for _ in 0..cnt {
+      let key_len = rng.gen_range(min_key_len..max_key_len + 1);
+      let mut key = Vec::with_capacity(key_len);
+      for _ in 0..key_len {
+        key.push(rng.gen::<u8>());
+      }
+      input.push(key);
     }
     input
   }
 
-  // A sequence of unique integer values that are shuffled
-  fn random_unique_key_seq(len: usize) -> Vec<Vec<u8>> {
+  // A sequence of unique integer values that are shuffled.
+  fn random_unique_u32_seq(len: usize) -> Vec<Vec<u8>> {
     let mut input = Vec::with_capacity(len);
     for i in 0..len {
       input.push((i as u32).to_be_bytes().to_vec());
@@ -758,7 +761,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_unique_put_get_del() {
-    let mut input = random_unique_key_seq(250);
+    let mut input = random_unique_u32_seq(250);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
@@ -797,7 +800,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_byte_put_get_del() {
-    let mut input = random_byte_key_seq(500);
+    let mut input = random_byte_key_seq(500, 1, 256);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
@@ -837,7 +840,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_byte_put_range() {
-    let mut input = random_byte_key_seq(500);
+    let mut input = random_byte_key_seq(500, 4, 256);
     shuffle(&mut input);
 
     let exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), vec![])).collect();

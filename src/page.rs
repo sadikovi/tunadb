@@ -8,7 +8,7 @@ const SLOT_SIZE: usize = 4;
 // Minimal number of slots per page (mostly for leaf pages).
 pub const PAGE_MIN_SLOTS: usize = 4;
 // Max prefix size allowed for the key (in bytes).
-const PAGE_MAX_PREFIX_SIZE: usize = 32;
+const PAGE_MAX_PREFIX_SIZE: usize = 1;
 
 const FLAG_PAGE_IS_LEAF: u32 = 0x1;
 const FLAG_PAGE_IS_OVERFLOW: u32 = 0x2;
@@ -124,15 +124,22 @@ fn set_slot(page: &mut [u8], pos: usize, slot: u32) {
   write_u32!(&mut slots[pos * 4..pos * 4 + 4], slot);
 }
 
+// Returns free space for a leaf or an internal page.
+// Do not use this for overflow pages!
 #[inline]
 fn free_space(page: &[u8]) -> usize {
-  free_ptr(page) - PAGE_HEADER_SIZE - num_slots(page) * SLOT_SIZE
+  let fixed_len = PAGE_HEADER_SIZE + num_slots(page) * SLOT_SIZE;
+  let avail_len = free_ptr(page);
+  assert!(avail_len >= fixed_len, "Negative free space: {} < {}", avail_len, fixed_len);
+  avail_len - fixed_len
 }
 
-// Returns the maximum number of bytes available for a cell.
-// This takes 4 bytes of slot into account.
+// Returns the maximum number of bytes available for a cell in either a leaf or an internal page
+// assuming that we need to fit PAGE_MIN_SLOTS cells.
+//
+// This takes 4 bytes of slots into account, i.e. 4 * SLOT_SIZE is already accounted by.
 #[inline]
-fn max_cell_len(page: &[u8]) -> usize {
+fn max_slot_plus_cell_len(page: &[u8]) -> usize {
   free_space(page).min((page.len() - PAGE_HEADER_SIZE) / PAGE_MIN_SLOTS)
 }
 
@@ -142,34 +149,9 @@ fn key_prefix_len(key: &[u8]) -> usize {
   key.len().min(PAGE_MAX_PREFIX_SIZE)
 }
 
-// Returns true if two pages can be combined into one page, i.e. all of the slots fit within
-// one page: all slot addresses + keys + values/pointers.
-// Both pages must be of the same type.
-#[inline]
-pub fn can_merge(page1: &[u8], page2: &[u8]) -> bool {
-  assert_eq!(page_type(page1), page_type(page2), "Different page types");
-  assert_eq!(page1.len(), page2.len(), "Different page size");
-
-  let page_size = page1.len();
-  let total_len =
-    num_slots(page1) * SLOT_SIZE + page_size - free_ptr(page1) +
-    num_slots(page2) * SLOT_SIZE + page_size - free_ptr(page2) +
-    if page_type(page1) == PageType::Internal { SLOT_SIZE + internal_merge_key_len() } else { 0 };
-
-  total_len < page_size - PAGE_HEADER_SIZE
-}
-
-// TODO: merge with other internal_key_len methods.
-#[inline]
-fn internal_merge_key_len() -> usize {
-  4 /* ptr */ +
-  4 /* prefix len */ +
-  4 /* key len */ +
-  4 /* overflow pid */ +
-  PAGE_MAX_PREFIX_SIZE
-}
-
-// Merges two pages (leaf or internal) and updates parent (internal page).
+// Merges two pages (leaf or internal) and updates parent (internal page) or returns `false` if
+// pages cannot be merged. In case of `false`, no pages are modified.
+//
 // Moves all of the slots from the page `from` to the page `to` - it is assumed that we always
 // merge page on the right into the page on the left, e.g.
 //
@@ -182,11 +164,17 @@ fn internal_merge_key_len() -> usize {
 //
 // `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
 #[inline]
-pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut StorageManager) {
+pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut StorageManager) -> bool {
   assert_eq!(page_type(&to), page_type(&from), "Merge: different page type");
 
   match page_type(&to) {
     PageType::Leaf => {
+      // Space to move in `from` page = page size - free_ptr + num_slots * SLOT_SIZE.
+      if free_space(&to) < mngr.page_size() - free_space(&from) + PAGE_HEADER_SIZE {
+        // We cannot merge the pages: not enough space.
+        return false;
+      }
+
       let mut j = num_slots(&to);
       for i in 0..num_slots(&from) {
         let buf = leaf_get_cell(&from, i);
@@ -203,8 +191,18 @@ pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], m
       //    k0 k1        K0 K1
       // p0 p1 p2     P0 P1 P2
 
-      // Move the key from the parent to the curr.
+      // When checking merge conditions, we need to take into account the parent key that we move
+      // to the `to` page (this is only applicable to internal pages).
+
+      // This key/cell will be moved from the parent to the `to` page.
       let buf = internal_get_cell(&parent, to_ptr);
+      // See leaf page code for the explanation.
+      if free_space(&to) < mngr.page_size() - free_space(&from) + PAGE_HEADER_SIZE +
+          SLOT_SIZE + buf.len() {
+        // We cannot merge the pages: not enough space.
+        return false;
+      }
+
       let ppos = num_slots(&to);
       internal_ins_cell(to, ppos, buf);
       internal_set_ptr(to, ppos + 1, internal_get_ptr(from, 0));
@@ -222,36 +220,60 @@ pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], m
     },
     unsupported_type => panic!("Merge: unsupported page type: {:?}", unsupported_type),
   }
+  // Merge was successful.
+  true
 }
 
 // Moves one slot (key + value/key + ptr) from `left` page into `to` page, left page must have
 // at least one key.
-// `left` page is the page to the left of the `to` page.
-// `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+//   `left` page is the page to the left of the `to` page.
+//   `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+//
+// Returns `true` if steal from left can be performed, otherwise false. If `false` is returned,
+// it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut StorageManager) {
+pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut StorageManager) -> bool {
   assert_eq!(page_type(&to), page_type(&left), "Steal from left: different page type");
 
   let left_cnt = num_slots(&left);
+  assert!(left_cnt > 0, "Steal from left: left page is empty");
 
   match page_type(&to) {
     PageType::Leaf => {
       // Move the last cell from `left` to `to`.
-      let key = leaf_get_key(&left, left_cnt - 1, mngr);
       let buf = leaf_get_cell(&left, left_cnt - 1);
+
+      // Check if we can fit the cell in the `to` page.
+      if free_space(&to) < SLOT_SIZE + buf.len() {
+        return false;
+      }
+
+      let key = leaf_get_key(&left, left_cnt - 1, mngr);
+
       leaf_ins_cell(to, 0, buf);
       leaf_del_cell(left, left_cnt - 1);
 
       // Update the key in parent.
       let pid = internal_get_ptr(&parent, to_ptr);
+      // There must always be enough space to insert after a full delete,
+      // e.g. updates always succeed.
       internal_delete(parent, to_ptr - 1, mngr);
       internal_insert(parent, to_ptr - 1, &key, mngr);
       internal_set_ptr(parent, to_ptr, pid);
     },
     PageType::Internal => {
+      let parent_cell = internal_get_cell(&parent, to_ptr - 1); // moved from `parent` to `to`
+      let left_cell = internal_get_cell(&left, left_cnt - 1); // moved from `left` to `parent`
+
+      // Check if we can fit the cell in the `to` page and left cell in parent
+      // (after parent cell deletion).
+      if free_space(&to) < SLOT_SIZE + parent_cell.len() ||
+          free_space(&parent) + parent_cell.len() < left_cell.len() {
+        return false;
+      }
+
       // Update `to` page.
-      let buf = internal_get_cell(&parent, to_ptr - 1);
-      internal_ins_cell(to, 0, buf);
+      internal_ins_cell(to, 0, parent_cell);
       internal_set_ptr(to, 1, internal_get_ptr(to, 0));
 
       // Set ptr0 for `to` page.
@@ -260,8 +282,8 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
       // Update the key in parent.
       let pid = internal_get_ptr(&parent, to_ptr);
       internal_del_cell(parent, to_ptr - 1);
-      let buf = internal_get_cell(&left, left_cnt - 1);
-      internal_ins_cell(parent, to_ptr - 1, buf);
+
+      internal_ins_cell(parent, to_ptr - 1, left_cell);
       internal_set_ptr(parent, to_ptr, pid);
 
       // Update `left` page.
@@ -269,14 +291,19 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
     },
     unsupported_type => panic!("Steal from left: unsupported page type: {:?}", unsupported_type),
   }
+  // Operation was successful.
+  true
 }
 
 // Moves one slot (key + value/key + ptr) from `right` page into `to` page, right page must have
 // at least one key.
-// `right` page is the page to the right of the `to` page.
-// `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+//   `right` page is the page to the right of the `to` page.
+//   `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
+//
+// Returns `true` if steal from right can be performed, otherwise false. If `false` is returned,
+// it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut StorageManager) {
+pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut StorageManager) -> bool {
   assert_eq!(page_type(&to), page_type(&right), "Steal from right: different page type");
   assert!(num_slots(right) > 0, "Steal from right: right page is empty");
 
@@ -286,26 +313,43 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
     PageType::Leaf => {
       // Move the first cell from `right` to `to`.
       let buf = leaf_get_cell(&right, 0);
+
+      // Check if we can fit the cell in the `to` page.
+      if free_space(&to) < SLOT_SIZE + buf.len() {
+        return false;
+      }
+
       leaf_ins_cell(to, to_cnt, buf);
       leaf_del_cell(right, 0);
 
       // Update the key in parent.
       let key = leaf_get_key(&right, 0, mngr);
       let pid = internal_get_ptr(&parent, to_ptr + 1);
+      // There must always be enough space to insert after a full delete,
+      // e.g. updates always succeed.
       internal_delete(parent, to_ptr, mngr);
       internal_insert(parent, to_ptr, &key, mngr);
       internal_set_ptr(parent, to_ptr + 1, pid);
     },
     PageType::Internal => {
       // Update `to` by moving the parent cell to `to` page.
-      let buf = internal_get_cell(&parent, to_ptr);
-      internal_ins_cell(to, to_cnt, buf);
+      let parent_cell = internal_get_cell(&parent, to_ptr);
+      let right_cell = internal_get_cell(right, 0);
+
+      // Check if we can fit the cell in the `to` page and left cell in parent
+      // (after parent cell deletion).
+      if free_space(&to) < SLOT_SIZE + parent_cell.len() ||
+          free_space(&parent) + parent_cell.len() < right_cell.len() {
+        return false;
+      }
+
+      internal_ins_cell(to, to_cnt, parent_cell);
       internal_set_ptr(to, to_cnt + 1, internal_get_ptr(right, 0));
 
       // Update the key in parent.
       let pid = internal_get_ptr(parent, to_ptr + 1);
       internal_del_cell(parent, to_ptr);
-      internal_ins_cell(parent, to_ptr, internal_get_cell(right, 0));
+      internal_ins_cell(parent, to_ptr, right_cell);
       internal_set_ptr(parent, to_ptr + 1, pid);
 
       // Update `right` page.
@@ -314,6 +358,8 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
     },
     unsupported_type => panic!("Steal from right: unsupported page type: {:?}", unsupported_type),
   }
+  // Operation was successful.
+  true
 }
 
 //==========
@@ -445,19 +491,19 @@ fn leaf_del_cell(page: &mut [u8], pos: usize) {
 // 2. If key + val do not fit in the page, calculate overflow size and check.
 #[inline]
 pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
-  let max_cell_len = max_cell_len(page);
-  SLOT_SIZE + leaf_cell_len(key, val) <= max_cell_len ||
-    SLOT_SIZE + leaf_cell_overflow_len(key) <= max_cell_len
+  let max_len = max_slot_plus_cell_len(page);
+  SLOT_SIZE + leaf_cell_len(key, val) <= max_len ||
+    SLOT_SIZE + leaf_cell_overflow_len(key) <= max_len
 }
 
 pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   // Insert the bytes into the page.
-  let max_cell_len = max_cell_len(&page);
+  let max_len = max_slot_plus_cell_len(&page);
   let start;
   let mut end;
-  if 4 /* slot */ + leaf_cell_len(key, val) <= max_cell_len {
+  if SLOT_SIZE + leaf_cell_len(key, val) <= max_len {
     start = free_ptr(page) - leaf_cell_len(key, val);
     end = start;
     write_u32!(&mut page[end..end + 4], key.len() as u32); // prefix len
@@ -471,7 +517,7 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
     write_bytes!(&mut page[end..end + key.len()], key); // key
     end += key.len();
     write_bytes!(&mut page[end..end + val.len()], val); // val
-  } else if SLOT_SIZE + leaf_cell_overflow_len(key) <= max_cell_len {
+  } else if SLOT_SIZE + leaf_cell_overflow_len(key) <= max_len {
     let prefix_len = key_prefix_len(key);
 
     let overflow_page = if prefix_len == key.len() {
@@ -612,7 +658,7 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bo
           end = pivot;
         } else if &key[..plen] > &pkey[..plen] {
           start = pivot + 1;
-        } else if leaf_is_full_key(page, pivot) {
+        } else if leaf_is_full_key(page, pivot) && pkey.len() == key.len() {
           // At this point, we are done since the keys match fully
           return (pivot, true);
         } else {
@@ -633,11 +679,13 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bo
       while start < end {
         let pivot = (start + end - 1) >> 1;
         let pkey = internal_get_prefix(page, pivot);
-        if key < pkey {
+        let plen = key.len().min(pkey.len());
+
+        if &key[..plen] < &pkey[..plen] {
           end = pivot;
-        } else if key > pkey {
+        } else if &key[..plen] > &pkey[..plen] {
           start = pivot + 1;
-        } else if internal_is_full_key(page, pivot) {
+        } else if internal_is_full_key(page, pivot) && pkey.len() == key.len() {
           // At this point, we are done since the keys match fully
           return (pivot, true);
         } else {
@@ -789,7 +837,12 @@ fn internal_get_cell(page: &[u8], pos: usize) -> &[u8] {
 
 #[inline]
 fn internal_ins_cell(page: &mut [u8], pos: usize, buf: &[u8]) {
-  assert!(buf.len() <= free_space(&page), "internal_ins_cell: not enough space to insert the cell");
+  assert!(
+    buf.len() <= free_space(&page),
+    "internal_ins_cell: not enough space to insert the cell, free {} buf {}",
+    free_space(&page),
+    buf.len()
+  );
 
   // Update the count to reflect insertion.
   let cnt = num_slots(&page) + 1;
@@ -842,19 +895,19 @@ fn internal_del_cell(page: &mut [u8], pos: usize) {
 
 #[inline]
 pub fn internal_can_insert(page: &[u8], key: &[u8]) -> bool {
-  let max_cell_len = max_cell_len(page);
-  SLOT_SIZE + internal_key_len(key) <= max_cell_len ||
-    SLOT_SIZE + internal_overflow_key_len(key) <= max_cell_len
+  let max_len = max_slot_plus_cell_len(page);
+  SLOT_SIZE + internal_key_len(key) <= max_len ||
+    SLOT_SIZE + internal_overflow_key_len(key) <= max_len
 }
 
 pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
-  let avail_len = max_cell_len(&page);
+  let max_len = max_slot_plus_cell_len(&page);
   let start;
   let mut end;
   // TODO: improve this if-else statement - we potentially only need one branch here.
-  if SLOT_SIZE + internal_key_len(key) <= avail_len {
+  if SLOT_SIZE + internal_key_len(key) <= max_len {
     start = free_ptr(page) - internal_key_len(key);
     end = start;
     write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // ptr
@@ -866,7 +919,7 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut Stora
     write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // overflow pid
     end += 4;
     write_bytes!(&mut page[end..end + key.len()], key);
-  } else if SLOT_SIZE + internal_overflow_key_len(key) <= avail_len {
+  } else if SLOT_SIZE + internal_overflow_key_len(key) <= max_len {
     let prefix_len = key_prefix_len(key);
     let overflow_page = overflow_write(mngr, key);
 
@@ -882,7 +935,12 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut Stora
     end += 4;
     write_bytes!(&mut page[end..end + prefix_len], key);
   } else {
-    panic!("Internal page: not enough space to insert");
+    panic!(
+      "Internal page: not enough space to insert, avail {}, key len {}, overflow key len {}",
+      max_len,
+      internal_key_len(key),
+      internal_overflow_key_len(key)
+    );
   }
 
   // Clear the space for position and insert new slot.
