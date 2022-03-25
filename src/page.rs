@@ -1146,7 +1146,11 @@ pub fn debug(pid: u32, page: &[u8]) {
             println!(
               "    [{}] {:?} (LEN {})",
               i - 1,
-              &buf[16..16 + key_len],
+              if key_len > max_print_len {
+                &buf[16..16 + max_print_len]
+              } else {
+                &buf[16..16 + key_len]
+              },
               key_len
             );
           } else {
@@ -1521,7 +1525,7 @@ mod tests {
     internal_insert(&mut page, 3, &[4; 128], &mut mngr);
     internal_insert(&mut page, 4, &[5; 4], &mut mngr);
 
-    assert_eq!(free_space(&page), 0);
+    assert!(free_space(&page) > 0);
     assert_eq!(num_slots(&page), 5);
 
     for i in 0..5 {

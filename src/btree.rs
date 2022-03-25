@@ -171,12 +171,24 @@ pub fn del(root: u32, key: &[u8], mngr: &mut StorageManager) -> u32 {
   match recur_del(root, key, mngr, &mut page) {
     BTreeDel::Empty => root,
     BTreeDel::Update(pid, num_slots, ..) => {
-      if num_slots == 0 {
-        // Btree is empty, delete the current page and return invalid pointer.
-        mngr.mark_as_free(pid);
-        INVALID_PAGE_ID
-      } else {
+      if num_slots > 0 {
         pid
+      } else {
+        mngr.read(pid, &mut page);
+        match pg::page_type(&page) {
+          pg::PageType::Internal => {
+            // Current node is empty, return the child page instead.
+            let next_pid = pg::internal_get_ptr(&page, 0);
+            mngr.mark_as_free(pid);
+            next_pid
+          },
+          pg::PageType::Leaf => {
+            // Btree is empty, delete the current page and return invalid pointer.
+            mngr.mark_as_free(pid);
+            INVALID_PAGE_ID
+          },
+          unsupported_type => panic!("Invalid page type: {:?}", unsupported_type),
+        }
       }
     },
   }
@@ -260,12 +272,6 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
 
                   mngr.mark_as_free(child_id);
                   mngr.mark_as_free(sib_id);
-
-                  // If the page is empty, return the child
-                  if pg::num_slots(&page) == 0 {
-                    mngr.mark_as_free(root);
-                    return BTreeDel::Update(new_sib_id, pg::num_slots(&sib_page), next_smallest_key);
-                  }
                 }
               } else if ptr < pg::num_slots(&page) {
                 // Check the left sibling page.
@@ -288,12 +294,6 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
 
                   mngr.mark_as_free(child_id);
                   mngr.mark_as_free(sib_id);
-
-                  // If the page is empty, return the child
-                  if pg::num_slots(&page) == 0 {
-                    mngr.mark_as_free(root);
-                    return BTreeDel::Update(new_child_id, pg::num_slots(&child_page), next_smallest_key);
-                  }
                 }
               }
             }
@@ -587,6 +587,77 @@ mod tests {
   }
 
   #[test]
+  fn test_btree_del_merge_of_leaf_nodes() {
+    // This test verifies that the issue of incorrect types when merging is fixed:
+    //   left: `Leaf`,
+    //  right: `Internal`: Merge: different page type', src/page.rs:172:3
+
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    let mut page = vec![0u8; mngr.page_size()];
+
+    // Leaf 1
+    pg::leaf_init(&mut page);
+    pg::leaf_insert(&mut page, 0, &[1], &[1], &mut mngr);
+    pg::leaf_insert(&mut page, 1, &[2], &[2], &mut mngr);
+    let leaf_1 = mngr.write_next(&page);
+
+    // Leaf 2
+    pg::leaf_init(&mut page);
+    pg::leaf_insert(&mut page, 0, &[4], &[4], &mut mngr);
+    pg::leaf_insert(&mut page, 1, &[5], &[5], &mut mngr);
+    let leaf_2 = mngr.write_next(&page);
+
+    // Internal 1
+    pg::internal_init(&mut page);
+    pg::internal_set_ptr(&mut page, 0, leaf_1);
+    pg::internal_insert(&mut page, 0, &[3], &mut mngr);
+    pg::internal_set_ptr(&mut page, 1, leaf_2);
+    let internal_1 = mngr.write_next(&page);
+
+    // Leaf 3
+    pg::leaf_init(&mut page);
+    pg::leaf_insert(&mut page, 0, &[6], &[6], &mut mngr);
+    pg::leaf_insert(&mut page, 1, &[7], &[7], &mut mngr);
+    let leaf_3 = mngr.write_next(&page);
+
+    // Leaf 4
+    pg::leaf_init(&mut page);
+    pg::leaf_insert(&mut page, 0, &[9], &[9], &mut mngr);
+    pg::leaf_insert(&mut page, 1, &[10], &[10], &mut mngr);
+    let leaf_4 = mngr.write_next(&page);
+
+    // Internal 2
+    pg::internal_init(&mut page);
+    pg::internal_set_ptr(&mut page, 0, leaf_3);
+    pg::internal_insert(&mut page, 0, &[8], &mut mngr);
+    pg::internal_set_ptr(&mut page, 1, leaf_4);
+    let internal_2 = mngr.write_next(&page);
+
+    // Root
+    pg::internal_init(&mut page);
+    pg::internal_set_ptr(&mut page, 0, internal_1);
+    pg::internal_insert(&mut page, 0, &[6], &mut mngr);
+    pg::internal_set_ptr(&mut page, 1, internal_2);
+    let mut root = mngr.write_next(&page);
+
+    // Check that the tree structure is correct.
+    for &i in &[1, 2, 4, 5, 6, 7, 9, 10] {
+      assert_eq!(get(root, &[i], &mut mngr), Some(vec![i]));
+    }
+
+    for i in 0..20 {
+      root = del(root, &[i], &mut mngr);
+    }
+
+    assert_eq!(root, INVALID_PAGE_ID);
+
+    // Assert page consistency.
+    mngr.sync();
+    assert_eq!(mngr.num_pages(), 0, "Pages were not freed fully");
+  }
+
+  #[test]
   fn test_btree_get_empty() {
     let root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
@@ -761,7 +832,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_unique_put_get_del() {
-    let mut input = random_unique_u32_seq(250);
+    let mut input = random_unique_u32_seq(500);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
