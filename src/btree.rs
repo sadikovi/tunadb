@@ -463,6 +463,7 @@ fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut StorageManager, offs
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::HashSet;
   use rand::prelude::*;
 
   #[test]
@@ -911,6 +912,16 @@ mod tests {
     input
   }
 
+  // Returns a distinct sequence of elements from the input.
+  // Output is not sorted, order is not guaranteed, output length <= input length.
+  fn distinct(input: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut set = HashSet::new();
+    for elem in input {
+      set.insert(elem.to_vec());
+    }
+    set.into_iter().collect()
+  }
+
   // A sequence of unique integer values that are shuffled.
   fn random_unique_u32_seq(len: usize) -> Vec<Vec<u8>> {
     let mut input = Vec::with_capacity(len);
@@ -992,8 +1003,13 @@ mod tests {
 
       let iter = BTreeIter::new(root, None, None, &mut mngr);
       let res: Vec<(Vec<u8>, Vec<u8>)> = iter.collect();
-      let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), i.clone())).collect();
+
+      // BTree implementation only stores unique key-value pairs, duplicates are replaced,
+      // that is why we need to use distinct for assertion.
+      let mut exp: Vec<(Vec<u8>, Vec<u8>)> =
+        distinct(&input).iter().map(|i| (i.clone(), i.clone())).collect();
       exp.sort();
+
       assert_eq!(res, exp);
 
       shuffle(&mut input);
@@ -1018,7 +1034,10 @@ mod tests {
     let mut input = random_byte_key_seq(100, 4, 256);
     shuffle(&mut input);
 
-    let mut exp: Vec<(Vec<u8>, Vec<u8>)> = input.iter().map(|i| (i.clone(), vec![])).collect();
+    // BTree implementation only stores unique key-value pairs, duplicates are replaced,
+    // that is why we need to use distinct for assertion.
+    let mut exp: Vec<(Vec<u8>, Vec<u8>)> =
+      distinct(&input).iter().map(|i| (i.clone(), vec![])).collect();
 
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
