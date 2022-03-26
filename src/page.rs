@@ -255,10 +255,7 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
 
       // Update the key in parent.
       let pid = internal_get_ptr(&parent, to_ptr);
-      // There must always be enough space to insert after a full delete,
-      // e.g. updates always succeed.
-      internal_delete(parent, to_ptr - 1, mngr);
-      internal_insert(parent, to_ptr - 1, &key, mngr);
+      internal_update(parent, to_ptr - 1, &key, mngr);
       internal_set_ptr(parent, to_ptr, pid);
     },
     PageType::Internal => {
@@ -325,10 +322,7 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
       // Update the key in parent.
       let key = leaf_get_key(&right, 0, mngr);
       let pid = internal_get_ptr(&parent, to_ptr + 1);
-      // There must always be enough space to insert after a full delete,
-      // e.g. updates always succeed.
-      internal_delete(parent, to_ptr, mngr);
-      internal_insert(parent, to_ptr, &key, mngr);
+      internal_update(parent, to_ptr, &key, mngr);
       internal_set_ptr(parent, to_ptr + 1, pid);
     },
     PageType::Internal => {
@@ -496,7 +490,15 @@ pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
     SLOT_SIZE + leaf_cell_overflow_len(key) <= max_len
 }
 
+#[inline]
 pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
+  leaf_insert0(page, pos, key, val, mngr, false);
+}
+
+// Internal method to insert a key and value in a leaf page.
+// When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
+//   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
+fn leaf_insert0(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager, adjust_prefix: bool) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   // Insert the bytes into the page.
@@ -532,6 +534,44 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
     };
 
     start = free_ptr(page) - leaf_cell_overflow_len(key);
+    end = start;
+    write_u32!(&mut page[end..end + 4], prefix_len as u32); // prefix len
+    end += 4;
+    write_u32!(&mut page[end..end + 4], key.len() as u32); // key len
+    end += 4;
+    write_u32!(&mut page[end..end + 4], val.len() as u32); // val len
+    end += 4;
+    write_u32!(&mut page[end..end + 4], overflow_page); // overflow page
+    end += 4;
+    write_bytes!(&mut page[end..end + prefix_len], &key[..prefix_len]);
+  } else if adjust_prefix {
+    // This branch is used for updates.
+    //
+    // When updating the cell in a leaf page, we may need to adjust prefix to insert into the same
+    // space as the original key-value pair. Note that we still expect SLOT_SIZE + fixed part to
+    // be available.
+    let fixed_part_len = leaf_cell_len(&[], &[]); // length of the fixed part
+    let reserved_len = SLOT_SIZE + fixed_part_len;
+
+    if reserved_len > max_len {
+      panic!(
+        "Leaf page: not enough space in update mode, expected {}, available {}",
+        reserved_len,
+        max_len
+      );
+    }
+
+    let prefix_len = max_len - reserved_len;
+
+    // We know that the key did not fit within the page, so we need to write both key and value
+    // to overflow pages.
+    // Write both key and value to the overflow pages.
+    let mut data = Vec::with_capacity(key.len() + val.len());
+    data.extend_from_slice(key);
+    data.extend_from_slice(val);
+    let overflow_page = overflow_write(mngr, &data);
+
+    start = free_ptr(page) - fixed_part_len - prefix_len;
     end = start;
     write_u32!(&mut page[end..end + 4], prefix_len as u32); // prefix len
     end += 4;
@@ -593,6 +633,11 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
     overflow_delete(mngr, overflow_pid);
   }
   leaf_del_cell(page, pos);
+}
+
+pub fn leaf_update(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
+  leaf_delete(page, pos, mngr);
+  leaf_insert0(page, pos, key, val, mngr, true);
 }
 
 // Returns true if prefix == key.
@@ -903,7 +948,15 @@ pub fn internal_can_insert(page: &[u8], key: &[u8]) -> bool {
     SLOT_SIZE + internal_overflow_key_len(key) <= max_len
 }
 
+#[inline]
 pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
+  internal_insert0(page, pos, key, mngr, false);
+}
+
+// Internal method to insert a key.
+// When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
+//   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
+fn internal_insert0(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager, adjust_prefix: bool) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   let max_len = max_slot_plus_cell_len(&page);
@@ -927,6 +980,37 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut Stora
     let overflow_page = overflow_write(mngr, key);
 
     start = free_ptr(page) - internal_overflow_key_len(key);
+    end = start;
+    write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // ptr
+    end += 4;
+    write_u32!(&mut page[end..end + 4], prefix_len as u32); // prefix len <= key len
+    end += 4;
+    write_u32!(&mut page[end..end + 4], key.len() as u32); // key len
+    end += 4;
+    write_u32!(&mut page[end..end + 4], overflow_page); // overflow pid
+    end += 4;
+    write_bytes!(&mut page[end..end + prefix_len], key);
+  } else if adjust_prefix {
+    // This branch is used for updates.
+    //
+    // We could not insert the key for the allowed prefix size so we need to adjust the prefix
+    // depending on the available free space. Note that we still expect SLOT_SIZE + fixed part to
+    // be available.
+    let fixed_part_len = internal_key_len(&[]); // length of the fixed part
+    let reserved_len = SLOT_SIZE + fixed_part_len;
+
+    if reserved_len > max_len {
+      panic!(
+        "Internal page: not enough space in update mode, expected {}, available {}",
+        reserved_len,
+        max_len
+      );
+    }
+
+    let prefix_len = max_len - reserved_len;
+    let overflow_page = overflow_write(mngr, key);
+
+    start = free_ptr(page) - fixed_part_len - prefix_len;
     end = start;
     write_u32!(&mut page[end..end + 4], INVALID_PAGE_ID); // ptr
     end += 4;
@@ -967,6 +1051,11 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
     overflow_delete(mngr, overflow_pid);
   }
   internal_del_cell(page, pos);
+}
+
+pub fn internal_update(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
+  internal_delete(page, pos, mngr);
+  internal_insert0(page, pos, key, mngr, true);
 }
 
 // Moves keys and pointers from the left page to the right page based on the provided position.
@@ -1337,8 +1426,7 @@ mod tests {
     let key = vec![1; 1]; // key must be the same
     let val = vec![111; 128]; // value causes an overflow
 
-    leaf_delete(&mut page, 1, &mut mngr);
-    leaf_insert(&mut page, 1, &key, &val, &mut mngr);
+    leaf_update(&mut page, 1, &key, &val, &mut mngr);
 
     // Assert that the cell is an overflow cell.
     let buf = leaf_get_cell(&page, 1);
@@ -1348,6 +1436,51 @@ mod tests {
     assert_eq!(num_slots(&page), 4);
     assert_eq!(leaf_get_key(&page, 1, &mut mngr), key);
     assert_eq!(leaf_get_val(&page, 1, &mut mngr), val);
+  }
+
+  #[test]
+  fn test_page_leaf_update_smaller_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    leaf_insert(&mut page, 0, &[1; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 1, &[2; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 2, &[3; 8], &[], &mut mngr);
+    leaf_insert(&mut page, 3, &[4; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 4, &[5; 32], &[], &mut mngr);
+
+    // Replace the smallest key with a large one.
+    leaf_update(&mut page, 2, &[7; 1024], &[8; 1024], &mut mngr);
+
+    assert_eq!(leaf_get_key(&page, 2, &mut mngr), vec![7; 1024]);
+    assert_eq!(leaf_get_val(&page, 2, &mut mngr), vec![8; 1024]);
+  }
+
+  #[test]
+  fn test_page_leaf_update_zero_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    leaf_insert(&mut page, 0, &[0; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 1, &[1; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 2, &[], &[], &mut mngr);
+    leaf_insert(&mut page, 3, &[3; 32], &[], &mut mngr);
+    leaf_insert(&mut page, 4, &[4; 10], &[], &mut mngr);
+    leaf_insert(&mut page, 5, &[5; 10], &[], &mut mngr);
+
+    assert_eq!(num_slots(&page), 6);
+    assert_eq!(free_space(&page), 0);
+
+    // Replace the smallest key with a large one.
+    leaf_update(&mut page, 2, &[2; 1024], &[2; 1024], &mut mngr);
+
+    assert_eq!(num_slots(&page), 6);
+    assert_eq!(free_space(&page), 0);
+    assert_eq!(leaf_get_key(&page, 2, &mut mngr), vec![2; 1024]);
+    assert_eq!(leaf_get_val(&page, 2, &mut mngr), vec![2; 1024]);
+    assert_eq!(bsearch(&page, &[2; 1024], &mut mngr), (2, true));
   }
 
   #[test]
@@ -1364,14 +1497,12 @@ mod tests {
     let free_space_left = free_space(&page);
     assert_eq!(free_space_left, 8);
 
-    leaf_delete(&mut page, 0, &mut mngr);
-    leaf_insert(&mut page, 0, &[], &vec![2u8; 8], &mut mngr);
+    leaf_update(&mut page, 0, &[], &vec![2u8; 8], &mut mngr);
 
     assert_eq!(free_space(&page), free_space_left);
     assert_eq!(leaf_get_val(&page, 0, &mut mngr), vec![2u8; 8]);
 
-    leaf_delete(&mut page, 0, &mut mngr);
-    leaf_insert(&mut page, 0, &[], &vec![2u8; 128], &mut mngr);
+    leaf_update(&mut page, 0, &[], &vec![2u8; 128], &mut mngr);
 
     assert_eq!(free_space(&page), free_space_left);
     assert_eq!(leaf_get_val(&page, 0, &mut mngr), vec![2u8; 128]);
@@ -1441,6 +1572,53 @@ mod tests {
 
     assert_eq!(internal_get_prefix(&page, 1), &[4; PAGE_MAX_PREFIX_SIZE]);
     assert_eq!(internal_get_key(&page, 1, &mut mngr), vec![4; 128]);
+  }
+
+  #[test]
+  fn test_page_internal_update_smaller_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    internal_insert(&mut page, 0, &[1; 31], &mut mngr);
+    internal_insert(&mut page, 1, &[2; 30], &mut mngr);
+    internal_insert(&mut page, 2, &[3; 4], &mut mngr);
+    internal_insert(&mut page, 3, &[4; 30], &mut mngr);
+    internal_insert(&mut page, 4, &[5; 30], &mut mngr);
+
+    // Replace the smallest key with a large one.
+    internal_update(&mut page, 2, &[9; 1024], &mut mngr);
+
+    assert_eq!(internal_get_key(&page, 0, &mut mngr), vec![1; 31]);
+    assert_eq!(internal_get_key(&page, 1, &mut mngr), vec![2; 30]);
+    assert_eq!(internal_get_key(&page, 2, &mut mngr), vec![9; 1024]);
+    assert_eq!(internal_get_key(&page, 3, &mut mngr), vec![4; 30]);
+    assert_eq!(internal_get_key(&page, 4, &mut mngr), vec![5; 30]);
+  }
+
+  #[test]
+  fn test_page_internal_update_zero_key() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    internal_insert(&mut page, 0, &[0; 32], &mut mngr);
+    internal_insert(&mut page, 1, &[1; 32], &mut mngr);
+    internal_insert(&mut page, 2, &[], &mut mngr);
+    internal_insert(&mut page, 3, &[3; 32], &mut mngr);
+    internal_insert(&mut page, 4, &[4; 10], &mut mngr);
+    internal_insert(&mut page, 5, &[5; 6], &mut mngr);
+
+    assert_eq!(num_slots(&page), 6);
+    assert_eq!(free_space(&page), 0);
+
+    // Replace the smallest key with a large one.
+    internal_update(&mut page, 2, &[2; 1024], &mut mngr);
+
+    assert_eq!(num_slots(&page), 6);
+    assert_eq!(free_space(&page), 0);
+    assert_eq!(internal_get_key(&page, 2, &mut mngr), vec![2; 1024]);
+    assert_eq!(bsearch(&page, &[2; 1024], &mut mngr), (2, true));
   }
 
   #[test]

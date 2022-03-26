@@ -37,10 +37,10 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
       pg::PageType::Leaf => {
         if exists || pg::leaf_can_insert(&page, key, val) {
           if exists {
-            // TODO: optimise page updates
-            pg::leaf_delete(page, pos, mngr);
+            pg::leaf_update(page, pos, key, val, mngr);
+          } else {
+            pg::leaf_insert(page, pos, key, val, mngr);
           }
-          pg::leaf_insert(page, pos, key, val, mngr);
 
           let new_root = mngr.write_next(&page);
           mngr.mark_as_free(root);
@@ -241,8 +241,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
                 // Update the key. Because we can only delete and re-insert the key, we also
                 // need to update the pointer that is stored together with the key.
                 let uptr = pg::internal_get_ptr(page, pos + 1);
-                pg::internal_delete(page, pos, mngr);
-                pg::internal_insert(page, pos, &smallest_key, mngr);
+                pg::internal_update(page, pos, &smallest_key, mngr);
                 pg::internal_set_ptr(page, pos + 1, uptr);
               }
             }
