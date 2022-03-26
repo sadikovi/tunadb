@@ -832,7 +832,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_unique_put_get_del() {
-    let mut input = random_unique_u32_seq(500);
+    let mut input = random_unique_u32_seq(200);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
@@ -871,7 +871,7 @@ mod tests {
 
   #[test]
   fn test_btree_fuzz_byte_put_get_del() {
-    let mut input = random_byte_key_seq(500, 1, 256);
+    let mut input = random_byte_key_seq(300, 1, 256);
 
     for &page_size in &[256, 512, 1024] {
       shuffle(&mut input);
