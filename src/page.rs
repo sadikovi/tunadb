@@ -8,7 +8,7 @@ const SLOT_SIZE: usize = 4;
 // Minimal number of slots per page (mostly for leaf pages).
 pub const PAGE_MIN_SLOTS: usize = 4;
 // Max prefix size allowed for the key (in bytes).
-const PAGE_MAX_PREFIX_SIZE: usize = 1;
+const PAGE_MAX_PREFIX_SIZE: usize = 16;
 
 const FLAG_PAGE_IS_LEAF: u32 = 0x1;
 const FLAG_PAGE_IS_OVERFLOW: u32 = 0x2;
@@ -218,7 +218,7 @@ pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], m
       // Delete the link to `from` page from the parent.
       internal_del_cell(parent, to_ptr);
     },
-    unsupported_type => panic!("Merge: unsupported page type: {:?}", unsupported_type),
+    invalid_type => panic!("Merge: invalid page type: {:?}", invalid_type),
   }
   // Merge was successful.
   true
@@ -289,7 +289,7 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
       // Update `left` page.
       internal_del_cell(left, left_cnt - 1);
     },
-    unsupported_type => panic!("Steal from left: unsupported page type: {:?}", unsupported_type),
+    invalid_type => panic!("Steal from left: invalid page type: {:?}", invalid_type),
   }
   // Operation was successful.
   true
@@ -356,7 +356,7 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
       internal_set_ptr(right, 0, internal_get_ptr(right, 1));
       internal_del_cell(right, 0);
     },
-    unsupported_type => panic!("Steal from right: unsupported page type: {:?}", unsupported_type),
+    invalid_type => panic!("Steal from right: invalid page type: {:?}", invalid_type),
   }
   // Operation was successful.
   true
@@ -543,7 +543,12 @@ pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &m
     end += 4;
     write_bytes!(&mut page[end..end + prefix_len], &key[..prefix_len]);
   } else {
-    panic!("Leaf page: not enough space to insert");
+    panic!(
+      "Leaf page: not enough space to insert, avail {}, cell len {}, overflow cell len {}",
+      max_len,
+      leaf_cell_len(key, val),
+      leaf_cell_overflow_len(key)
+    );
   }
 
   // Clear the space for position and insert new slot.
@@ -701,9 +706,7 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut StorageManager) -> (usize, bo
       }
       (start, false)
     },
-    PageType::Overflow => {
-      panic!("Unsupported page type for bsearch");
-    },
+    PageType::Overflow => panic!("Unsupported page type for bsearch"),
   }
 }
 
@@ -1535,6 +1538,36 @@ mod tests {
 
     assert_eq!(num_slots(&page), 0);
     assert_eq!(free_ptr(&page), page.len() - 4);
+  }
+
+  #[test]
+  fn test_page_bsearch_shared_prefix() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(512).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    let prefix = &[1; 128];
+    let mut keys = Vec::new();
+    for i in 0..10 {
+      let mut k = Vec::new();
+      k.extend_from_slice(prefix);
+      k.push(i);
+      keys.push(k);
+    }
+
+    for i in 0..10 {
+      leaf_insert(&mut page, i, &keys[i], &[], &mut mngr);
+    }
+
+    // Existing keys.
+    let mut i = 0;
+    for key in &keys {
+      assert_eq!(bsearch(&page, &key, &mut mngr), (i, true));
+      i += 1;
+    }
+
+    // Non-existent key.
+    assert_eq!(bsearch(&page, &[1; 256], &mut mngr), (2, false));
   }
 
   #[test]
