@@ -311,6 +311,45 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
   }
 }
 
+// Drops all of the pages - overflow, leaf, and internal - that compose the current B+ tree.
+// Equivalent of deleting all of the data but rather more efficiently instead of a key at a time.
+pub fn drop(root: u32, mngr: &mut StorageManager) -> u32 {
+  let mut page = vec![0u8; mngr.page_size()];
+  recur_drop(root, mngr, &mut page);
+  // We can return an invalid page id indicating that the tree is now empty.
+  INVALID_PAGE_ID
+}
+
+// We assume that the root is a valid page.
+fn recur_drop(root: u32, mngr: &mut StorageManager, page: &mut [u8]) {
+  if root == INVALID_PAGE_ID {
+    return;
+  }
+  mngr.read(root, page);
+  mngr.mark_as_free(root);
+  match pg::page_type(&page) {
+    pg::PageType::Internal => {
+      let cnt = pg::num_slots(&page);
+      let mut pages = Vec::with_capacity(cnt + 1);
+      // There are cnt + 1 pointers.
+      for ptr in 0..cnt + 1 {
+        pages.push(pg::internal_get_ptr(&page, ptr));
+      }
+      // Frees all of the overflow pages.
+      pg::internal_free(page, mngr);
+      // Drop all of the child pages.
+      for &pid in &pages {
+        recur_drop(pid, mngr, page);
+      }
+    },
+    pg::PageType::Leaf => {
+      // Frees all of the overflow pages.
+      pg::leaf_free(page, mngr);
+    },
+    unsupported_type => panic!("Invalid page type: {:?}", unsupported_type),
+  }
+}
+
 // B+ tree iterator for range scans,
 // allows to specify start and end keys to return a subset of keys.
 //
@@ -744,6 +783,35 @@ mod tests {
     for i in 0..20 {
       root = del(root, &[i], &mut mngr);
     }
+
+    assert_eq!(root, INVALID_PAGE_ID);
+
+    // Assert page consistency.
+    mngr.sync();
+    assert_eq!(mngr.num_pages(), 0, "Pages were not freed fully");
+  }
+
+  #[test]
+  fn test_btree_drop_invalid() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    assert_eq!(drop(INVALID_PAGE_ID, &mut mngr), INVALID_PAGE_ID);
+  }
+
+  #[test]
+  fn test_btree_drop_recursive() {
+    let mut root = INVALID_PAGE_ID;
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+
+    // Insert a set of values.
+    for i in 0..255 {
+      root = put(root, &[i; 128], &[i; 128], &mut mngr);
+    }
+
+    // Root should be valid.
+    assert_ne!(root, INVALID_PAGE_ID);
+
+    // Drop all of the pages in the tree.
+    root = drop(root, &mut mngr);
 
     assert_eq!(root, INVALID_PAGE_ID);
 

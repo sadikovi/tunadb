@@ -635,6 +635,24 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
   leaf_del_cell(page, pos);
 }
 
+// Use with caution!
+// Drops all of the overflow pages and clears the current leaf page.
+//
+// This is used to efficiently drop all of the data in the page, after this operation the page
+// has no keys and values.
+pub fn leaf_free(page: &mut [u8], mngr: &mut StorageManager) {
+  let cnt = num_slots(&page);
+  for pos in 0..cnt {
+    let buf = leaf_get_cell(&page, pos);
+    let overflow_pid = u8_u32!(&buf[12..16]);
+    if overflow_pid != INVALID_PAGE_ID {
+      overflow_delete(mngr, overflow_pid);
+    }
+  }
+  // Reset the leaf page.
+  leaf_init(page);
+}
+
 pub fn leaf_update(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut StorageManager) {
   leaf_delete(page, pos, mngr);
   leaf_insert0(page, pos, key, val, mngr, true);
@@ -1053,6 +1071,24 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut StorageManager) {
   internal_del_cell(page, pos);
 }
 
+// Use with caution!
+// Drops all of the overflow pages and clears the current internal page.
+//
+// This is used to efficiently drop all of the data in the page, after this operation the page
+// has no keys or any overflow pages.
+pub fn internal_free(page: &mut [u8], mngr: &mut StorageManager) {
+  let cnt = num_slots(&page);
+  for pos in 0..cnt {
+    let buf = internal_get_cell(&page, pos);
+    let overflow_pid = u8_u32!(&buf[12..16]);
+    if overflow_pid != INVALID_PAGE_ID {
+      overflow_delete(mngr, overflow_pid);
+    }
+  }
+  // Reset the internal page.
+  internal_init(page);
+}
+
 pub fn internal_update(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut StorageManager) {
   internal_delete(page, pos, mngr);
   internal_insert0(page, pos, key, mngr, true);
@@ -1412,6 +1448,30 @@ mod tests {
   }
 
   #[test]
+  fn test_page_leaf_free() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    leaf_init(&mut page);
+
+    for i in 0..5 {
+      leaf_insert(&mut page, i, &[i as u8; 256], &[1; 256], &mut mngr);
+    }
+
+    // Assert that we have written overflow pages.
+    assert_ne!(mngr.num_pages(), 0);
+
+    leaf_free(&mut page, &mut mngr);
+
+    // The leaf page should be reset and all overflow pages should be deleted.
+    assert_eq!(num_slots(&page), 0);
+    assert_eq!(free_ptr(&page), page.len());
+
+    mngr.sync();
+    assert_eq!(mngr.num_pages(), 0);
+    assert_eq!(mngr.num_free_pages(), 0);
+  }
+
+  #[test]
   fn test_page_leaf_update_same_key() {
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(128).build();
     let mut page = vec![0u8; mngr.page_size()];
@@ -1716,6 +1776,30 @@ mod tests {
 
     assert_eq!(num_slots(&page), 0);
     assert_eq!(free_ptr(&page), page.len() - 4);
+  }
+
+  #[test]
+  fn test_page_internal_free() {
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    let mut page = vec![0u8; mngr.page_size()];
+    internal_init(&mut page);
+
+    for i in 0..5 {
+      internal_insert(&mut page, i, &[i as u8; 256], &mut mngr);
+    }
+
+    // Assert that we have written overflow pages.
+    assert_ne!(mngr.num_pages(), 0);
+
+    internal_free(&mut page, &mut mngr);
+
+    // The internal page should be reset and all overflow pages should be deleted.
+    assert_eq!(num_slots(&page), 0);
+    assert_eq!(free_ptr(&page), page.len() - 4);
+
+    mngr.sync();
+    assert_eq!(mngr.num_pages(), 0);
+    assert_eq!(mngr.num_free_pages(), 0);
   }
 
   #[test]
