@@ -228,7 +228,7 @@ pub struct StorageManager {
   flags: u32, //
   page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list as the first meta block
-  page_table_root: Option<u32>, // root page for the page table
+  root_page: Option<u32>, // root page for the first btree
   free_list: Vec<u32>, // in-memory free list, contains pages available for reuse
   free_set: HashSet<u32>, // in-memory set of all of the free pages, cleared on sync
 }
@@ -293,7 +293,7 @@ impl StorageManager {
           }
         }
 
-        let page_table_root = match u8_u32!(&buf[16..20]) {
+        let root_page = match u8_u32!(&buf[16..20]) {
           INVALID_PAGE_ID => None,
           page_id => Some(page_id)
         };
@@ -303,7 +303,7 @@ impl StorageManager {
           flags,
           page_size,
           free_page_id: INVALID_PAGE_ID, // free page id is updated in sync/drop
-          page_table_root,
+          root_page,
           free_list,
           free_set,
         }
@@ -313,7 +313,7 @@ impl StorageManager {
           flags: 0,
           page_size: opts.page_size,
           free_page_id: INVALID_PAGE_ID,
-          page_table_root: None,
+          root_page: None,
           free_list: Vec::new(),
           free_set: HashSet::new(),
         };
@@ -326,7 +326,7 @@ impl StorageManager {
         flags: 0,
         page_size: opts.page_size,
         free_page_id: INVALID_PAGE_ID,
-        page_table_root: None,
+        root_page: None,
         free_list: Vec::new(),
         free_set: HashSet::new(),
       };
@@ -335,16 +335,16 @@ impl StorageManager {
     }
   }
 
-  // Returns page table root that is currently set.
+  // Returns root page id that is currently set.
   // The value is the one that is in memory (most recent) in case disk and memory have diverged.
-  pub fn page_table_root(&self) -> Option<u32> {
-    self.page_table_root
+  pub fn root_page(&self) -> Option<u32> {
+    self.root_page
   }
 
-  // Updates page table root in memory.
+  // Updates root page id in memory.
   // Does not sync data.
-  pub fn update_page_table(&mut self, root_opt: Option<u32>) {
-    self.page_table_root = root_opt;
+  pub fn update_root_page(&mut self, root_opt: Option<u32>) {
+    self.root_page = root_opt;
   }
 
   // Reads the content of the page with `page_id` into the buffer.
@@ -385,6 +385,7 @@ impl StorageManager {
   }
 
   // Returns true if the page is accessible, e.g. not freed or outside the bounds.
+  #[inline]
   pub fn is_accessible(&self, page_id: u32) -> bool {
     (page_id as usize) < self.num_pages() && !self.free_set.contains(&page_id)
   }
@@ -396,7 +397,7 @@ impl StorageManager {
     res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
     res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
     res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
-    res!((&mut buf[16..]).write(&u32_u8!(self.page_table_root.unwrap_or(INVALID_PAGE_ID))));
+    res!((&mut buf[16..]).write(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID))));
     self.desc.write(0, &buf[..]);
 
     // Move all marked free pages into the free list.
@@ -436,11 +437,13 @@ impl StorageManager {
 
   // Returns the configured page size for the storage manager.
   // This will never exceed 4 bytes (u32::MAX)
+  #[inline]
   pub fn page_size(&self) -> usize {
     self.page_size as usize
   }
 
   // Total number of pages that are managed by the storage manager.
+  #[inline]
   pub fn num_pages(&self) -> usize {
     let num_pages = (self.desc.len() - DB_HEADER_SIZE as u64) / self.page_size as u64;
     num_pages as usize
@@ -448,11 +451,13 @@ impl StorageManager {
 
   // Number of free pages that were reclaimed and are available for use.
   // This does not include pages that were marked as free but have not been released yet.
+  #[inline]
   pub fn num_free_pages(&self) -> usize {
     self.free_list.len() as usize
   }
 
   // The amount of memory (in bytes) used by the storage manager.
+  #[inline]
   pub fn estimated_mem_usage(&self) -> usize {
     let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
@@ -867,7 +872,7 @@ mod tests {
     assert_eq!(mngr.flags, 0);
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
-    assert_eq!(mngr.page_table_root, None);
+    assert_eq!(mngr.root_page, None);
     assert_eq!(mngr.free_list.len(), 0);
     assert_eq!(mngr.free_set.len(), 0);
     assert_eq!(mngr.num_pages(), 0);
@@ -881,7 +886,7 @@ mod tests {
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
-      assert_eq!(mngr.page_table_root, None);
+      assert_eq!(mngr.root_page, None);
       assert_eq!(mngr.free_list.len(), 0);
       assert_eq!(mngr.free_set.len(), 0);
       assert_eq!(mngr.num_pages(), 0);
@@ -899,7 +904,7 @@ mod tests {
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
-      assert_eq!(mngr.page_table_root, None);
+      assert_eq!(mngr.root_page, None);
       assert_eq!(mngr.free_list.len(), 0);
       assert_eq!(mngr.free_set.len(), 0);
       assert_eq!(mngr.num_pages(), 0);
@@ -908,19 +913,19 @@ mod tests {
   }
 
   #[test]
-  fn test_storage_manager_page_table_persist() {
+  fn test_storage_manager_root_page_persist() {
     with_tmp_file(|path| {
       {
         let mut mngr = storage_disk(32, path);
-        assert_eq!(mngr.page_table_root(), None);
+        assert_eq!(mngr.root_page(), None);
 
-        mngr.update_page_table(Some(100));
-        assert_eq!(mngr.page_table_root(), Some(100));
+        mngr.update_root_page(Some(100));
+        assert_eq!(mngr.root_page(), Some(100));
         mngr.sync();
       }
       {
         let mngr = storage_disk(32, path);
-        assert_eq!(mngr.page_table_root(), Some(100));
+        assert_eq!(mngr.root_page(), Some(100));
       }
     })
   }
