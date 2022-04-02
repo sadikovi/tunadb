@@ -39,7 +39,7 @@ impl Tree {
 
   // Frees the current Tree and marks all of the underlying pages as free.
   // Effectively drops the tree and its children.
-  pub fn free(self) {
+  pub fn free(&mut self) {
     if self.is_meta {
       // We need to drop child trees first.
       // TODO: optimise this case, we don't need the key-value pairs, instead we could delete
@@ -54,12 +54,13 @@ impl Tree {
       }
 
       for &(root, is_meta) in &children {
-        let tree = Self::new(root, is_meta, self.mngr.clone());
+        let mut tree = Self::new(root, is_meta, self.mngr.clone());
         tree.free();
       }
     }
     // Drops all of the overflow, leaf, and internal pages.
-    btree::drop(self.root, &mut self.mngr.borrow_mut());
+    self.root = btree::drop(self.root, &mut self.mngr.borrow_mut());
+    self.is_dirty = true;
   }
 
   // Returns stored data for the provided key or None if no such key exists.
@@ -247,6 +248,8 @@ mod tests {
 
     mngr.borrow_mut().sync();
 
+    assert_eq!(meta.root, INVALID_PAGE_ID);
+    assert_eq!(meta.is_dirty, true);
     assert_eq!(mngr.borrow().num_pages(), 0);
     assert_eq!(mngr.borrow().num_free_pages(), 0);
   }
