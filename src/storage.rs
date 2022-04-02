@@ -128,6 +128,19 @@ impl Drop for Descriptor {
   }
 }
 
+// Trait that provides methods to read and write pages.
+// Used to substitute buffer pool for storage manager.
+pub trait PageManager {
+  fn read(&mut self, pid: u32, buf: &mut [u8]);
+  fn write(&mut self, pid: u32, buf: &[u8]);
+  fn write_next(&mut self, buf: &[u8]) -> u32;
+  fn mark_as_free(&mut self, pid: u32);
+  fn sync(&mut self);
+  fn page_size(&self) -> usize;
+  fn num_pages(&self) -> usize;
+  fn num_free_pages(&self) -> usize;
+}
+
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed header size, see sync() method for more information.
 const DB_HEADER_SIZE: usize = 32;
@@ -444,6 +457,48 @@ impl StorageManager {
     let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
+  }
+}
+
+impl PageManager for StorageManager {
+  #[inline]
+  fn read(&mut self, pid: u32, buf: &mut [u8]) {
+    self.read(pid, buf);
+  }
+
+  #[inline]
+  fn write(&mut self, pid: u32, buf: &[u8]) {
+    self.write(pid, buf);
+  }
+
+  #[inline]
+  fn write_next(&mut self, buf: &[u8]) -> u32 {
+    self.write_next(buf)
+  }
+
+  #[inline]
+  fn mark_as_free(&mut self, pid: u32) {
+    self.mark_as_free(pid);
+  }
+
+  #[inline]
+  fn sync(&mut self) {
+    self.sync();
+  }
+
+  #[inline]
+  fn page_size(&self) -> usize {
+    self.page_size()
+  }
+
+  #[inline]
+  fn num_pages(&self) -> usize {
+    self.num_pages()
+  }
+
+  #[inline]
+  fn num_free_pages(&self) -> usize {
+    self.num_free_pages()
   }
 }
 

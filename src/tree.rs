@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::btree;
-use crate::storage::{INVALID_PAGE_ID, StorageManager};
+use crate::storage::{INVALID_PAGE_ID, PageManager};
 
 const FLAG_LEAF_TREE: u32 = 0;
 const FLAG_META_TREE: u32 = 1;
@@ -11,19 +11,19 @@ const FLAG_META_TREE: u32 = 1;
 
 pub struct Tree {
   root: u32, // root pid
-  mngr: Rc<RefCell<StorageManager>>, // shared mutability
+  mngr: Rc<RefCell<dyn PageManager>>, // shared mutability
   is_meta: bool, // whether or not it is META tree
   is_dirty: bool, // whether or not the tree has been modified
 }
 
 impl Tree {
   // Creates a new tree.
-  pub fn new(root: u32, is_meta: bool, mngr: Rc<RefCell<StorageManager>>) -> Self {
+  pub fn new(root: u32, is_meta: bool, mngr: Rc<RefCell<dyn PageManager>>) -> Self {
     Self { root, mngr, is_meta, is_dirty: false }
   }
 
   // Creates an empty tree with root as INVALID_PAGE_ID.
-  pub fn empty(is_meta: bool, mngr: Rc<RefCell<StorageManager>>) -> Self {
+  pub fn empty(is_meta: bool, mngr: Rc<RefCell<dyn PageManager>>) -> Self {
     Self::new(INVALID_PAGE_ID, is_meta, mngr)
   }
 
@@ -46,7 +46,7 @@ impl Tree {
       // trees as we are traversing pages.
       let mut children = Vec::new();
       {
-        let mngr_ref = &mut self.mngr.borrow_mut();
+        let mngr_ref = &mut *self.mngr.borrow_mut();
         let mut iter = btree::BTreeIter::new(self.root, None, None, mngr_ref);
         while let Some((_, val)) = iter.next() {
           children.push(decode(&val));
@@ -59,7 +59,7 @@ impl Tree {
       }
     }
     // Drops all of the overflow, leaf, and internal pages.
-    self.root = btree::drop(self.root, &mut self.mngr.borrow_mut());
+    self.root = btree::drop(self.root, &mut *self.mngr.borrow_mut());
     self.is_dirty = true;
   }
 
@@ -67,20 +67,20 @@ impl Tree {
   // Only used for Leaf nodes.
   pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
     assert!(!self.is_meta, "Leaf tree is expected");
-    btree::get(self.root, key, &mut self.mngr.borrow_mut())
+    btree::get(self.root, key, &mut *self.mngr.borrow_mut())
   }
 
   // Inserts a key-value pair into the leaf tree.
   pub fn put(&mut self, key: &[u8], val: &[u8]) {
     assert!(!self.is_meta, "Leaf tree is expected");
-    self.root = btree::put(self.root, key, val, &mut self.mngr.borrow_mut());
+    self.root = btree::put(self.root, key, val, &mut *self.mngr.borrow_mut());
     self.is_dirty = true;
   }
 
   // Deletes the key-value pair in the meta or leaf tree.
   pub fn del(&mut self, key: &[u8]) {
     assert!(!self.is_meta, "Leaf tree is expected");
-    self.root = btree::del(self.root, key, &mut self.mngr.borrow_mut());
+    self.root = btree::del(self.root, key, &mut *self.mngr.borrow_mut());
     self.is_dirty = true;
   }
 
@@ -88,7 +88,7 @@ impl Tree {
   // Note that if Tree object is modified, it needs to be updated with `meta_put()`.
   pub fn meta_get(&self, key: &[u8]) -> Option<Self> {
     assert!(self.is_meta, "Meta tree is expected");
-    match btree::get(self.root, key, &mut self.mngr.borrow_mut()) {
+    match btree::get(self.root, key, &mut *self.mngr.borrow_mut()) {
       Some(buf) => {
         let (pid, is_meta) = decode(&buf[..]);
         Some(Self::new(pid, is_meta, self.mngr.clone()))
@@ -101,7 +101,7 @@ impl Tree {
   pub fn meta_put(&mut self, key: &[u8], mut val: Tree) {
     assert!(self.is_meta, "Meta tree is expected");
     let buf = encode(val.root, val.is_meta);
-    self.root = btree::put(self.root, key, &buf[..], &mut self.mngr.borrow_mut());
+    self.root = btree::put(self.root, key, &buf[..], &mut *self.mngr.borrow_mut());
     self.is_dirty = true;
     // Mark the tree as non dirty so it can be freed correctly.
     val.is_dirty = false;
@@ -112,7 +112,7 @@ impl Tree {
   // separately.
   pub fn meta_del(&mut self, key: &[u8]) {
     assert!(self.is_meta, "Meta tree is expected");
-    self.root = btree::del(self.root, key, &mut self.mngr.borrow_mut());
+    self.root = btree::del(self.root, key, &mut *self.mngr.borrow_mut());
     self.is_dirty = true;
   }
 }
@@ -147,9 +147,11 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::storage::StorageManager;
 
-  fn get_mngr() -> Rc<RefCell<StorageManager>> {
-    Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(512).build()))
+  fn get_mngr() -> Rc<RefCell<dyn PageManager>> {
+    let mngr = StorageManager::builder().as_mem(0).with_page_size(512).build();
+    Rc::new(RefCell::new(mngr))
   }
 
   #[test]

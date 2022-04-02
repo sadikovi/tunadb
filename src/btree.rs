@@ -1,8 +1,8 @@
-use crate::storage::{INVALID_PAGE_ID, StorageManager};
+use crate::storage::{INVALID_PAGE_ID, PageManager};
 use crate::page as pg;
 
 // Inserts key and value in the btree and returns a new snapshot via a new root page.
-pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager) -> u32 {
+pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   match recur_put(root, &key, &val, mngr, &mut page) {
     BTreePut::Update(id) => id,
@@ -23,7 +23,7 @@ enum BTreePut {
 }
 
 // Puts key and value into btree.
-fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page: &mut [u8]) -> BTreePut {
+fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page: &mut [u8]) -> BTreePut {
   if root == INVALID_PAGE_ID {
     // Create new leaf page
     pg::leaf_init(page);
@@ -140,7 +140,7 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut StorageManager, page:
 }
 
 // Returns value for the key if the key exists, otherwise None.
-pub fn get(mut root: u32, key: &[u8], mngr: &mut StorageManager) -> Option<Vec<u8>> {
+pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn PageManager) -> Option<Vec<u8>> {
   if root == INVALID_PAGE_ID {
     return None;
   }
@@ -166,7 +166,7 @@ pub fn get(mut root: u32, key: &[u8], mngr: &mut StorageManager) -> Option<Vec<u
 }
 
 // Deletes the key in the btree and returns a new snapshot via a new root page.
-pub fn del(root: u32, key: &[u8], mngr: &mut StorageManager) -> u32 {
+pub fn del(root: u32, key: &[u8], mngr: &mut dyn PageManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   match recur_del(root, key, mngr, &mut page) {
     BTreeDel::Empty => root,
@@ -199,7 +199,7 @@ enum BTreeDel {
   Update(u32 /* page id */, usize /* num slots */, Option<Vec<u8>> /* next smallest key */),
 }
 
-fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) -> BTreeDel {
+fn recur_del(root: u32, key: &[u8], mngr: &mut dyn PageManager, page: &mut [u8]) -> BTreeDel {
   if root == INVALID_PAGE_ID {
     // Nothing to delete.
     BTreeDel::Empty
@@ -313,7 +313,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut StorageManager, page: &mut [u8]) 
 
 // Drops all of the pages - overflow, leaf, and internal - that compose the current B+ tree.
 // Equivalent of deleting all of the data but rather more efficiently instead of a key at a time.
-pub fn drop(root: u32, mngr: &mut StorageManager) -> u32 {
+pub fn drop(root: u32, mngr: &mut dyn PageManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   recur_drop(root, mngr, &mut page);
   // We can return an invalid page id indicating that the tree is now empty.
@@ -321,7 +321,7 @@ pub fn drop(root: u32, mngr: &mut StorageManager) -> u32 {
 }
 
 // We assume that the root is a valid page.
-fn recur_drop(root: u32, mngr: &mut StorageManager, page: &mut [u8]) {
+fn recur_drop(root: u32, mngr: &mut dyn PageManager, page: &mut [u8]) {
   if root == INVALID_PAGE_ID {
     return;
   }
@@ -359,7 +359,7 @@ pub struct BTreeIter<'a> {
   root: u32,
   stack: Vec<(u32, usize, usize)>, // stack of internal pages, (page id, pos, num_slots)
   end_key: Option<Vec<u8>>,
-  mngr: &'a mut StorageManager,
+  mngr: &'a mut dyn PageManager,
   page: Vec<u8>, // temporary buffer to load pages
   pos: usize, // position in the current leaf node
 }
@@ -367,7 +367,7 @@ pub struct BTreeIter<'a> {
 impl<'a> BTreeIter<'a> {
   // Creates a new iterator.
   // If start and end keys are not provided, full range is returned.
-  pub fn new(mut root: u32, start_key: Option<&[u8]>, end_key: Option<&[u8]>, mngr: &'a mut StorageManager) -> Self {
+  pub fn new(mut root: u32, start_key: Option<&[u8]>, end_key: Option<&[u8]>, mngr: &'a mut dyn PageManager) -> Self {
     let mut page = vec![0u8; mngr.page_size()];
     let mut stack = Vec::new();
 
@@ -445,13 +445,13 @@ impl<'a> Iterator for BTreeIter<'a> {
 }
 
 // Debug method to print btree starting with `root`.
-pub fn btree_debug(root: u32, mngr: &mut StorageManager) {
+pub fn btree_debug(root: u32, mngr: &mut dyn PageManager) {
   let mut page = vec![0u8; mngr.page_size()];
   btree_debug_recur(root, &mut page, mngr, 2);
   println!();
 }
 
-fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut StorageManager, offset: usize) {
+fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut dyn PageManager, offset: usize) {
   if root == INVALID_PAGE_ID {
     println!("{:>width$} INVALID PAGE", "!", width = offset);
     return;
@@ -504,6 +504,7 @@ mod tests {
   use super::*;
   use std::collections::HashSet;
   use rand::prelude::*;
+  use crate::storage::StorageManager;
 
   #[test]
   fn test_btree_put_insert_empty() {
@@ -1004,7 +1005,7 @@ mod tests {
     input.shuffle(&mut thread_rng());
   }
 
-  fn assert_find(root: u32, keys: &[Vec<u8>], mngr: &mut StorageManager, assert_match: bool) {
+  fn assert_find(root: u32, keys: &[Vec<u8>], mngr: &mut dyn PageManager, assert_match: bool) {
     for key in keys {
       let res = get(root, key, mngr);
       if assert_match && res != Some(key.to_vec()) {
