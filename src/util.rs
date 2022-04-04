@@ -120,6 +120,7 @@ impl<T: Copy + Debug + PartialEq + Eq + Hash> LruCache<T> {
     /* pinned */ self.pinned.len() * size_of::<T>()
   }
 
+  // Must be private, consider using `update()` instead.
   fn insert(&mut self, key: T) {
     assert!(self.entries.get(&key).is_none());
     self.entries.insert(key, LruCacheEntry { prev: None, next: self.head });
@@ -133,7 +134,9 @@ impl<T: Copy + Debug + PartialEq + Eq + Hash> LruCache<T> {
     }
   }
 
-  fn remove(&mut self, key: T) {
+  // Allows to remove cache entry.
+  // If the entry does not exist, it is a no-op.
+  pub fn remove(&mut self, key: T) {
     if let Some(entry) = self.entries.remove(&key) {
       if let Some(prev) = entry.prev {
         self.entries.get_mut(&prev).unwrap().next = entry.next;
