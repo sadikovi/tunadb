@@ -128,11 +128,10 @@ impl Drop for Descriptor {
   }
 }
 
-// Trait that provides methods to read and write pages.
+// Trait that provides methods to read and write pages in a copy-on-write btree.
 // Used to substitute buffer pool for storage manager.
 pub trait PageManager {
   fn read(&mut self, pid: u32, buf: &mut [u8]);
-  fn write(&mut self, pid: u32, buf: &[u8]);
   fn write_next(&mut self, buf: &[u8]) -> u32;
   fn mark_as_free(&mut self, pid: u32);
   fn sync(&mut self);
@@ -469,11 +468,6 @@ impl PageManager for StorageManager {
   #[inline]
   fn read(&mut self, pid: u32, buf: &mut [u8]) {
     self.read(pid, buf);
-  }
-
-  #[inline]
-  fn write(&mut self, pid: u32, buf: &[u8]) {
-    self.write(pid, buf);
   }
 
   #[inline]
