@@ -30,6 +30,7 @@ impl Descriptor {
   }
 
   // Reads data into the provided buffer at the position.
+  #[inline]
   fn read(&mut self, pos: u64, buf: &mut [u8]) {
     assert!(pos + buf.len() as u64 <= self.len(), "Read past EOF: pos {} len {}", pos, buf.len());
 
@@ -49,6 +50,7 @@ impl Descriptor {
   }
 
   // Writes data at the specified position.
+  #[inline]
   fn write(&mut self, pos: u64, buf: &[u8]) {
     assert!(pos <= self.len(), "Write past EOF: pos {} len {}", pos, buf.len());
 
@@ -76,6 +78,7 @@ impl Descriptor {
   }
 
   // Truncates to the provided length, `len` must be less than or equal to length.
+  #[inline]
   fn truncate(&mut self, len: u64) {
     let curr_len = self.len();
     assert!(len <= curr_len, "Failed to truncate to len {}, curr_len {}", len, curr_len);
@@ -95,6 +98,7 @@ impl Descriptor {
   }
 
   // Total length in bytes of the file or memory buffer, used for appends.
+  #[inline]
   fn len(&self) -> u64 {
     match self {
       Descriptor::Disk { fd } => res!(fd.metadata().map(|m| m.len())),
@@ -103,6 +107,7 @@ impl Descriptor {
   }
 
   // Total amount of memory (in bytes) used by the descriptor.
+  #[inline]
   fn estimated_mem_usage(&self) -> usize {
     match self {
       Descriptor::Disk { .. } => 0,
@@ -126,18 +131,6 @@ impl Drop for Descriptor {
       },
     }
   }
-}
-
-// Trait that provides methods to read and write pages in a copy-on-write btree.
-// Used to substitute buffer pool for storage manager.
-pub trait PageManager {
-  fn read(&mut self, pid: u32, buf: &mut [u8]);
-  fn write_next(&mut self, buf: &[u8]) -> u32;
-  fn mark_as_free(&mut self, pid: u32);
-  fn sync(&mut self);
-  fn page_size(&self) -> usize;
-  fn num_pages(&self) -> usize;
-  fn num_free_pages(&self) -> usize;
 }
 
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
@@ -375,18 +368,28 @@ impl StorageManager {
     next_page_id
   }
 
-  // Marks the page as free so it is not available for future writes, however, it is also not
-  // available yet for reuse. The page is finally freed and recycled after sync.
+  // Marks the page as free so it is not available for future reads and writes; however,
+  // it is also not available yet for reuse. The page is finally freed and recycled after sync.
   pub fn mark_as_free(&mut self, page_id: u32) {
     assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
     assert!(self.num_pages() > page_id as usize, "Invalid page {} to free", page_id);
     self.free_set.insert(page_id);
   }
 
+  // Marks the page as available if it was freed, the exact opposite of `mark_as_free()`.
+  // This is used to roll back changes and restore freed pages.
+  pub fn restore_from_free(&mut self, page_id: u32) {
+    assert!(page_id != INVALID_PAGE_ID, "Invalid page id");
+    assert!(self.num_pages() > page_id as usize, "Invalid page {} to restore", page_id);
+    self.free_set.remove(&page_id);
+  }
+
   // Returns true if the page is accessible, e.g. not freed or outside the bounds.
   #[inline]
   pub fn is_accessible(&self, page_id: u32) -> bool {
-    (page_id as usize) < self.num_pages() && !self.free_set.contains(&page_id)
+    page_id != INVALID_PAGE_ID &&
+      (page_id as usize) < self.num_pages() &&
+        !self.free_set.contains(&page_id)
   }
 
   // Sync metadata + free pages.
@@ -461,43 +464,6 @@ impl StorageManager {
     let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
-  }
-}
-
-impl PageManager for StorageManager {
-  #[inline]
-  fn read(&mut self, pid: u32, buf: &mut [u8]) {
-    self.read(pid, buf);
-  }
-
-  #[inline]
-  fn write_next(&mut self, buf: &[u8]) -> u32 {
-    self.write_next(buf)
-  }
-
-  #[inline]
-  fn mark_as_free(&mut self, pid: u32) {
-    self.mark_as_free(pid);
-  }
-
-  #[inline]
-  fn sync(&mut self) {
-    self.sync();
-  }
-
-  #[inline]
-  fn page_size(&self) -> usize {
-    self.page_size()
-  }
-
-  #[inline]
-  fn num_pages(&self) -> usize {
-    self.num_pages()
-  }
-
-  #[inline]
-  fn num_free_pages(&self) -> usize {
-    self.num_free_pages()
   }
 }
 
@@ -1231,6 +1197,51 @@ mod tests {
       mngr.mark_as_free(page_id);
       assert!(!mngr.is_accessible(page_id));
     }
+
+    // Invalid page is not accessible.
+    assert!(!mngr.is_accessible(INVALID_PAGE_ID));
+  }
+
+  #[test]
+  fn test_storage_manager_restore_from_free() {
+    let mut mngr = storage_mem(32);
+    let mut buf = vec![2u8; mngr.page_size as usize];
+
+    // Write 10 pages in total.
+    for _ in 0..10 {
+      mngr.write_next(&buf[..]);
+    }
+
+    // Free the pages.
+    for page_id in 0..10 {
+      mngr.mark_as_free(page_id);
+    }
+
+    // Restore the pages.
+    for page_id in 0..10 {
+      mngr.restore_from_free(page_id);
+    }
+
+    // All pages should be accessible.
+    for page_id in 0..10 {
+      assert!(mngr.is_accessible(page_id));
+      mngr.write(page_id, &buf);
+      mngr.read(page_id, &mut buf);
+    }
+  }
+
+  #[test]
+  #[should_panic(expected = "Invalid page id")]
+  fn test_storage_manager_restore_from_free_invalid() {
+    let mut mngr = storage_mem(32);
+    mngr.restore_from_free(INVALID_PAGE_ID);
+  }
+
+  #[test]
+  #[should_panic(expected = "Invalid page 100 to restore")]
+  fn test_storage_manager_restore_from_free_out_of_bound() {
+    let mut mngr = storage_mem(32);
+    mngr.restore_from_free(100);
   }
 
   //============================
