@@ -150,6 +150,14 @@ impl<T: Copy + Debug + PartialEq + Eq + Hash> LruCache<T> {
       }
     }
   }
+
+  // Clears the content of LRU cache.
+  pub fn clear(&mut self) {
+    self.entries.clear();
+    self.pinned.clear();
+    self.head = None;
+    self.tail = None;
+  }
 }
 
 #[cfg(test)]
@@ -330,6 +338,32 @@ mod tests {
     for _ in 0..10 {
       assert!(cache.evict().is_some());
     }
+  }
+
+  #[test]
+  fn test_util_lru_clear() {
+    let mut cache = LruCache::<u32>::new();
+    for i in 0..200 {
+      cache.update(i);
+    }
+
+    for i in 0..10 {
+      cache.pin(i);
+    }
+
+    for _ in 0..10 {
+      assert!(cache.evict().is_some());
+    }
+
+    cache.clear();
+
+    assert_eq!(cache.entries.len(), 0);
+    assert_eq!(cache.pinned.len(), 0);
+    assert_eq!(cache.head, None);
+    assert_eq!(cache.tail, None);
+
+    // There should be no items for eviction.
+    assert_eq!(cache.evict(), None);
   }
 
   // LRU cache fuzz testing
