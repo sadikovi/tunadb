@@ -1,5 +1,6 @@
 use std::io::Write;
-use crate::storage::{INVALID_PAGE_ID, PageManager};
+use crate::block::BlockManager;
+use crate::storage::INVALID_PAGE_ID;
 
 // Max page header size (in bytes).
 const PAGE_HEADER_SIZE: usize = 20;
@@ -25,7 +26,7 @@ const FLAG_PAGE_IS_INTERNAL: u32 = 0x4;
 // - prev page (4 bytes)
 // - next page (4 bytes)
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageType {
   Leaf,
   Overflow,
@@ -67,7 +68,7 @@ fn prev_page(page: &[u8]) -> u32 {
 }
 
 #[inline]
-fn next_page(page: &[u8]) -> u32 {
+pub fn next_page(page: &[u8]) -> u32 {
   let header = &page[..PAGE_HEADER_SIZE];
   u8_u32!(&header[16..20])
 }
@@ -97,7 +98,7 @@ fn set_prev_page(page: &mut [u8], page_id: u32) {
 }
 
 #[inline]
-fn set_next_page(page: &mut [u8], page_id: u32) {
+pub fn set_next_page(page: &mut [u8], page_id: u32) {
   let header = &mut page[..PAGE_HEADER_SIZE];
   write_u32!(&mut header[16..20], page_id);
 }
@@ -164,7 +165,7 @@ fn key_prefix_len(key: &[u8]) -> usize {
 //
 // `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
 #[inline]
-pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut dyn PageManager) -> bool {
+pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
   assert_eq!(page_type(&to), page_type(&from), "Merge: different page type");
 
   match page_type(&to) {
@@ -232,7 +233,7 @@ pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], m
 // Returns `true` if steal from left can be performed, otherwise false. If `false` is returned,
 // it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut dyn PageManager) -> bool {
+pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
   assert_eq!(page_type(&to), page_type(&left), "Steal from left: different page type");
 
   let left_cnt = num_slots(&left);
@@ -300,7 +301,7 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
 // Returns `true` if steal from right can be performed, otherwise false. If `false` is returned,
 // it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut dyn PageManager) -> bool {
+pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
   assert_eq!(page_type(&to), page_type(&right), "Steal from right: different page type");
   assert!(num_slots(right) > 0, "Steal from right: right page is empty");
 
@@ -419,10 +420,18 @@ fn leaf_get_cell_len(page: &[u8], off: usize) -> usize {
 
 // Returns the cell's slice.
 #[inline]
-fn leaf_get_cell(page: &[u8], pos: usize) -> &[u8] {
+pub fn leaf_get_cell(page: &[u8], pos: usize) -> &[u8] {
   let off = get_slot(page, pos) as usize;
   let len = leaf_get_cell_len(page, off);
   &page[off..off + len]
+}
+
+// Returns mutable reference of the cell.
+#[inline]
+pub fn leaf_get_cell_mut(page: &mut [u8], pos: usize) -> &mut [u8] {
+  let off = get_slot(page, pos) as usize;
+  let len = leaf_get_cell_len(page, off);
+  &mut page[off..off + len]
 }
 
 // Inserts the cell at the position potentially shifting elements.
@@ -491,14 +500,14 @@ pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
 }
 
 #[inline]
-pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn PageManager) {
+pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) {
   leaf_insert0(page, pos, key, val, mngr, false);
 }
 
 // Internal method to insert a key and value in a leaf page.
 // When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
 //   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
-fn leaf_insert0(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, adjust_prefix: bool) {
+fn leaf_insert0(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, adjust_prefix: bool) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   // Insert the bytes into the page.
@@ -626,7 +635,7 @@ pub fn leaf_split(left: &mut [u8], right: &mut [u8], pos: usize) {
   }
 }
 
-pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut dyn PageManager) {
+pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut dyn BlockManager) {
   let buf = leaf_get_cell(&page, pos);
   let overflow_pid = u8_u32!(&buf[12..16]);
   if overflow_pid != INVALID_PAGE_ID {
@@ -640,7 +649,7 @@ pub fn leaf_delete(page: &mut [u8], pos: usize, mngr: &mut dyn PageManager) {
 //
 // This is used to efficiently drop all of the data in the page, after this operation the page
 // has no keys and values.
-pub fn leaf_free(page: &mut [u8], mngr: &mut dyn PageManager) {
+pub fn leaf_free(page: &mut [u8], mngr: &mut dyn BlockManager) {
   let cnt = num_slots(&page);
   for pos in 0..cnt {
     let buf = leaf_get_cell(&page, pos);
@@ -653,7 +662,7 @@ pub fn leaf_free(page: &mut [u8], mngr: &mut dyn PageManager) {
   leaf_init(page);
 }
 
-pub fn leaf_update(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn PageManager) {
+pub fn leaf_update(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) {
   leaf_delete(page, pos, mngr);
   leaf_insert0(page, pos, key, val, mngr, true);
 }
@@ -674,7 +683,7 @@ pub fn leaf_get_prefix(page: &[u8], pos: usize) -> &[u8] {
   &buf[16..16 + prefix_len]
 }
 
-pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut dyn PageManager) -> Vec<u8> {
+pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut dyn BlockManager) -> Vec<u8> {
   let buf = leaf_get_cell(page, pos);
   let prefix_len = u8_u32!(&buf[0..4]) as usize;
   let key_len = u8_u32!(&buf[4..8]) as usize;
@@ -689,7 +698,7 @@ pub fn leaf_get_key(page: &[u8], pos: usize, mngr: &mut dyn PageManager) -> Vec<
   }
 }
 
-pub fn leaf_get_val(page: &[u8], pos: usize, mngr: &mut dyn PageManager) -> Vec<u8> {
+pub fn leaf_get_val(page: &[u8], pos: usize, mngr: &mut dyn BlockManager) -> Vec<u8> {
   let buf = leaf_get_cell(page, pos);
   let prefix_len = u8_u32!(&buf[0..4]) as usize;
   let key_len = u8_u32!(&buf[4..8]) as usize;
@@ -710,7 +719,7 @@ pub fn leaf_get_val(page: &[u8], pos: usize, mngr: &mut dyn PageManager) -> Vec<
 // Runs binary search on the page's keys.
 // Returns position of the match or position where the key is greater than the target and a
 // boolean to indicate whether the key exists or not.
-pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut dyn PageManager) -> (usize, bool) {
+pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut dyn BlockManager) -> (usize, bool) {
   let mut start = 0;
   let mut end = num_slots(page);
 
@@ -794,7 +803,7 @@ fn overflow_free_space(page: &[u8]) -> usize {
 // Writes data into 1 or more overflow pages and returns the starting page id.
 // If data does not fit into one overflow page, the chain is created and the root is returned.
 #[inline]
-fn overflow_write(mngr: &mut dyn PageManager, buf: &[u8]) -> u32 {
+fn overflow_write(mngr: &mut dyn BlockManager, buf: &[u8]) -> u32 {
   let free_len = mngr.page_size() - PAGE_HEADER_SIZE;
   let mut page = vec![0u8; mngr.page_size()];
   let mut curr_id = INVALID_PAGE_ID;
@@ -807,7 +816,7 @@ fn overflow_write(mngr: &mut dyn PageManager, buf: &[u8]) -> u32 {
     write_bytes!(&mut page[PAGE_HEADER_SIZE..], &buf[len - min_len..len]);
     set_next_page(&mut page, curr_id);
     set_free_ptr(&mut page, min_len);
-    curr_id = mngr.write_next(&page);
+    curr_id = mngr.store(&page);
     len -= min_len;
   }
 
@@ -815,13 +824,13 @@ fn overflow_write(mngr: &mut dyn PageManager, buf: &[u8]) -> u32 {
 }
 
 #[inline]
-fn overflow_read(mngr: &mut dyn PageManager, mut page_id: u32, mut off: usize, buf: &mut [u8]) {
+fn overflow_read(mngr: &mut dyn BlockManager, mut page_id: u32, mut off: usize, buf: &mut [u8]) {
   let mut page = vec![0u8; mngr.page_size()];
   let mut boff = 0;
   let blen = buf.len();
 
   while page_id != INVALID_PAGE_ID && boff < blen {
-    mngr.read(page_id, &mut page);
+    mngr.load(page_id, &mut page);
     assert_eq!(page_type(&page), PageType::Overflow, "Invalid page type for overflow data");
     let len = free_ptr(&page);
     if off >= len {
@@ -843,12 +852,12 @@ fn overflow_read(mngr: &mut dyn PageManager, mut page_id: u32, mut off: usize, b
 }
 
 #[inline]
-fn overflow_delete(mngr: &mut dyn PageManager, mut page_id: u32) {
+fn overflow_delete(mngr: &mut dyn BlockManager, mut page_id: u32) {
   let mut page = vec![0u8; mngr.page_size()];
   while page_id != INVALID_PAGE_ID {
-    mngr.read(page_id, &mut page);
+    mngr.load(page_id, &mut page);
     assert_eq!(page_type(&page), PageType::Overflow, "Invalid page type for overflow data");
-    mngr.mark_as_free(page_id);
+    mngr.free(page_id);
     page_id = next_page(&page);
   }
 }
@@ -899,6 +908,13 @@ fn internal_get_cell(page: &[u8], pos: usize) -> &[u8] {
   let off = get_slot(page, pos) as usize;
   let prefix_len = u8_u32!(&page[off + 4..off + 8]) as usize;
   &page[off..off + 16 + prefix_len]
+}
+
+#[inline]
+pub fn internal_get_cell_mut(page: &mut [u8], pos: usize) -> &mut [u8] {
+  let off = get_slot(page, pos) as usize;
+  let prefix_len = u8_u32!(&page[off + 4..off + 8]) as usize;
+  &mut page[off..off + 16 + prefix_len]
 }
 
 #[inline]
@@ -967,14 +983,14 @@ pub fn internal_can_insert(page: &[u8], key: &[u8]) -> bool {
 }
 
 #[inline]
-pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn PageManager) {
+pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn BlockManager) {
   internal_insert0(page, pos, key, mngr, false);
 }
 
 // Internal method to insert a key.
 // When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
 //   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
-fn internal_insert0(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn PageManager, adjust_prefix: bool) {
+fn internal_insert0(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn BlockManager, adjust_prefix: bool) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   let max_len = max_slot_plus_cell_len(&page);
@@ -1062,7 +1078,7 @@ fn internal_insert0(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn Page
   set_free_ptr(page, start);
 }
 
-pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut dyn PageManager) {
+pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut dyn BlockManager) {
   let buf = internal_get_cell(page, pos);
   let overflow_pid = u8_u32!(&buf[12..16]);
   if overflow_pid != INVALID_PAGE_ID {
@@ -1076,7 +1092,7 @@ pub fn internal_delete(page: &mut [u8], pos: usize, mngr: &mut dyn PageManager) 
 //
 // This is used to efficiently drop all of the data in the page, after this operation the page
 // has no keys or any overflow pages.
-pub fn internal_free(page: &mut [u8], mngr: &mut dyn PageManager) {
+pub fn internal_free(page: &mut [u8], mngr: &mut dyn BlockManager) {
   let cnt = num_slots(&page);
   for pos in 0..cnt {
     let buf = internal_get_cell(&page, pos);
@@ -1089,14 +1105,14 @@ pub fn internal_free(page: &mut [u8], mngr: &mut dyn PageManager) {
   internal_init(page);
 }
 
-pub fn internal_update(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn PageManager) {
+pub fn internal_update(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn BlockManager) {
   internal_delete(page, pos, mngr);
   internal_insert0(page, pos, key, mngr, true);
 }
 
 // Moves keys and pointers from the left page to the right page based on the provided position.
 // All values after the position are moved to the right page.
-pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize, mngr: &mut dyn PageManager) {
+pub fn internal_split(left: &mut [u8], right: &mut [u8], pos: usize, mngr: &mut dyn BlockManager) {
   assert_eq!(num_slots(&right), 0, "Internal split: right page is not empty");
 
   let cnt = num_slots(&left);
@@ -1140,7 +1156,7 @@ pub fn internal_get_prefix(page: &[u8], pos: usize) -> &[u8] {
   &buf[16..16 + prefix_len]
 }
 
-pub fn internal_get_key(page: &[u8], pos: usize, mngr: &mut dyn PageManager) -> Vec<u8> {
+pub fn internal_get_key(page: &[u8], pos: usize, mngr: &mut dyn BlockManager) -> Vec<u8> {
   let buf = internal_get_cell(page, pos);
   let prefix_len = u8_u32!(&buf[4..8]) as usize;
   let key_len = u8_u32!(&buf[8..12]) as usize;
@@ -1310,7 +1326,45 @@ pub fn debug(pid: u32, page: &[u8]) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::HashMap;
   use crate::storage::StorageManager;
+
+  // Used for testing only.
+  impl BlockManager for StorageManager {
+    fn page_size(&self) -> usize {
+      self.page_size()
+    }
+
+    fn load(&mut self, pid: u32, buf: &mut [u8]) {
+      self.read(pid, buf);
+    }
+
+    fn store(&mut self, buf: &[u8]) -> u32 {
+      self.write_next(buf)
+    }
+
+    fn free(&mut self, pid: u32) {
+      self.mark_as_free(pid)
+    }
+
+    // Not used in tests.
+    fn commit(&mut self) -> HashMap<u32, u32> {
+      unimplemented!()
+    }
+
+    // Not used in tests.
+    fn rollback(&mut self) {
+      unimplemented!();
+    }
+
+    fn get_mngr(&self) -> &StorageManager {
+      self
+    }
+
+    fn get_mngr_mut(&mut self) -> &mut StorageManager {
+      self
+    }
+  }
 
   #[test]
   fn test_page_overflow_write_read() {

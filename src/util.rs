@@ -3,6 +3,10 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem::size_of;
 
+// ======
+// Macros
+// ======
+
 // Converts byte slice into u32 (little endian)
 macro_rules! u8_u32 {
   ($buf:expr) => {
@@ -50,6 +54,10 @@ macro_rules! write_bytes {
     res!(($slice).write($data));
   }}
 }
+
+// ========================
+// LRU cache implementation
+// ========================
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LruCacheEntry<T: Copy + Debug + PartialEq> {

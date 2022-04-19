@@ -1,8 +1,9 @@
-use crate::storage::{INVALID_PAGE_ID, PageManager};
+use crate::block::BlockManager;
 use crate::page as pg;
+use crate::storage::{INVALID_PAGE_ID};
 
 // Inserts key and value in the btree and returns a new snapshot via a new root page.
-pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager) -> u32 {
+pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   match recur_put(root, &key, &val, mngr, &mut page) {
     BTreePut::Update(id) => id,
@@ -12,7 +13,7 @@ pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager) -> u32
       pg::internal_insert(&mut page, 0, &key, mngr);
       pg::internal_set_ptr(&mut page, 0, left_id);
       pg::internal_set_ptr(&mut page, 1, right_id);
-      mngr.write_next(&page)
+      mngr.store(&page)
     },
   }
 }
@@ -23,15 +24,15 @@ enum BTreePut {
 }
 
 // Puts key and value into btree.
-fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page: &mut [u8]) -> BTreePut {
+fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]) -> BTreePut {
   if root == INVALID_PAGE_ID {
     // Create new leaf page
     pg::leaf_init(page);
     pg::leaf_can_insert(&page, key, val);
     pg::leaf_insert(page, 0, key, val, mngr);
-    BTreePut::Update(mngr.write_next(&page))
+    BTreePut::Update(mngr.store(&page))
   } else {
-    mngr.read(root, page);
+    mngr.load(root, page);
     let (pos, exists) = pg::bsearch(&page, key, mngr);
     match pg::page_type(&page) {
       pg::PageType::Leaf => {
@@ -42,8 +43,8 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
             pg::leaf_insert(page, pos, key, val, mngr);
           }
 
-          let new_root = mngr.write_next(&page);
-          mngr.mark_as_free(root);
+          let new_root = mngr.store(&page);
+          mngr.free(root);
           BTreePut::Update(new_root)
         } else {
           // We need to split the leaf page.
@@ -63,9 +64,9 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
             pg::leaf_insert(page, pos, key, val, mngr);
           }
 
-          let left_pid = mngr.write_next(&page);
-          let right_pid = mngr.write_next(&right_page);
-          mngr.mark_as_free(root);
+          let left_pid = mngr.store(&page);
+          let right_pid = mngr.store(&right_page);
+          mngr.free(root);
           BTreePut::Split(left_pid, right_pid, skey)
         }
       },
@@ -76,8 +77,8 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
         match recur_put(pg::internal_get_ptr(&page, ptr), key, val, mngr, &mut right_page) {
           BTreePut::Update(id) => {
             pg::internal_set_ptr(page, ptr, id);
-            let new_root = mngr.write_next(&page);
-            mngr.mark_as_free(root);
+            let new_root = mngr.store(&page);
+            mngr.free(root);
             BTreePut::Update(new_root)
           },
           BTreePut::Split(left_id, right_id, key) => {
@@ -86,8 +87,8 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
               pg::internal_set_ptr(page, pos, left_id);
               pg::internal_set_ptr(page, pos + 1, right_id);
 
-              let new_root = mngr.write_next(&page);
-              mngr.mark_as_free(root);
+              let new_root = mngr.store(&page);
+              mngr.free(root);
               BTreePut::Update(new_root)
             } else {
               // We need to split internal page.
@@ -124,9 +125,9 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
                 pg::internal_set_ptr(page, pos + 1, right_id);
               }
 
-              let left_pid = mngr.write_next(&page);
-              let right_pid = mngr.write_next(&right_page);
-              mngr.mark_as_free(root);
+              let left_pid = mngr.store(&page);
+              let right_pid = mngr.store(&right_page);
+              mngr.free(root);
               BTreePut::Split(left_pid, right_pid, skey)
             }
           }
@@ -140,7 +141,7 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn PageManager, page
 }
 
 // Returns value for the key if the key exists, otherwise None.
-pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn PageManager) -> Option<Vec<u8>> {
+pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> Option<Vec<u8>> {
   if root == INVALID_PAGE_ID {
     return None;
   }
@@ -148,7 +149,7 @@ pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn PageManager) -> Option<Vec<
   let mut page = vec![0u8; mngr.page_size()];
 
   loop {
-    mngr.read(root, &mut page);
+    mngr.load(root, &mut page);
     let (pos, exists) = pg::bsearch(&page, key, mngr);
     match pg::page_type(&page) {
       pg::PageType::Leaf => {
@@ -166,7 +167,7 @@ pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn PageManager) -> Option<Vec<
 }
 
 // Deletes the key in the btree and returns a new snapshot via a new root page.
-pub fn del(root: u32, key: &[u8], mngr: &mut dyn PageManager) -> u32 {
+pub fn del(root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   match recur_del(root, key, mngr, &mut page) {
     BTreeDel::Empty => root,
@@ -174,17 +175,17 @@ pub fn del(root: u32, key: &[u8], mngr: &mut dyn PageManager) -> u32 {
       if num_slots > 0 {
         pid
       } else {
-        mngr.read(pid, &mut page);
+        mngr.load(pid, &mut page);
         match pg::page_type(&page) {
           pg::PageType::Internal => {
             // Current node is empty, return the child page instead.
             let next_pid = pg::internal_get_ptr(&page, 0);
-            mngr.mark_as_free(pid);
+            mngr.free(pid);
             next_pid
           },
           pg::PageType::Leaf => {
             // Btree is empty, delete the current page and return invalid pointer.
-            mngr.mark_as_free(pid);
+            mngr.free(pid);
             INVALID_PAGE_ID
           },
           unsupported_type => panic!("Invalid page type: {:?}", unsupported_type),
@@ -199,12 +200,12 @@ enum BTreeDel {
   Update(u32 /* page id */, usize /* num slots */, Option<Vec<u8>> /* next smallest key */),
 }
 
-fn recur_del(root: u32, key: &[u8], mngr: &mut dyn PageManager, page: &mut [u8]) -> BTreeDel {
+fn recur_del(root: u32, key: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]) -> BTreeDel {
   if root == INVALID_PAGE_ID {
     // Nothing to delete.
     BTreeDel::Empty
   } else {
-    mngr.read(root, page);
+    mngr.load(root, page);
     // Perform search to find the position of the key and whether or not it exists
     let (pos, exists) = pg::bsearch(&page, key, mngr);
     match pg::page_type(&page) {
@@ -219,8 +220,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut dyn PageManager, page: &mut [u8])
           }
 
           let new_num_slots = pg::num_slots(&page);
-          let new_root = mngr.write_next(&page);
-          mngr.mark_as_free(root);
+          let new_root = mngr.store(&page);
+          mngr.free(root);
           BTreeDel::Update(new_root, new_num_slots, next_smallest_key)
         } else {
           BTreeDel::Empty
@@ -247,59 +248,59 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut dyn PageManager, page: &mut [u8])
             }
 
             if child_num_slots < pg::PAGE_MIN_SLOTS {
-              mngr.read(child_id, &mut child_page);
+              mngr.load(child_id, &mut child_page);
               let mut sib_page = vec![0u8; mngr.page_size()];
 
               // Check the left sibling page.
               if ptr > 0 {
                 let sib_id = pg::internal_get_ptr(&page, ptr - 1);
-                mngr.read(sib_id, &mut sib_page);
+                mngr.load(sib_id, &mut sib_page);
 
                 if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS &&
                     pg::steal_from_left(page, ptr, &mut child_page, &mut sib_page, mngr) {
-                  let new_child_id = mngr.write_next(&mut child_page);
-                  let new_sib_id = mngr.write_next(&mut sib_page);
+                  let new_child_id = mngr.store(&mut child_page);
+                  let new_sib_id = mngr.store(&mut sib_page);
                   pg::internal_set_ptr(page, ptr - 1, new_sib_id);
                   pg::internal_set_ptr(page, ptr, new_child_id);
 
-                  mngr.mark_as_free(child_id);
-                  mngr.mark_as_free(sib_id);
+                  mngr.free(child_id);
+                  mngr.free(sib_id);
                 } else if pg::merge(page, ptr - 1, &mut sib_page, &mut child_page, mngr) {
                   // Merge current into the left sibling page.
-                  let new_sib_id = mngr.write_next(&mut sib_page);
+                  let new_sib_id = mngr.store(&mut sib_page);
                   pg::internal_set_ptr(page, ptr - 1, new_sib_id);
 
-                  mngr.mark_as_free(child_id);
-                  mngr.mark_as_free(sib_id);
+                  mngr.free(child_id);
+                  mngr.free(sib_id);
                 }
               } else if ptr < pg::num_slots(&page) {
                 // Check the left sibling page.
                 let sib_id = pg::internal_get_ptr(&page, ptr + 1);
-                mngr.read(sib_id, &mut sib_page);
+                mngr.load(sib_id, &mut sib_page);
 
                 if pg::num_slots(&sib_page) > pg::PAGE_MIN_SLOTS &&
                     pg::steal_from_right(page, ptr, &mut child_page, &mut sib_page, mngr) {
-                  let new_child_id = mngr.write_next(&mut child_page);
-                  let new_sib_id = mngr.write_next(&mut sib_page);
+                  let new_child_id = mngr.store(&mut child_page);
+                  let new_sib_id = mngr.store(&mut sib_page);
                   pg::internal_set_ptr(page, ptr, new_child_id);
                   pg::internal_set_ptr(page, ptr + 1, new_sib_id);
 
-                  mngr.mark_as_free(child_id);
-                  mngr.mark_as_free(sib_id);
+                  mngr.free(child_id);
+                  mngr.free(sib_id);
                 } else if pg::merge(page, ptr, &mut child_page, &mut sib_page, mngr) {
                   // Merge the right sibling page into current.
-                  let new_child_id = mngr.write_next(&mut child_page);
+                  let new_child_id = mngr.store(&mut child_page);
                   pg::internal_set_ptr(page, ptr, new_child_id);
 
-                  mngr.mark_as_free(child_id);
-                  mngr.mark_as_free(sib_id);
+                  mngr.free(child_id);
+                  mngr.free(sib_id);
                 }
               }
             }
 
             let new_num_slots = pg::num_slots(&page);
-            let new_root = mngr.write_next(&page);
-            mngr.mark_as_free(root);
+            let new_root = mngr.store(&page);
+            mngr.free(root);
             BTreeDel::Update(new_root, new_num_slots, next_smallest_key)
           },
         }
@@ -313,7 +314,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut dyn PageManager, page: &mut [u8])
 
 // Drops all of the pages - overflow, leaf, and internal - that compose the current B+ tree.
 // Equivalent of deleting all of the data but rather more efficiently instead of a key at a time.
-pub fn drop(root: u32, mngr: &mut dyn PageManager) -> u32 {
+pub fn drop(root: u32, mngr: &mut dyn BlockManager) -> u32 {
   let mut page = vec![0u8; mngr.page_size()];
   recur_drop(root, mngr, &mut page);
   // We can return an invalid page id indicating that the tree is now empty.
@@ -321,12 +322,12 @@ pub fn drop(root: u32, mngr: &mut dyn PageManager) -> u32 {
 }
 
 // We assume that the root is a valid page.
-fn recur_drop(root: u32, mngr: &mut dyn PageManager, page: &mut [u8]) {
+fn recur_drop(root: u32, mngr: &mut dyn BlockManager, page: &mut [u8]) {
   if root == INVALID_PAGE_ID {
     return;
   }
-  mngr.read(root, page);
-  mngr.mark_as_free(root);
+  mngr.load(root, page);
+  mngr.free(root);
   match pg::page_type(&page) {
     pg::PageType::Internal => {
       let cnt = pg::num_slots(&page);
@@ -359,7 +360,7 @@ pub struct BTreeIter<'a> {
   root: u32,
   stack: Vec<(u32, usize, usize)>, // stack of internal pages, (page id, pos, num_slots)
   end_key: Option<Vec<u8>>,
-  mngr: &'a mut dyn PageManager,
+  mngr: &'a mut dyn BlockManager,
   page: Vec<u8>, // temporary buffer to load pages
   pos: usize, // position in the current leaf node
 }
@@ -367,7 +368,7 @@ pub struct BTreeIter<'a> {
 impl<'a> BTreeIter<'a> {
   // Creates a new iterator.
   // If start and end keys are not provided, full range is returned.
-  pub fn new(mut root: u32, start_key: Option<&[u8]>, end_key: Option<&[u8]>, mngr: &'a mut dyn PageManager) -> Self {
+  pub fn new(mut root: u32, start_key: Option<&[u8]>, end_key: Option<&[u8]>, mngr: &'a mut dyn BlockManager) -> Self {
     let mut page = vec![0u8; mngr.page_size()];
     let mut stack = Vec::new();
 
@@ -375,7 +376,7 @@ impl<'a> BTreeIter<'a> {
       return Self { root, stack, end_key: None, mngr, page, pos: 0 };
     }
 
-    mngr.read(root, &mut page);
+    mngr.load(root, &mut page);
     while pg::page_type(&page) == pg::PageType::Internal {
       let pos = if let Some(key) = start_key {
         let (pos, exists) = pg::bsearch(&page, key, mngr);
@@ -385,7 +386,7 @@ impl<'a> BTreeIter<'a> {
       };
       stack.push((root, pos, pg::num_slots(&page)));
       root = pg::internal_get_ptr(&page, pos);
-      mngr.read(root, &mut page);
+      mngr.load(root, &mut page);
     }
 
     // At this point, root is a leaf page, find the starting position.
@@ -423,14 +424,14 @@ impl<'a> Iterator for BTreeIter<'a> {
             self.stack.push((pid, pos, num_slots)); // update stack with new position
 
             // Iterate top down to a leaf page.
-            self.mngr.read(pid, &mut self.page);
+            self.mngr.load(pid, &mut self.page);
             let mut next_pid = pg::internal_get_ptr(&self.page, pos);
 
-            self.mngr.read(next_pid, &mut self.page);
+            self.mngr.load(next_pid, &mut self.page);
             while pg::page_type(&self.page) == pg::PageType::Internal {
               self.stack.push((next_pid, 0, pg::num_slots(&self.page)));
               next_pid = pg::internal_get_ptr(&self.page, 0);
-              self.mngr.read(next_pid, &mut self.page);
+              self.mngr.load(next_pid, &mut self.page);
             }
 
             // At this point, &page has the leaf page data.
@@ -445,19 +446,19 @@ impl<'a> Iterator for BTreeIter<'a> {
 }
 
 // Debug method to print btree starting with `root`.
-pub fn btree_debug(root: u32, mngr: &mut dyn PageManager) {
+pub fn btree_debug(root: u32, mngr: &mut dyn BlockManager) {
   let mut page = vec![0u8; mngr.page_size()];
   btree_debug_recur(root, &mut page, mngr, 2);
   println!();
 }
 
-fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut dyn PageManager, offset: usize) {
+fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, offset: usize) {
   if root == INVALID_PAGE_ID {
     println!("{:>width$} INVALID PAGE", "!", width = offset);
     return;
   }
 
-  mngr.read(root, page);
+  mngr.load(root, page);
   let cnt = pg::num_slots(&page);
   match pg::page_type(&page) {
     pg::PageType::Leaf if cnt == 0 => {
@@ -516,7 +517,7 @@ mod tests {
     assert_eq!(mngr.num_pages(), 1);
 
     let mut buf = vec![0u8; mngr.page_size()];
-    mngr.read(root, &mut buf);
+    mngr.load(root, &mut buf);
 
     assert_eq!(pg::page_type(&buf), pg::PageType::Leaf);
     assert_eq!(pg::num_slots(&buf), 1);
@@ -549,7 +550,7 @@ mod tests {
     }
 
     let mut buf = vec![0u8; mngr.page_size()];
-    mngr.read(root, &mut buf);
+    mngr.load(root, &mut buf);
 
     assert_eq!(pg::page_type(&buf), pg::PageType::Internal);
     assert_eq!(pg::num_slots(&buf), 1);
@@ -557,11 +558,11 @@ mod tests {
     let ptr0 = pg::internal_get_ptr(&buf, 0);
     let ptr1 = pg::internal_get_ptr(&buf, 1);
 
-    mngr.read(ptr0, &mut buf);
+    mngr.load(ptr0, &mut buf);
     assert_eq!(pg::page_type(&buf), pg::PageType::Leaf);
     assert_eq!(pg::num_slots(&buf), 5);
 
-    mngr.read(ptr1, &mut buf);
+    mngr.load(ptr1, &mut buf);
     assert_eq!(pg::page_type(&buf), pg::PageType::Leaf);
     assert_eq!(pg::num_slots(&buf), 6);
   }
@@ -576,7 +577,7 @@ mod tests {
     }
 
     let mut buf = vec![0u8; mngr.page_size()];
-    mngr.read(root, &mut buf);
+    mngr.load(root, &mut buf);
 
     assert_eq!(pg::page_type(&buf), pg::PageType::Internal);
     assert_eq!(pg::num_slots(&buf), 1);
@@ -584,11 +585,11 @@ mod tests {
     let ptr0 = pg::internal_get_ptr(&buf, 0);
     let ptr1 = pg::internal_get_ptr(&buf, 1);
 
-    mngr.read(ptr0, &mut buf);
+    mngr.load(ptr0, &mut buf);
     assert_eq!(pg::page_type(&buf), pg::PageType::Internal);
     assert_eq!(pg::num_slots(&buf), 5);
 
-    mngr.read(ptr1, &mut buf);
+    mngr.load(ptr1, &mut buf);
     assert_eq!(pg::page_type(&buf), pg::PageType::Internal);
     assert_eq!(pg::num_slots(&buf), 6);
   }
@@ -735,46 +736,46 @@ mod tests {
     pg::leaf_init(&mut page);
     pg::leaf_insert(&mut page, 0, &[1], &[1], &mut mngr);
     pg::leaf_insert(&mut page, 1, &[2], &[2], &mut mngr);
-    let leaf_1 = mngr.write_next(&page);
+    let leaf_1 = mngr.store(&page);
 
     // Leaf 2
     pg::leaf_init(&mut page);
     pg::leaf_insert(&mut page, 0, &[4], &[4], &mut mngr);
     pg::leaf_insert(&mut page, 1, &[5], &[5], &mut mngr);
-    let leaf_2 = mngr.write_next(&page);
+    let leaf_2 = mngr.store(&page);
 
     // Internal 1
     pg::internal_init(&mut page);
     pg::internal_set_ptr(&mut page, 0, leaf_1);
     pg::internal_insert(&mut page, 0, &[3], &mut mngr);
     pg::internal_set_ptr(&mut page, 1, leaf_2);
-    let internal_1 = mngr.write_next(&page);
+    let internal_1 = mngr.store(&page);
 
     // Leaf 3
     pg::leaf_init(&mut page);
     pg::leaf_insert(&mut page, 0, &[6], &[6], &mut mngr);
     pg::leaf_insert(&mut page, 1, &[7], &[7], &mut mngr);
-    let leaf_3 = mngr.write_next(&page);
+    let leaf_3 = mngr.store(&page);
 
     // Leaf 4
     pg::leaf_init(&mut page);
     pg::leaf_insert(&mut page, 0, &[9], &[9], &mut mngr);
     pg::leaf_insert(&mut page, 1, &[10], &[10], &mut mngr);
-    let leaf_4 = mngr.write_next(&page);
+    let leaf_4 = mngr.store(&page);
 
     // Internal 2
     pg::internal_init(&mut page);
     pg::internal_set_ptr(&mut page, 0, leaf_3);
     pg::internal_insert(&mut page, 0, &[8], &mut mngr);
     pg::internal_set_ptr(&mut page, 1, leaf_4);
-    let internal_2 = mngr.write_next(&page);
+    let internal_2 = mngr.store(&page);
 
     // Root
     pg::internal_init(&mut page);
     pg::internal_set_ptr(&mut page, 0, internal_1);
     pg::internal_insert(&mut page, 0, &[6], &mut mngr);
     pg::internal_set_ptr(&mut page, 1, internal_2);
-    let mut root = mngr.write_next(&page);
+    let mut root = mngr.store(&page);
 
     // Check that the tree structure is correct.
     for &i in &[1, 2, 4, 5, 6, 7, 9, 10] {
@@ -1005,7 +1006,7 @@ mod tests {
     input.shuffle(&mut thread_rng());
   }
 
-  fn assert_find(root: u32, keys: &[Vec<u8>], mngr: &mut dyn PageManager, assert_match: bool) {
+  fn assert_find(root: u32, keys: &[Vec<u8>], mngr: &mut dyn BlockManager, assert_match: bool) {
     for key in keys {
       let res = get(root, key, mngr);
       if assert_match && res != Some(key.to_vec()) {

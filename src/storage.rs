@@ -540,7 +540,7 @@ impl Drop for StorageManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
   use super::*;
   use std::env::temp_dir;
   use std::fs::remove_file;
@@ -575,7 +575,9 @@ mod tests {
     }
   }
 
-  fn with_tmp_file<F>(func: F) where F: Fn(&str) -> () {
+  // Creates a temporary file for tests.
+  // Public so other modules can reuse this function.
+  pub fn with_tmp_file<F>(func: F) where F: Fn(&str) -> () {
     let tmp = TempFile::new();
     println!("path: {}", tmp.path());
     func(tmp.path());
