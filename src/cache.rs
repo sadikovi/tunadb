@@ -18,7 +18,7 @@ const VID_MASK: u32 = !0x7fffffff;
 
 // Returns true if it is a physical page id.
 #[inline]
-fn is_physical_page_id(id: u32) -> bool {
+pub fn is_physical_page_id(id: u32) -> bool {
   VID_MASK & id == 0
 }
 

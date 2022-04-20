@@ -3,20 +3,21 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use crate::btree;
 use crate::block::BlockManager;
+use crate::cache::is_physical_page_id;
 use crate::storage::INVALID_PAGE_ID;
 
 // Transaction for working with BTree instances.
 pub struct Transaction {
   id: usize,
   mngr: Rc<RefCell<dyn BlockManager>>, // shared mutability
-  tables: HashMap<String, u32>, // mapping of table id to page id
-  active: bool,
+  trees: HashMap<String, (u32, bool)>, // mapping of tree name to page id + is_dirty flag
+  is_valid: bool,
 }
 
 impl Transaction {
   // Creates new transaction.
   pub fn new(id: usize, mngr: Rc<RefCell<dyn BlockManager>>) -> Self {
-    Self { id, mngr, tables: HashMap::new(), active: true }
+    Self { id, mngr, trees: HashMap::new(), is_valid: true }
   }
 
   // Returns transaction id.
@@ -25,41 +26,45 @@ impl Transaction {
     self.id
   }
 
-  // Returns true if the transaction is active/valid.
+  // Returns true if the transaction is valid.
   #[inline]
   pub fn is_valid(&self) -> bool {
-    self.active
+    self.is_valid
   }
 
-  // Checks if the current transaction is active and panics otherwise.
+  // Checks if the current transaction is valid and panics otherwise.
   #[inline]
-  pub fn assert_active(&self) {
-    assert!(self.active, "Transaction {} is not active", self.id);
+  pub fn assert_valid(&self) {
+    assert!(self.is_valid, "Transaction {} is not valid", self.id);
   }
 
   // Commits all of the tables updated in the transaction.
   pub fn commit(&mut self) {
-    self.assert_active();
+    self.assert_valid();
+
     // 1. Commit all of the written pages.
     let vid_to_pid = self.mngr.borrow_mut().commit();
 
-    if vid_to_pid.len() == 0 {
-      // Nothing has changed, we can safely return.
-      return;
-    }
-
     // 2. Resolve root page id.
     let mut root = self.get_root_page();
-    for (k, v) in &self.tables {
-      let pid = vid_to_pid.get(v)
-        .expect(&format!("Table {} (vid {}) could not be resolved", k, v));
+    for (k, &(id, is_dirty)) in &self.trees {
+      let pid = match id {
+        vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
+          *vid_to_pid.get(&vid)
+            .expect(&format!("Table {} (vid {}, dirty {}) could not be resolved", k, vid, is_dirty)),
+        pid => pid,
+      };
       root = btree::put(root, k.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
     }
 
     // 3. Update the root tree + commit.
     let vid_to_pid = self.mngr.borrow_mut().commit();
-    let &root = vid_to_pid.get(&root)
-      .expect(&format!("Root page (vid {}) could not be resolved", root));
+    let root = match root {
+      vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
+        *vid_to_pid.get(&vid)
+          .expect(&format!("Root page (vid {}) could not be resolved", root)),
+      pid => pid,
+    };
 
     // 4. Sync storage manager.
     self.set_root_page(root);
@@ -69,7 +74,7 @@ impl Transaction {
 
   // Rolls back all of the written tables.
   pub fn rollback(&mut self) {
-    self.assert_active();
+    self.assert_valid();
     self.mngr.borrow_mut().rollback();
     self.mngr.borrow_mut().get_mngr_mut().sync();
     self.invalidate();
@@ -78,24 +83,33 @@ impl Transaction {
   // Registers table for the first time.
   // Only called once per table within the transaction.
   #[inline]
-  fn register(&mut self, name: &str, root: u32) {
-    assert_eq!(self.tables.insert(name.to_owned(), root), None, "BTree '{}' already exists", name);
+  fn register(&mut self, name: &str, root: u32, is_dirty: bool) {
+    assert_eq!(
+      self.trees.insert(name.to_owned(), (root, is_dirty)),
+      None,
+      "BTree '{}' already exists", name
+    );
   }
 
   // Updates the root page for the table with the provided name.
   #[inline]
-  fn update(&mut self, name: &str, root: u32) {
-    match self.tables.get_mut(name) {
-      Some(pid) => *pid = root,
-      None => panic!("No such btree '{}' in the current transaction {}", name, self.id),
+  fn update(&mut self, name: &str, root: u32, is_dirty: bool) {
+    match self.trees.get_mut(name) {
+      Some((pid, dirty)) => {
+        *pid = root;
+        *dirty = is_dirty;
+      },
+      None => {
+        panic!("No such btree '{}' in the current transaction {}", name, self.id);
+      },
     }
   }
 
   // Invalidates transaction and clears state.
   #[inline]
   fn invalidate(&mut self) {
-    self.active = false;
-    self.tables.clear();
+    self.is_valid = false;
+    self.trees.clear();
   }
 
   // Returns the root page id or INVALID_PAGE_ID if none are set.
@@ -114,7 +128,7 @@ impl Transaction {
 
 impl Drop for Transaction {
   fn drop(&mut self) {
-    if self.active {
+    if self.is_valid {
       self.rollback();
     }
   }
@@ -130,9 +144,9 @@ impl BTree {
   // Creates a new btree with the provided name.
   // Panics if the tree already exists.
   pub fn new(name: String, txn: Rc<RefCell<Transaction>>) -> Self {
-    txn.borrow().assert_active();
+    txn.borrow().assert_valid();
     let root = INVALID_PAGE_ID; // empty table
-    txn.borrow_mut().register(&name, root);
+    txn.borrow_mut().register(&name, root, true); // new table is always dirty
     Self { name, root, txn }
   }
 
@@ -148,7 +162,7 @@ impl BTree {
     };
 
     if let Some(tree) = opt.as_ref() {
-      txn.borrow_mut().register(&tree.name, tree.root);
+      txn.borrow_mut().register(&tree.name, tree.root, false); // existing tree is clean
     }
 
     opt
@@ -156,27 +170,38 @@ impl BTree {
 
   // Inserts/updates key-value pair.
   pub fn put(&mut self, key: &[u8], val: &[u8]) {
-    self.txn.borrow().assert_active();
+    self.txn.borrow().assert_valid();
     let mut txn = self.txn.borrow_mut();
     self.root = btree::put(self.root, key, val, &mut *txn.mngr.borrow_mut());
-    txn.update(&self.name, self.root);
+    txn.update(&self.name, self.root, true);
+
   }
 
   // Returns a value for the provided key.
   pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-    self.txn.borrow().assert_active();
-    let mut txn = self.txn.borrow_mut();
+    self.txn.borrow().assert_valid();
+    let txn = self.txn.borrow_mut();
     let res = btree::get(self.root, key, &mut *txn.mngr.borrow_mut());
-    txn.update(&self.name, self.root);
+    // We don't need to update the root page or is_dirty flag here.
     res
   }
 
   // Deletes the key in the btree.
   pub fn del(&mut self, key: &[u8]) {
-    self.txn.borrow().assert_active();
+    self.txn.borrow().assert_valid();
     let mut txn = self.txn.borrow_mut();
     self.root = btree::del(self.root, key, &mut *txn.mngr.borrow_mut());
-    txn.update(&self.name, self.root);
+    txn.update(&self.name, self.root, true);
+  }
+
+  // Returns all of the key-value pairs in the btree.
+  pub fn list(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    self.txn.borrow().assert_valid();
+    let txn = self.txn.borrow_mut();
+    // We don't need to update the root page or is_dirty flag here.
+    let mngr = &mut *txn.mngr.borrow_mut();
+    // TODO: optimise this, we should return an iterator here.
+    btree::BTreeIter::new(self.root, None, None, mngr).collect()
   }
 }
 

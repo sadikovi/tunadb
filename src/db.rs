@@ -72,7 +72,8 @@ pub fn open(path: Option<&str>) -> DbBuilder {
 impl DB {
   // Starts a new transaction and runs any operations within it.
   // When auto_commit is enabled, commits by the end of the function.
-  pub fn with_txn<F>(&mut self, auto_commit: bool, func: F) where F: Fn(Rc<RefCell<Transaction>>) {
+  pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> T
+      where F: Fn(Rc<RefCell<Transaction>>) -> T, {
     match &self.curr_txn {
       Some(txn) => {
         panic!("Transaction {} is active", txn.borrow().id());
@@ -84,7 +85,7 @@ impl DB {
 
     let txn = Rc::new(RefCell::new(self.new_txn()));
     self.curr_txn = Some(txn.clone());
-    func(txn.clone());
+    let res = func(txn.clone());
     // Roll back all of the changes if they have not been explicitly committed.
     if txn.borrow().is_valid() {
       if auto_commit {
@@ -94,6 +95,8 @@ impl DB {
       }
     }
     self.curr_txn = None;
+
+    res
   }
 
   // Creates a new transaction.
