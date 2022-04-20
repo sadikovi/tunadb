@@ -10,6 +10,7 @@ enum Cmd {
   Del(Vec<u8> /* key */),
   Exists(Vec<u8> /* key */),
   List, // lists all of the keys and values in the database
+  Open(String), // opens a database
   Help,
   Unknown,
 }
@@ -56,6 +57,11 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
       finish(&mut iter)?;
       Cmd::List
     },
+    Some("OPEN") | Some("open") => {
+      let key = advance(&mut iter)?;
+      finish(&mut iter)?;
+      Cmd::Open(key.to_owned())
+    },
     Some("HELP") | Some("help") => {
       finish(&mut iter)?;
       Cmd::Help
@@ -65,8 +71,7 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
   Ok(cmd)
 }
 
-fn with_table<F, T>(func: F) -> T where F: Fn(&mut BTree) -> T, {
-  let mut db = db::open(Some("./test.db")).build();
+fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut BTree) -> T, {
   db.with_txn(true, |txn| {
     let mut table = BTree::find("kv", txn.clone())
       .unwrap_or_else(|| BTree::new("kv".to_owned(), txn));
@@ -80,17 +85,22 @@ fn main() {
   println!("=============================");
   println!("Type \"help\" command to start");
   println!();
+
+  let mut curr_db = db::open(None).build();
+  println!("Using an in-memory database");
+  println!();
+
   let mut input = String::new();
   loop {
     print!("> ");
-    io::stdout().flush();
+    io::stdout().flush().unwrap();
     match io::stdin().read_line(&mut input)
       .map_err(|err| err.to_string())
       .and_then(|_| parse_cmd(&input)) {
       Ok(cmd) => {
         match &cmd {
           Cmd::Get(key) => {
-            let val = with_table(|table| {
+            let val = with_table(&mut curr_db, |table| {
               table.get(key).map(|v| String::from_utf8(v).unwrap())
             });
             if let Some(v) = val {
@@ -98,25 +108,25 @@ fn main() {
             }
           },
           Cmd::Set(key, val) => {
-            with_table(|table| {
+            with_table(&mut curr_db, |table| {
               table.put(key, val);
             });
             println!("Done.");
           },
           Cmd::Del(key) => {
-            with_table(|table| {
+            with_table(&mut curr_db, |table| {
               table.del(key);
             });
             println!("Done.");
           },
           Cmd::Exists(key) => {
-            let exists = with_table(|table| {
+            let exists = with_table(&mut curr_db, |table| {
               table.get(key).is_some()
             });
             println!("{}", exists);
           },
           Cmd::List => {
-            with_table(|table| {
+            with_table(&mut curr_db, |table| {
               let keys = table.list();
               for (key, val) in &keys {
                 let key = std::str::from_utf8(key).unwrap();
@@ -124,7 +134,11 @@ fn main() {
                 println!("{}: {}", key, val);
               }
             });
-          }
+          },
+          Cmd::Open(path) => {
+            println!("Switching to database {}", path);
+            curr_db = db::open(Some(path)).build();
+          },
           Cmd::Help => {
             println!("Available commands:");
             println!("  SET <key> <value>   sets value for the key.");
@@ -132,6 +146,7 @@ fn main() {
             println!("  GET <key>           returns value for the key if exists.");
             println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
             println!("  LIST                lists all of the key-value pairs.");
+            println!("  OPEN <path>         opens a database at the path");
             println!("  HELP                shows this message.");
             println!();
           },
