@@ -71,6 +71,65 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
   Ok(cmd)
 }
 
+fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
+  match &cmd {
+    Cmd::Get(key) => {
+      let val = with_table(curr_db, |table| {
+        table.get(key).map(|v| String::from_utf8(v).unwrap())
+      });
+      if let Some(v) = val {
+        println!("{}", v);
+      }
+    },
+    Cmd::Set(key, val) => {
+      with_table(curr_db, |table| {
+        table.put(key, val);
+      });
+      println!("Done.");
+    },
+    Cmd::Del(key) => {
+      with_table(curr_db, |table| {
+        table.del(key);
+      });
+      println!("Done.");
+    },
+    Cmd::Exists(key) => {
+      let exists = with_table(curr_db, |table| {
+        table.get(key).is_some()
+      });
+      println!("{}", exists);
+    },
+    Cmd::List => {
+      with_table(curr_db, |table| {
+        let keys = table.list();
+        for (key, val) in &keys {
+          let key = std::str::from_utf8(key).unwrap();
+          let val = std::str::from_utf8(val).unwrap();
+          println!("{}: {}", key, val);
+        }
+      });
+    },
+    Cmd::Open(path) => {
+      *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_owned())?;
+    },
+    Cmd::Help => {
+      println!("Available commands:");
+      println!("  SET <key> <value>   sets value for the key.");
+      println!("  DEL <key>           deletes the key.");
+      println!("  GET <key>           returns value for the key if exists.");
+      println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
+      println!("  LIST                lists all of the key-value pairs.");
+      println!("  OPEN <path>         opens a database at the path");
+      println!("  HELP                shows this message.");
+      println!();
+    },
+    Cmd::Unknown => {
+      println!("Unknown command.");
+    },
+  }
+  Ok(())
+}
+
 fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut BTree) -> T, {
   db.with_txn(true, |txn| {
     let mut table = BTree::find("kv", txn.clone())
@@ -94,78 +153,15 @@ fn main() {
   loop {
     print!("> ");
     io::stdout().flush().unwrap();
-    match io::stdin().read_line(&mut input)
+    let res = io::stdin().read_line(&mut input)
       .map_err(|err| err.to_string())
-      .and_then(|_| parse_cmd(&input)) {
-      Ok(cmd) => {
-        match &cmd {
-          Cmd::Get(key) => {
-            let val = with_table(&mut curr_db, |table| {
-              table.get(key).map(|v| String::from_utf8(v).unwrap())
-            });
-            if let Some(v) = val {
-              println!("{}", v);
-            }
-          },
-          Cmd::Set(key, val) => {
-            with_table(&mut curr_db, |table| {
-              table.put(key, val);
-            });
-            println!("Done.");
-          },
-          Cmd::Del(key) => {
-            with_table(&mut curr_db, |table| {
-              table.del(key);
-            });
-            println!("Done.");
-          },
-          Cmd::Exists(key) => {
-            let exists = with_table(&mut curr_db, |table| {
-              table.get(key).is_some()
-            });
-            println!("{}", exists);
-          },
-          Cmd::List => {
-            with_table(&mut curr_db, |table| {
-              let keys = table.list();
-              for (key, val) in &keys {
-                let key = std::str::from_utf8(key).unwrap();
-                let val = std::str::from_utf8(val).unwrap();
-                println!("{}: {}", key, val);
-              }
-            });
-          },
-          Cmd::Open(path) => {
-            match db::open(Some(path)).try_build() {
-              Ok(db0) => {
-                println!("Switching to database {}", path);
-                curr_db = db0;
-              },
-              Err(err) => {
-                println!("Error: {:?}", err.msg());
-              }
-            }
-          },
-          Cmd::Help => {
-            println!("Available commands:");
-            println!("  SET <key> <value>   sets value for the key.");
-            println!("  DEL <key>           deletes the key.");
-            println!("  GET <key>           returns value for the key if exists.");
-            println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
-            println!("  LIST                lists all of the key-value pairs.");
-            println!("  OPEN <path>         opens a database at the path");
-            println!("  HELP                shows this message.");
-            println!();
-          },
-          Cmd::Unknown => {
-            println!("Unknown command.");
-          }
-        };
-      },
-      Err(error) => {
-        println!("Error: {}", error);
-      }
+      .and_then(|_| parse_cmd(&input))
+      .and_then(|cmd| exec_cmd(&mut curr_db, cmd));
+
+    if let Err(err) = res {
+      println!("Error: {}", err);
     }
+
     input.clear();
   }
 }

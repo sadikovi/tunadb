@@ -21,16 +21,20 @@ pub struct DbBuilder {
 }
 
 impl DbBuilder {
+  // Creates a database with the provided page size.
+  // If the database has already been created, this configuration has no effect.
   pub fn with_page_size(mut self, page_size: u32) -> Self {
     self.page_size = page_size;
     self
   }
 
+  // Configures the maximum memory for the page cache.
   pub fn with_max_mem(mut self, max_mem: usize) -> Self {
     self.max_mem = max_mem;
     self
   }
 
+  // Creates a database handle.
   pub fn try_build(self) -> Res<DB> {
     let mngr: Rc<RefCell<dyn BlockManager>> = match self.path {
       Some(p) => {
