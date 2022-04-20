@@ -237,21 +237,21 @@ mod tests {
   fn test_txn_update_failure() {
     let cache = get_block_mngr();
     let mut txn = Transaction::new(0, cache);
-    txn.update("abc", 100);
+    txn.update("abc", 100, true);
   }
 
   #[test]
-  fn test_txn_update_ok() {
+  fn test_txn_register_update_ok() {
     let cache = get_block_mngr();
     let mut txn = Transaction::new(0, cache);
 
     let tname = "abc";
 
-    txn.tables.insert(tname.to_owned(), INVALID_PAGE_ID);
+    txn.register(tname, INVALID_PAGE_ID, false);
+    assert_eq!(txn.trees.get(tname), Some(&(INVALID_PAGE_ID, false)));
 
-    txn.update(tname, 100);
-
-    assert_eq!(txn.tables.get(tname), Some(&100));
+    txn.update(tname, 100, true);
+    assert_eq!(txn.trees.get(tname), Some(&(100, true)));
   }
 
   #[test]

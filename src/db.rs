@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::block::BlockManager;
 use crate::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
+use crate::error::Res;
 use crate::storage::{DEFAULT_PAGE_SIZE, StorageManager};
 use crate::txn::Transaction;
 
@@ -30,13 +31,13 @@ impl DbBuilder {
     self
   }
 
-  pub fn build(self) -> DB {
+  pub fn try_build(self) -> Res<DB> {
     let mngr: Rc<RefCell<dyn BlockManager>> = match self.path {
       Some(p) => {
         let storage = StorageManager::builder()
           .as_disk(&p)
           .with_page_size(self.page_size)
-          .build();
+          .try_build()?;
         Rc::new(RefCell::new(PageCache::new(self.max_mem, storage)))
       },
       None => {
@@ -45,17 +46,17 @@ impl DbBuilder {
         let storage = StorageManager::builder()
           .as_mem(0)
           .with_page_size(self.page_size)
-          .build();
+          .try_build()?;
         // We use proxy since the storage data is already in memory.
         Rc::new(RefCell::new(PageCacheProxy::new(storage)))
       }
     };
 
-    DB {
+    Ok(DB {
       mngr: mngr,
       txn_counter: 0, // TODO: make it persistent
       curr_txn: None,
-    }
+    })
   }
 }
 
@@ -116,7 +117,7 @@ mod tests {
   #[test]
   fn test_db_open_close() {
     with_tmp_file(|path| {
-      let mut db = open(Some(path)).build();
+      let mut db = open(Some(path)).try_build().unwrap();
       db.with_txn(true, |txn| {
         let mut t1 = BTree::new("table1".to_owned(), txn.clone());
         t1.put(&[1], &[10]);
@@ -124,7 +125,7 @@ mod tests {
         t1.put(&[3], &[30]);
       });
 
-      let mut db = open(Some(path)).build();
+      let mut db = open(Some(path)).try_build().unwrap();
       db.with_txn(false, |txn| {
         let t1 = BTree::find("table1", txn.clone()).unwrap();
         assert_eq!(t1.get(&[1]), Some(vec![10]));
@@ -134,6 +135,3 @@ mod tests {
     });
   }
 }
-
-// information_schema
-// default

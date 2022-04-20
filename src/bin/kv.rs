@@ -86,7 +86,7 @@ fn main() {
   println!("Type \"help\" command to start");
   println!();
 
-  let mut curr_db = db::open(None).build();
+  let mut curr_db = db::open(None).try_build().unwrap();
   println!("Using an in-memory database");
   println!();
 
@@ -136,8 +136,15 @@ fn main() {
             });
           },
           Cmd::Open(path) => {
-            println!("Switching to database {}", path);
-            curr_db = db::open(Some(path)).build();
+            match db::open(Some(path)).try_build() {
+              Ok(db0) => {
+                println!("Switching to database {}", path);
+                curr_db = db0;
+              },
+              Err(err) => {
+                println!("Error: {:?}", err.msg());
+              }
+            }
           },
           Cmd::Help => {
             println!("Available commands:");

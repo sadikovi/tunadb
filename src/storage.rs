@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use crate::error::Res;
 
 // File descriptor and StorageManager code.
 // All methods do not return `Res` because any error that occurs at this level is considered
@@ -199,19 +200,14 @@ impl StorageManagerBuilder {
     self
   }
 
-  // Returns new options from the builder.
-  // All options are validated here.
+  // Returns storage manager as a result.
+  pub fn try_build(self) -> Res<StorageManager> {
+    StorageManager::try_new(&self.opts)
+  }
+
+  // Returns storage manager by unwrapping the result.
   pub fn build(self) -> StorageManager {
-    if self.opts.is_disk {
-      assert_ne!(self.opts.disk_path.len(), 0, "Empty file path");
-    }
-
-    assert!(
-      self.opts.page_size >= MIN_PAGE_SIZE && self.opts.page_size <= MAX_PAGE_SIZE,
-      "Invalid page size {}", self.opts.page_size
-    );
-
-    StorageManager::new(&self.opts)
+    self.try_build().unwrap()
   }
 }
 
@@ -235,31 +231,41 @@ impl StorageManager {
   // The method opens or creates a corresponding database.
   //
   // Consider using `builder()` method instead.
-  pub fn new(opts: &Options) -> Self {
+  fn try_new(opts: &Options) -> Res<Self> {
+    if opts.page_size < MIN_PAGE_SIZE || opts.page_size > MAX_PAGE_SIZE {
+      return Err(err!("Corrupt database file, invalid page size {}", opts.page_size));
+    }
+
     if opts.is_disk {
+      if opts.disk_path.len() == 0 {
+        return Err(err!("Empty file path"));
+      }
+
       let path = Path::new(&opts.disk_path);
 
       if path.exists() {
-        assert!(path.is_file(), "Not a file: {}", path.display());
-        assert!(
-          res!(path.metadata()).len() >= DB_HEADER_SIZE as u64,
-          "Corrupt database file, header is too small"
-        );
+        if !path.is_file() {
+          return Err(err!("Not a file: {}", path.display()));
+        }
+        if res!(path.metadata()).len() < DB_HEADER_SIZE as u64 {
+          return Err(err!("Corrupt database file, header is too small"));
+        }
 
         let mut buf = vec![0u8; DB_HEADER_SIZE];
         let mut desc = Descriptor::disk(opts.disk_path.as_ref());
         desc.read(0, &mut buf[..]);
 
-        assert_eq!(&buf[0..4], MAGIC, "Corrupt database file, invalid MAGIC");
+        if &buf[0..4] != MAGIC {
+          return Err(err!("Corrupt database file, invalid MAGIC"));
+        }
 
         // Reserved for database flags.
         let flags = u8_u32!(&buf[4..8]);
 
         let page_size = u8_u32!(&buf[8..12]);
-        assert!(
-          page_size >= MIN_PAGE_SIZE && page_size <= MAX_PAGE_SIZE,
-          "Corrupt database file, invalid page size {}", page_size
-        );
+        if page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
+          return Err(err!("Corrupt database file, invalid page size {}", page_size));
+        }
 
         let mut free_page_id = u8_u32!(&buf[12..16]);
         let mut free_list = Vec::new();
@@ -290,7 +296,7 @@ impl StorageManager {
           page_id => Some(page_id)
         };
 
-        Self {
+        Ok(Self {
           desc,
           flags,
           page_size,
@@ -298,7 +304,7 @@ impl StorageManager {
           root_page,
           free_list,
           free_set,
-        }
+        })
       } else {
         let mut mngr = Self {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
@@ -310,7 +316,7 @@ impl StorageManager {
           free_set: HashSet::new(),
         };
         mngr.sync(); // stores header on disk and advances descriptor
-        mngr
+        Ok(mngr)
       }
     } else {
       let mut mngr = Self {
@@ -323,7 +329,7 @@ impl StorageManager {
         free_set: HashSet::new(),
       };
       mngr.sync(); // stores header and advances descriptor
-      mngr
+      Ok(mngr)
     }
   }
 
@@ -667,13 +673,13 @@ pub mod tests {
   }
 
   #[test]
-  #[should_panic(expected = "Invalid page size")]
+  #[should_panic(expected = "invalid page size")]
   fn test_storage_options_invalid_too_small_page() {
     StorageManagerBuilder::new().as_mem(0).with_page_size(MIN_PAGE_SIZE - 1).build();
   }
 
   #[test]
-  #[should_panic(expected = "Invalid page size")]
+  #[should_panic(expected = "invalid page size")]
   fn test_storage_options_invalid_too_large_page() {
     StorageManagerBuilder::new().as_mem(0).with_page_size(MAX_PAGE_SIZE + 1).build();
   }
