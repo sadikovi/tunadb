@@ -25,6 +25,14 @@ cargo build
 
 # Test
 
+Unit tests:
+
 ```shell
 cargo test
+```
+
+Integration tests:
+
+```shell
+it/run_test.sh
 ```
