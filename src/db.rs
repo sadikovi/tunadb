@@ -64,7 +64,6 @@ impl DbBuilder {
   }
 }
 
-
 // Opens a database using the provided path or an in-memory database.
 pub fn open(path: Option<&str>) -> DbBuilder {
   DbBuilder {

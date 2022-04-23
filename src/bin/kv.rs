@@ -142,11 +142,11 @@ fn main() {
   println!("=============================");
   println!("Tunadb simple key-value store");
   println!("=============================");
-  println!("Type \"help\" command to start");
+  println!("Type \"help\" command to start.");
   println!();
 
   let mut curr_db = db::open(None).try_build().unwrap();
-  println!("Using an in-memory database");
+  println!("Using an in-memory database.");
   println!();
 
   let mut input = String::new();
