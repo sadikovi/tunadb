@@ -20,4 +20,26 @@ pub trait BlockManager {
   fn get_mngr(&self) -> &StorageManager;
   // Returns a mutable reference to the underlying StorageManager.
   fn get_mngr_mut(&mut self) -> &mut StorageManager;
+  // Statistics and metrics for page cache and StorageManager.
+  fn stats(&self) -> BlockManagerStats;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BlockManagerStats {
+  pub page_size: usize,
+  pub num_pages: usize,
+  pub num_free_pages: usize,
+  pub is_proxy_cache: bool,
+}
+
+impl BlockManagerStats {
+  // Returns empty/default statistics.
+  pub fn empty() -> Self {
+    Self {
+      page_size: 0,
+      num_pages: 0,
+      num_free_pages: 0,
+      is_proxy_cache: false
+    }
+  }
 }

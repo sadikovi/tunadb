@@ -1327,6 +1327,7 @@ pub fn debug(pid: u32, page: &[u8]) {
 mod tests {
   use super::*;
   use std::collections::HashMap;
+  use crate::block::BlockManagerStats;
   use crate::storage::StorageManager;
 
   // Used for testing only.
@@ -1363,6 +1364,11 @@ mod tests {
 
     fn get_mngr_mut(&mut self) -> &mut StorageManager {
       self
+    }
+
+    // Not used in tests.
+    fn stats(&self) -> BlockManagerStats {
+      unimplemented!()
     }
   }
 

@@ -11,7 +11,8 @@ enum Cmd {
   Exists(Vec<u8> /* key */),
   List, // lists all of the keys and values in the database
   Open(String), // opens a database
-  Debug, // shows debug information for the table
+  DebugDb, // shows debug information for the database
+  DebugTable, // shows debug information for the table
   Help,
   Empty, // empty command, can be ignored
   Unknown,
@@ -65,8 +66,17 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
       Cmd::Open(key.to_owned())
     },
     Some("DEBUG") | Some("debug") => {
-      finish(&mut iter)?;
-      Cmd::Debug
+      match advance(&mut iter)? {
+        "DB" | "db" => {
+          finish(&mut iter)?;
+          Cmd::DebugDb
+        },
+        "TABLE" | "table" => {
+          finish(&mut iter)?;
+          Cmd::DebugTable
+        },
+        token => return Err(format!("Expected DB or TABLE end, found '{}'", token)),
+      }
     },
     Some("HELP") | Some("help") => {
       finish(&mut iter)?;
@@ -120,7 +130,14 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
       *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_owned())?;
       println!("Using database {}.", path);
     },
-    Cmd::Debug => {
+    Cmd::DebugDb => {
+      let info = curr_db.stats();
+      println!("     page size: {}", info.page_size);
+      println!("     num pages: {}", info.num_pages);
+      println!("num free pages: {}", info.num_free_pages);
+      println!("is cache proxy: {}", info.is_proxy_cache);
+    },
+    Cmd::DebugTable => {
       let info = with_table(curr_db, |table| {
         table.btree_debug()
       });
@@ -134,7 +151,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
       println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
       println!("  LIST                lists all of the key-value pairs.");
       println!("  OPEN <path>         opens a database at the path.");
-      println!("  DEBUG               shows debug information for the table.");
+      println!("  DEBUG (DB|TABLE)    shows debug information for the table or database.");
       println!("  HELP                shows this message.");
       println!();
     },

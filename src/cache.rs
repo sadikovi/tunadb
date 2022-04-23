@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::Write;
 use std::mem::size_of;
-use crate::block::BlockManager;
+use crate::block::{BlockManager, BlockManagerStats};
 use crate::page as pg;
 use crate::storage::{INVALID_PAGE_ID, StorageManager};
 use crate::util::LruCache;
@@ -448,6 +448,16 @@ impl BlockManager for PageCache {
   fn get_mngr_mut(&mut self) -> &mut StorageManager {
     &mut self.mngr
   }
+
+  #[inline]
+  fn stats(&self) -> BlockManagerStats {
+    BlockManagerStats {
+      page_size: self.page_size,
+      num_pages: self.mngr.num_pages(),
+      num_free_pages: self.mngr.num_free_pages(),
+      is_proxy_cache: false,
+    }
+  }
 }
 
 //=================
@@ -526,6 +536,16 @@ impl BlockManager for PageCacheProxy {
   #[inline]
   fn get_mngr_mut(&mut self) -> &mut StorageManager {
     &mut self.mngr
+  }
+
+  #[inline]
+  fn stats(&self) -> BlockManagerStats {
+    BlockManagerStats {
+      page_size: self.page_size(),
+      num_pages: self.mngr.num_pages(),
+      num_free_pages: self.mngr.num_free_pages(),
+      is_proxy_cache: true,
+    }
   }
 }
 
@@ -723,5 +743,37 @@ mod tests {
     assert_eq!(root, 477);
     assert_eq!(cache.get_mngr().num_pages(), root as usize + 1);
     assert_eq!(cache.get_mngr().num_free_pages(), 132);
+  }
+
+  #[test]
+  fn test_cache_stats() {
+    let page_size = 256;
+    let mut cache = PageCache::new(1024, get_mngr(page_size as u32));
+
+    let mut page = vec![1u8; page_size];
+    pg::leaf_init(&mut page);
+
+    cache.store(&page);
+    cache.commit();
+    cache.get_mngr_mut().sync();
+
+    cache.store(&page);
+    cache.free(0);
+    cache.commit();
+    cache.get_mngr_mut().sync();
+
+    assert_eq!(cache.stats().page_size, page_size);
+    assert_eq!(cache.stats().num_pages, 2);
+    assert_eq!(cache.stats().num_free_pages, 1);
+  }
+
+  #[test]
+  fn test_cache_proxy_stats() {
+    let page_size = 256;
+    let cache = PageCacheProxy::new(get_mngr(page_size as u32));
+    // Proxy cache routes calls directly to storage manager, we don't need to explicitly check.
+    assert_eq!(cache.stats().page_size, page_size);
+    assert_eq!(cache.stats().num_pages, 0);
+    assert_eq!(cache.stats().num_free_pages, 0);
   }
 }

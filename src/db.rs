@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::block::BlockManager;
+use crate::block::{BlockManager, BlockManagerStats};
 use crate::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
 use crate::error::Res;
 use crate::storage::{DEFAULT_PAGE_SIZE, StorageManager};
@@ -74,6 +74,11 @@ pub fn open(path: Option<&str>) -> DbBuilder {
 }
 
 impl DB {
+  // Database/storage statistics.
+  pub fn stats(&self) -> BlockManagerStats {
+    self.mngr.borrow().stats()
+  }
+
   // Starts a new transaction and runs any operations within it.
   // When auto_commit is enabled, commits by the end of the function.
   pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> T
