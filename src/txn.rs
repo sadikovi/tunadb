@@ -195,13 +195,11 @@ impl BTree {
   }
 
   // Returns all of the key-value pairs in the btree.
-  pub fn list(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+  pub fn list(&mut self) -> btree::BTreeIter {
     self.txn.borrow().assert_valid();
     let txn = self.txn.borrow_mut();
     // We don't need to update the root page or is_dirty flag here.
-    let mngr = &mut *txn.mngr.borrow_mut();
-    // TODO: optimise this, we should return an iterator here.
-    btree::BTreeIter::new(self.root, None, None, mngr).collect()
+    btree::BTreeIter::new(self.root, None, None, txn.mngr.clone())
   }
 }
 

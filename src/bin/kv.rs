@@ -101,10 +101,10 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
     },
     Cmd::List => {
       with_table(curr_db, |table| {
-        let keys = table.list();
-        for (key, val) in &keys {
-          let key = std::str::from_utf8(key).unwrap();
-          let val = std::str::from_utf8(val).unwrap();
+        let mut iter = table.list();
+        while let Some((key, val)) = iter.next() {
+          let key = std::str::from_utf8(&key).unwrap();
+          let val = std::str::from_utf8(&val).unwrap();
           println!("{}: {}", key, val);
         }
       });
