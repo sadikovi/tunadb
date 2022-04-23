@@ -26,20 +26,12 @@ pub trait BlockManager {
 
 #[derive(Clone, Copy, Debug)]
 pub struct BlockManagerStats {
-  pub page_size: usize,
+  pub page_size: usize, // in bytes
   pub num_pages: usize,
   pub num_free_pages: usize,
   pub is_proxy_cache: bool,
-}
-
-impl BlockManagerStats {
-  // Returns empty/default statistics.
-  pub fn empty() -> Self {
-    Self {
-      page_size: 0,
-      num_pages: 0,
-      num_free_pages: 0,
-      is_proxy_cache: false
-    }
-  }
+  pub cache_mem_used: usize, // in bytes
+  pub cache_mem_max: usize, // in bytes
+  pub cache_num_hits: usize,
+  pub cache_num_misses: usize,
 }

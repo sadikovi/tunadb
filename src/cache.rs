@@ -92,6 +92,8 @@ pub struct PageCache {
   lru: LruCache<u32>, // LRU cache for page ids
   free_offsets: Vec<usize>, // stack of free offsets
   freed_pids: Vec<u32>, // list of freed physical pages, needed for rollback
+  num_cache_hits: usize, // metric
+  num_cache_misses: usize, // metric
 }
 
 // We have to split the page ids space of u32 into two because we need to maintain virtual ids as
@@ -115,6 +117,8 @@ impl PageCache {
       lru: LruCache::new(),
       free_offsets: Vec::new(),
       freed_pids: Vec::new(),
+      num_cache_hits: 0,
+      num_cache_misses: 0,
     }
   }
 
@@ -285,10 +289,12 @@ impl BlockManager for PageCache {
   fn load(&mut self, id: u32, buf: &mut [u8]) {
     match self.offset_map.get(&id) {
       Some(&PageInfo::VirtualMem(_, off, _)) => {
+        self.num_cache_hits += 1;
         write_bytes!(&mut buf[..], &self.buf[off..off + self.page_size]);
         self.lru.update(id);
       },
       Some(&PageInfo::VirtualDisk(_, pid, pg_type)) => {
+        self.num_cache_misses += 1;
         // Load into the page buffer.
         self.mngr.read(pid, buf);
         // Also copy into the page cache buffer for future access.
@@ -302,10 +308,12 @@ impl BlockManager for PageCache {
         self.lru.update(id);
       },
       Some(&PageInfo::Physical(off, _)) => {
+        self.num_cache_hits += 1;
         write_bytes!(&mut buf[..], &self.buf[off..off + self.page_size]);
         self.lru.update(id);
       },
       None if is_physical_page_id(id) => {
+        self.num_cache_misses += 1;
         // Simply load from storage.
         self.mngr.read(id, buf);
         let pg_type = pg::page_type(&buf);
@@ -456,6 +464,10 @@ impl BlockManager for PageCache {
       num_pages: self.mngr.num_pages(),
       num_free_pages: self.mngr.num_free_pages(),
       is_proxy_cache: false,
+      cache_mem_used: self.mem_used(),
+      cache_mem_max: self.max_mem,
+      cache_num_hits: self.num_cache_hits,
+      cache_num_misses: self.num_cache_misses,
     }
   }
 }
@@ -469,12 +481,13 @@ pub struct PageCacheProxy {
   mngr: StorageManager,
   free_set: HashSet<u32>,
   write_set: HashSet<u32>,
+  num_cache_hits: usize,
 }
 
 impl PageCacheProxy {
   // Creates new page cache.
   pub fn new(mngr: StorageManager) -> Self {
-    Self { mngr, free_set: HashSet::new(), write_set: HashSet::new() }
+    Self { mngr, free_set: HashSet::new(), write_set: HashSet::new(), num_cache_hits: 0 }
   }
 }
 
@@ -486,6 +499,7 @@ impl BlockManager for PageCacheProxy {
 
   #[inline]
   fn load(&mut self, pid: u32, buf: &mut [u8]) {
+    self.num_cache_hits += 1;
     self.mngr.read(pid, buf);
   }
 
@@ -545,6 +559,11 @@ impl BlockManager for PageCacheProxy {
       num_pages: self.mngr.num_pages(),
       num_free_pages: self.mngr.num_free_pages(),
       is_proxy_cache: true,
+      cache_mem_used: self.mngr.estimated_mem_usage(),
+      // Max memory does not quite make sense in proxy cache.
+      cache_mem_max: self.mngr.estimated_mem_usage(),
+      cache_num_hits: self.num_cache_hits,
+      cache_num_misses: 0, // everything is in memory
     }
   }
 }
