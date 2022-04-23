@@ -11,7 +11,9 @@ enum Cmd {
   Exists(Vec<u8> /* key */),
   List, // lists all of the keys and values in the database
   Open(String), // opens a database
+  Debug, // shows debug information for the table
   Help,
+  Empty, // empty command, can be ignored
   Unknown,
 }
 
@@ -62,11 +64,16 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
       finish(&mut iter)?;
       Cmd::Open(key.to_owned())
     },
+    Some("DEBUG") | Some("debug") => {
+      finish(&mut iter)?;
+      Cmd::Debug
+    },
     Some("HELP") | Some("help") => {
       finish(&mut iter)?;
       Cmd::Help
     },
-    _ => Cmd::Unknown,
+    Some(_) => Cmd::Unknown,
+    None => Cmd::Empty,
   };
   Ok(cmd)
 }
@@ -111,6 +118,13 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
     },
     Cmd::Open(path) => {
       *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_owned())?;
+      println!("Using database {}.", path);
+    },
+    Cmd::Debug => {
+      let info = with_table(curr_db, |table| {
+        table.btree_debug()
+      });
+      println!("{}", info);
     },
     Cmd::Help => {
       println!("Available commands:");
@@ -119,9 +133,13 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
       println!("  GET <key>           returns value for the key if exists.");
       println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
       println!("  LIST                lists all of the key-value pairs.");
-      println!("  OPEN <path>         opens a database at the path");
+      println!("  OPEN <path>         opens a database at the path.");
+      println!("  DEBUG               shows debug information for the table.");
       println!("  HELP                shows this message.");
       println!();
+    },
+    Cmd::Empty => {
+      // do nothing
     },
     Cmd::Unknown => {
       println!("Unknown command.");

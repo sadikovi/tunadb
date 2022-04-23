@@ -201,6 +201,14 @@ impl BTree {
     // We don't need to update the root page or is_dirty flag here.
     btree::BTreeIter::new(self.root, None, None, txn.mngr.clone())
   }
+
+  // Returns btree debug information.
+  pub fn btree_debug(&mut self) -> String {
+    let mut buf = String::new();
+    let txn = self.txn.borrow_mut();
+    btree::btree_debug(&mut buf, self.root, &mut *txn.mngr.borrow_mut());
+    buf
+  }
 }
 
 #[cfg(test)]
@@ -309,5 +317,26 @@ mod tests {
     assert_eq!(cache.borrow_mut().get_mngr().root_page(), None);
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 0);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_btree_debug() {
+    let cache = get_block_mngr();
+    let txn = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
+
+    let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+    assert_eq!(t1.btree_debug(), format!(" ! INVALID PAGE\n"));
+
+    let mut t2 = BTree::new("table2".to_owned(), txn.clone());
+    t2.put(&[1], &[2]);
+    assert_eq!(t2.btree_debug(), format!(" * 2147483649 | cnt: 1 | min: [1] | max: [1]\n"));
+
+    let mut t3 = BTree::new("table3".to_owned(), txn.clone());
+    t3.put(&[1; 128], &[2; 128]);
+    assert_eq!(t3.btree_debug(),
+      format!(
+        " * 2147483652 | cnt: 1 | min: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128 | max: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128\n"
+      )
+    );
   }
 }

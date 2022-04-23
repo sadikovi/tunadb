@@ -452,15 +452,23 @@ impl Iterator for BTreeIter {
 }
 
 // Debug method to print btree starting with `root`.
-pub fn btree_debug(root: u32, mngr: &mut dyn BlockManager) {
+pub fn btree_debug(buf: &mut String, root: u32, mngr: &mut dyn BlockManager) {
   let mut page = vec![0u8; mngr.page_size()];
-  btree_debug_recur(root, &mut page, mngr, 2);
-  println!();
+  btree_debug_recur(buf, root, &mut page, mngr, 2);
 }
 
-fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, offset: usize) {
+fn btree_debug_key_str(key: &[u8]) -> String {
+  if key.len() > 8 {
+    format!("{:?} trunc. len={}", &key[..8], key.len())
+  } else {
+    format!("{:?}", key)
+  }
+}
+
+fn btree_debug_recur(buf: &mut String, root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, off: usize) {
   if root == INVALID_PAGE_ID {
-    println!("{:>width$} INVALID PAGE", "!", width = offset);
+    buf.push_str(&format!("{:>width$} INVALID PAGE", "!", width = off));
+    buf.push_str("\n");
     return;
   }
 
@@ -468,38 +476,48 @@ fn btree_debug_recur(root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, of
   let cnt = pg::num_slots(&page);
   match pg::page_type(&page) {
     pg::PageType::Leaf if cnt == 0 => {
-      println!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "*", root, cnt, width = offset);
+      buf.push_str(&format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "*", root, cnt, width = off));
+      buf.push_str("\n");
     },
     pg::PageType::Leaf => {
       let min_key = pg::leaf_get_key(&page, 0, mngr);
       let max_key = pg::leaf_get_key(&page, cnt - 1, mngr);
-      println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
-        "*",
-        root,
-        cnt,
-        &min_key[..min_key.len().min(8)],
-        &max_key[..max_key.len().min(8)],
-        width = offset
+      buf.push_str(
+        &format!(
+          "{:>width$} {} | cnt: {} | min: {} | max: {}",
+          "*",
+          root,
+          cnt,
+          btree_debug_key_str(&min_key),
+          btree_debug_key_str(&max_key),
+          width = off
+        )
       );
+      buf.push_str("\n");
     },
     pg::PageType::Internal if cnt == 0 => {
-      println!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "+", root, cnt, width = offset);
+      buf.push_str(&format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "+", root, cnt, width = off));
+      buf.push_str("\n");
     },
     pg::PageType::Internal => {
       let min_key = pg::internal_get_key(&page, 0, mngr);
       let max_key = pg::internal_get_key(&page, cnt - 1, mngr);
-      println!("{:>width$} {} | cnt: {} | min: {:?} | max: {:?}",
-        "+",
-        root,
-        cnt,
-        &min_key[..min_key.len().min(8)],
-        &max_key[..max_key.len().min(8)],
-        width = offset
+      buf.push_str(
+        &format!(
+          "{:>width$} {} | cnt: {} | min: {} | max: {}",
+          "+",
+          root,
+          cnt,
+          btree_debug_key_str(&min_key),
+          btree_debug_key_str(&max_key),
+          width = off
+        )
       );
+      buf.push_str("\n");
       let cpage = page.to_vec(); // clone the buffer so recursive calls don't overwrite data
       for i in 0..cnt + 1 {
         let pid = pg::internal_get_ptr(&cpage, i);
-        btree_debug_recur(pid, page, mngr, offset + 2);
+        btree_debug_recur(buf, pid, page, mngr, off + 2);
       }
     },
     _ => panic!("Cannot print btree: unexpected page type"),
