@@ -52,9 +52,11 @@ impl Transaction {
         vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
           *vid_to_pid.get(&vid)
             .expect(&format!("Table {} (vid {}, dirty {}) could not be resolved", k, vid, is_dirty)),
-        pid => pid,
+        pid => pid, // physical pages are never dirty
       };
-      root = btree::put(root, k.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
+      if is_dirty {
+        root = btree::put(root, k.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
+      }
     }
 
     // 3. Update the root tree + commit.
@@ -291,6 +293,26 @@ mod tests {
     txn.borrow_mut().commit();
 
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 3);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_commit_non_modified() {
+    let cache = get_block_mngr();
+
+    let txn1 = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
+    let mut t = BTree::new("table".to_owned(), txn1.clone());
+    t.put(&[1], &[10]);
+    txn1.borrow_mut().commit();
+
+    let txn2 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
+    let t = BTree::find("table", txn2.clone()).unwrap();
+    assert_eq!(t.get(&[1]), Some(vec![10]));
+    txn2.borrow_mut().commit();
+
+    // 1 page is for table's btree, 1 page is for root btree.
+    // No pages should be modified.
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
   }
 
