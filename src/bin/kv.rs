@@ -14,6 +14,7 @@ enum Cmd {
   DebugDb, // shows debug information for the database
   DebugTable, // shows debug information for the table
   Help,
+  Quit, // close the repl
   Empty, // empty command, can be ignored
   Unknown,
 }
@@ -82,13 +83,17 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
       finish(&mut iter)?;
       Cmd::Help
     },
+    Some("QUIT") | Some("quit") => {
+      finish(&mut iter)?;
+      Cmd::Quit
+    },
     Some(_) => Cmd::Unknown,
     None => Cmd::Empty,
   };
   Ok(cmd)
 }
 
-fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
+fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
   match &cmd {
     Cmd::Get(key) => {
       let val = with_table(curr_db, |table| {
@@ -169,8 +174,12 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
       println!("  OPEN <path>         opens a database at the path.");
       println!("  DEBUG (DB|TABLE)    shows debug information for the table or database.");
       println!("  HELP                shows this message.");
+      println!("  QUIT                Quit the REPL.");
       println!();
     },
+    Cmd::Quit => {
+      return Ok(false);
+    }
     Cmd::Empty => {
       // do nothing
     },
@@ -178,7 +187,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<(), String> {
       println!("Unknown command.");
     },
   }
-  Ok(())
+  Ok(true)
 }
 
 fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut BTree) -> T, {
@@ -209,8 +218,17 @@ fn main() {
       .and_then(|_| parse_cmd(&input))
       .and_then(|cmd| exec_cmd(&mut curr_db, cmd));
 
-    if let Err(err) = res {
-      println!("Error: {}", err);
+    match res {
+      Ok(true) => {
+        // Do nothing.
+      },
+      Ok(false) => {
+        println!("Bye bye.");
+        break;
+      },
+      Err(err) => {
+        println!("Error: {}", err);
+      },
     }
 
     input.clear();
