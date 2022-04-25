@@ -1,6 +1,7 @@
 use std::io;
 use std::io::Write;
 use tunadb::db;
+use tunadb::page as pg;
 use tunadb::txn::BTree;
 
 #[derive(Clone, Debug)]
@@ -13,6 +14,7 @@ enum Cmd {
   Open(String), // opens a database
   DebugDb, // shows debug information for the database
   DebugTable, // shows debug information for the table
+  DebugPage, // shows debug information for the page
   Help,
   Quit, // close the repl
   Empty, // empty command, can be ignored
@@ -76,7 +78,11 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
           finish(&mut iter)?;
           Cmd::DebugTable
         },
-        token => return Err(format!("Expected DB or TABLE end, found '{}'", token)),
+        "PAGE" | "page" => {
+          finish(&mut iter)?;
+          Cmd::DebugPage
+        }
+        token => return Err(format!("Expected DB, TABLE, or PAGE, found '{}'", token)),
       }
     },
     Some("HELP") | Some("help") => {
@@ -164,17 +170,30 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       });
       println!("{}", info);
     },
+    Cmd::DebugPage => {
+      let block_mngr = curr_db.get_mngr();
+      let mut block_mngr_mut = block_mngr.borrow_mut();
+      let mngr = block_mngr_mut.get_mngr_mut();
+      let mut page = vec![0u8; mngr.page_size()];
+      for pid in 0..mngr.num_pages() {
+        let pid = pid as u32;
+        if mngr.is_accessible(pid) {
+          mngr.read(pid, &mut page);
+          pg::debug(pid, &page);
+        }
+      }
+    },
     Cmd::Help => {
       println!("Available commands:");
-      println!("  SET <key> <value>   sets value for the key.");
-      println!("  DEL <key>           deletes the key.");
-      println!("  GET <key>           returns value for the key if exists.");
-      println!("  EXISTS <key>        returns true if the key exists, false otherwise.");
-      println!("  LIST                lists all of the key-value pairs.");
-      println!("  OPEN <path>         opens a database at the path.");
-      println!("  DEBUG (DB|TABLE)    shows debug information for the table or database.");
-      println!("  HELP                shows this message.");
-      println!("  QUIT                Quit the REPL.");
+      println!("  SET <key> <value>     sets value for the key.");
+      println!("  DEL <key>             deletes the key.");
+      println!("  GET <key>             returns value for the key if exists.");
+      println!("  EXISTS <key>          returns true if the key exists, false otherwise.");
+      println!("  LIST                  lists all of the key-value pairs.");
+      println!("  OPEN <path>           opens a database at the path.");
+      println!("  DEBUG (DB|TABLE|PAGE) shows debug information for the table or database.");
+      println!("  HELP                  shows this message.");
+      println!("  QUIT                  quit the REPL.");
       println!();
     },
     Cmd::Quit => {

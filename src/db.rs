@@ -74,6 +74,12 @@ pub fn open(path: Option<&str>) -> DbBuilder {
 }
 
 impl DB {
+  // Returns block manager reference.
+  // Used for debugging.
+  pub fn get_mngr(&self) -> Rc<RefCell<dyn BlockManager>> {
+    self.mngr.clone()
+  }
+
   // Database/storage statistics.
   pub fn stats(&self) -> BlockManagerStats {
     self.mngr.borrow().stats()
