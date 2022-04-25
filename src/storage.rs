@@ -142,6 +142,14 @@ pub const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 pub const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
 pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
+// Meta block magic.
+const META_PAGE_MAGIC: &[u8] = &[b'M', b'E', b'T', b'A'];
+// Meta block offset at the beginning of the page:
+//   magic (4 bytes)
+//   next page (4 bytes)
+//   count (4 bytes)
+const META_OFFSET: usize = 12;
+
 // Calculates the absolute position of a page depending on the page size.
 // This is needed so we can account for the database header size.
 #[inline]
@@ -277,19 +285,26 @@ impl StorageManager {
           // Add meta page to the free list, it can be reused.
           free_list.push(free_page_id);
           free_set.insert(free_page_id);
+          if &meta_buf[0..4] != META_PAGE_MAGIC {
+            println!("WARN: free page magic mismatch, aborting load");
+            break;
+          }
           // Update free page id to the next meta block.
-          free_page_id = u8_u32!(&meta_buf[0..4]);
+          free_page_id = u8_u32!(&meta_buf[4..8]);
           // Load all of the pages in the current meta block.
-          let mut cnt = u8_u32!(&meta_buf[4..8]);
-          let mut i = 8;
+          let mut cnt = u8_u32!(&meta_buf[8..12]);
+          let mut off = META_OFFSET;
           while cnt > 0 {
-            let page_id = u8_u32!(&meta_buf[i..]);
+            let page_id = u8_u32!(&meta_buf[off..]);
             free_list.push(page_id);
             free_set.insert(page_id);
-            i += 4;
+            off += 4;
             cnt -= 1;
           }
         }
+
+        free_list.sort();
+        free_list.reverse();
 
         let root_page = match u8_u32!(&buf[16..20]) {
           INVALID_PAGE_ID => None,
@@ -400,6 +415,115 @@ impl StorageManager {
 
   // Sync metadata + free pages.
   pub fn sync(&mut self) {
+    // We cannot use pages that were marked as free (free_set) since we may need to roll back in
+    // case of a file write failure or other panic.
+
+    // Meta blocks are already included in the free list so we just reset the free page id here.
+    self.free_page_id = INVALID_PAGE_ID;
+
+    // We need to make sure we don't add any duplicate pages, check below.
+    for pid in &self.free_list {
+      if self.free_set.contains(pid) {
+        self.free_set.remove(pid);
+      }
+    }
+
+    // Move all of the marked as free pages into the free list.
+    // It is fine to keep out of order, the list will be sorted.
+    for &free_page in self.free_set.iter() {
+      self.free_list.push(free_page);
+    }
+    self.free_set.clear();
+
+    // Sort the list, we need the ascending order so pop/push are in descending order.
+    self.free_list.sort();
+
+    // Figure out if we can truncate the file.
+    let mut can_truncate = false;
+    let mut trunc_page = self.num_pages() as u32;
+    while let Some(pid) = self.free_list.pop() {
+      if pid + 1 == trunc_page {
+        can_truncate = true;
+        trunc_page = pid;
+      } else {
+        self.free_list.push(pid);
+        break;
+      }
+    }
+
+    // If there are more free pages left, write them to meta pages.
+    if self.free_list.len() > 0 {
+      // Calculate the number of pages (meta blocks) we need to store all of the free pages.
+      let mut meta_block_cnt = {
+        let min_pages = (4 /* u32 size */ * self.free_list.len()) as f64 /
+          (4 /* u32 size */ + self.page_size as usize - META_OFFSET) as f64;
+        min_pages.ceil() as usize
+      };
+
+      // The number of meta blocks is always less than or equal to the length of the free list.
+      assert!(
+        meta_block_cnt <= self.free_list.len(),
+        "Invalid number of meta blocks, meta block count: {}, free pages: {}",
+        meta_block_cnt, self.free_list.len()
+      );
+
+      let mut len = self.free_list.len();
+      let mut off = META_OFFSET; // the first 12 bytes are reserved for metadata: magic, page id, and count
+      let mut cnt: u32 = 0; // number of pages per meta block
+      let mut buf = vec![0u8; self.page_size as usize];
+
+      let mut prev = INVALID_PAGE_ID;
+      let mut curr = INVALID_PAGE_ID;
+
+      while len > 0 {
+        len -= 1;
+        let pid = self.free_list[len];
+
+        if curr == INVALID_PAGE_ID {
+          curr = pid;
+        } else {
+          res!((&mut buf[off..]).write(&u32_u8!(pid)));
+          cnt += 1;
+          off += 4;
+        }
+
+        if off > buf.len() - 4 /* u32 size */ || len == 0 {
+          res!((&mut buf[0..4]).write(META_PAGE_MAGIC));
+          res!((&mut buf[4..8]).write(&u32_u8!(prev)));
+          res!((&mut buf[8..12]).write(&u32_u8!(cnt)));
+          self.write(curr, &buf[..]);
+          meta_block_cnt -= 1;
+
+          prev = curr;
+          curr = INVALID_PAGE_ID;
+          off = META_OFFSET;
+          cnt = 0;
+        }
+      }
+
+      // Write the remaining data into one more page.
+      if meta_block_cnt > 0 {
+        res!((&mut buf[0..4]).write(&u32_u8!(prev)));
+        res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
+        self.write(curr, &buf[..]);
+        self.free_page_id = curr;
+        meta_block_cnt -= 1;
+      } else {
+        self.free_page_id = prev;
+      }
+
+      // All meta blocks must have been used at this point.
+      assert!(meta_block_cnt == 0, "Meta blocks inconsistency, {} blocks left", meta_block_cnt);
+    }
+
+    // We never clear free_list as it will be used later.
+    // Move all of the pages into free_set
+    for &pid in &self.free_list {
+      self.free_set.insert(pid);
+    }
+    self.free_list.reverse();
+
+    // Persist the database header.
     let mut buf = [0u8; DB_HEADER_SIZE];
     res!((&mut buf[0..]).write(MAGIC));
     res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
@@ -407,31 +531,6 @@ impl StorageManager {
     res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
     res!((&mut buf[16..]).write(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID))));
     self.desc.write(0, &buf[..]);
-
-    // Move all marked free pages into the free list.
-    self.free_list.clear();
-    for &free_page in self.free_set.iter() {
-      self.free_list.push(free_page);
-    }
-
-    // Figure out if we can truncate the file.
-    self.free_list.sort();
-    let mut trunc_page = self.num_pages() as u32;
-    let mut can_truncate = false;
-    while let Some(page) = self.free_list.pop() {
-      if page + 1 == trunc_page {
-        self.free_set.remove(&page);
-        can_truncate = true;
-        trunc_page = page;
-      } else {
-        self.free_list.push(page);
-        break;
-      }
-    }
-
-    // Swap the pages in free_list so they are appear in descreasing order to facilitate
-    // sequential writes.
-    self.free_list.reverse();
 
     // Optionally truncate the file.
     if can_truncate {
@@ -453,8 +552,10 @@ impl StorageManager {
   // Total number of pages that are managed by the storage manager.
   #[inline]
   pub fn num_pages(&self) -> usize {
-    let num_pages = (self.desc.len() - DB_HEADER_SIZE as u64) / self.page_size as u64;
-    num_pages as usize
+    if self.desc.len() == 0 {
+      return 0;
+    }
+    ((self.desc.len() - DB_HEADER_SIZE as u64) / self.page_size as u64) as usize
   }
 
   // Number of free pages that were reclaimed and are available for use.
@@ -470,78 +571,6 @@ impl StorageManager {
     let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
-  }
-}
-
-impl Drop for StorageManager {
-  fn drop(&mut self) {
-    // When we drop StorageManager, either due to panic or going out of scope, we only need to
-    // write free_list that contains only persisted pages.
-    //
-    // We cannot use pages that were marked as free (free_set) since we may need to roll back in
-    // case of a file write failure or other panic.
-
-    // Unset the free page id in case it was set inadvertently.
-    self.free_page_id = INVALID_PAGE_ID;
-
-    if self.free_list.len() > 0 {
-      // Calculate the number of pages (meta blocks) we need to store all of the free pages.
-      let meta_block_cnt = {
-        let min_pages = 4f64 * self.free_list.len() as f64 / (self.page_size - 4) as f64;
-        min_pages.ceil() as usize
-      };
-
-      // Check if our list of persisted free pages contains this amount.
-      // We also need to sort array in case there are more pages than meta blocks so we use
-      // the smallest page ids for meta blocks to make sure we can truncate the file later.
-      if meta_block_cnt < self.free_list.len() {
-        self.free_list.sort();
-      }
-      let mut meta_blocks = Vec::with_capacity(meta_block_cnt);
-      let mut start_pos = 0;
-      while start_pos < cmp::min(meta_block_cnt, self.free_list.len()) {
-        // Remove the page from the list; it will be used as a meta block and is not free anymore.
-        let page = self.free_list[start_pos];
-        self.free_set.remove(&page);
-        meta_blocks.push(page);
-        start_pos += 1;
-      }
-
-      let mut buf = vec![0u8; self.page_size as usize];
-      let mut cnt: u32 = 0;
-      let mut i = 8; // the first 8 bytes are reserved for metadata: page id and count
-      while start_pos < self.free_list.len() {
-        let page = res!(self.free_list.pop());
-        res!((&mut buf[i..]).write(&u32_u8!(page)));
-        cnt += 1;
-        i += 4;
-        if i > buf.len() - 4 /* u32 size */ || self.free_list.len() == start_pos {
-          res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
-          res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
-          self.free_page_id = meta_blocks.pop().unwrap_or(self.num_pages() as u32);
-          self.write(self.free_page_id, &buf[..]);
-          i = 8;
-          cnt = 0;
-        }
-      }
-
-      // Write the remaining data into one more page.
-      if meta_blocks.len() > 0 {
-        res!((&mut buf[0..4]).write(&u32_u8!(self.free_page_id)));
-        res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
-        self.free_page_id = res!(meta_blocks.pop());
-        self.write(self.free_page_id, &buf[..]);
-      }
-      // All meta blocks must have been used at this point.
-      assert_eq!(meta_blocks.len(), 0, "Meta blocks remain: {}", meta_blocks.len());
-      // All free pages must have been written, set both free list and set to empty.
-      self.free_list.clear();
-      // TODO: Log if there were pages marked as free but not synced.
-      self.free_set.clear();
-    }
-
-    // Sync all of the metadata including free pages.
-    self.sync();
   }
 }
 
@@ -936,8 +965,8 @@ pub mod tests {
 
     mngr.sync();
 
-    // We don't persist free pages after sync.
-    assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
+    // We persist free pages after sync.
+    assert_eq!(mngr.free_page_id, 2);
     assert_eq!(mngr.free_list, vec![2, 1, 0]);
     assert_eq!(mngr.free_set, [2, 1, 0].iter().cloned().collect());
     assert_eq!(mngr.num_free_pages(), 3);
@@ -1162,7 +1191,7 @@ pub mod tests {
         assert_eq!(mngr.num_pages(), 9);
         assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
         // We first add meta blocks (0, 1) and then pages in decreasing order.
-        assert_eq!(mngr.free_list, vec![0, 1, 7, 6, 5, 4, 3, 2]);
+        assert_eq!(mngr.free_list, vec![7, 6, 5, 4, 3, 2, 1, 0]);
         assert_eq!(mngr.free_set, [0, 1, 2, 3, 4, 5, 6, 7].iter().cloned().collect());
 
         mngr.mark_as_free(8);
@@ -1176,6 +1205,36 @@ pub mod tests {
         assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
         assert_eq!(mngr.free_list.len(), 0);
         assert_eq!(mngr.free_set.len(), 0);
+      }
+    })
+  }
+
+  #[test]
+  fn test_storage_manager_free_corrupt_meta_block() {
+    with_tmp_file(|path| {
+      {
+        let mut mngr = storage_disk(32, path);
+        let buf = vec![255u8; mngr.page_size as usize];
+
+        for i in 0..10 {
+          assert_eq!(mngr.write_next(&buf[..]), i);
+        }
+
+        for i in 0..9 {
+          mngr.mark_as_free(i);
+        }
+
+        mngr.sync();
+
+        // Modify meta block so we cannot read the pages.
+        // There are 2 meta blocks, meta block 1 has pid 8.
+        mngr.desc.write(pos(8, 32), &buf);
+      }
+
+      {
+        let mngr = storage_disk(32, path);
+        // Because the meta block is corrupted, free list will only contain part of the pids.
+        assert_eq!(mngr.free_list, vec![8, 2, 1, 0]);
       }
     })
   }
