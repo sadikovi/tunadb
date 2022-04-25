@@ -5,7 +5,7 @@ copy-on-write B+tree in Rust.
 
 This was done mostly for educational purposes to learn more about storage
 layout and B+trees. There is a number of TODOs scattered around the codebase so
-you are interested, feel free to open PRs for features or bug fixes.
+if you are interested, feel free to open PRs for features or bug fixes.
 
 # Simple key-value store
 
@@ -19,7 +19,11 @@ cargo run --bin kv
 
 ```shell
 cargo check
-# or
+```
+
+or
+
+```shell
 cargo build
 ```
 
