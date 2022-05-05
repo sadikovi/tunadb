@@ -122,16 +122,6 @@ impl PageCache {
     }
   }
 
-  // Clears and resets the state.
-  #[inline]
-  fn reset_cache(&mut self) {
-    self.offset_map.clear();
-    self.free_offsets.clear();
-    self.lru.clear();
-    self.freed_pids.clear();
-    self.buf_len = 0;
-  }
-
   // Returns the next virtual id from a counter.
   #[inline]
   fn next_virtual_id(&mut self) -> u32 {
@@ -383,10 +373,10 @@ impl BlockManager for PageCache {
     let mut page = vec![0; self.page_size];
 
     // Add all of the virtual pages into the queue for processing.
-    for (_, v) in &self.offset_map {
-      match v {
-        PageInfo::VirtualMem(_, _, _) => queue.push(v),
-        PageInfo::VirtualDisk(_, _, _) => queue.push(v),
+    for (_, &info) in &self.offset_map {
+      match info {
+        PageInfo::VirtualMem(_, _, _) => queue.push(info),
+        PageInfo::VirtualDisk(_, _, _) => queue.push(info),
         PageInfo::Physical(_, _) => {}, // ignore physical pages, they have already been written
       }
     }
@@ -395,29 +385,35 @@ impl BlockManager for PageCache {
     // - Overflow pages will come before leaf pages.
     // - Leaf pages will come before internal pages.
     // - Older pages will come before newer ones.
-    while let Some(v) = queue.pop() {
-      match v {
-        &PageInfo::VirtualMem(vid, off, pg_type) => {
+    while let Some(info) = queue.pop() {
+      match info {
+        PageInfo::VirtualMem(vid, off, pg_type) => {
           let buf = &mut self.buf[off..off + self.page_size];
           assert_eq!(pg::page_type(&buf), pg_type);
           let can_write = Self::resolve_page(pg_type, buf, &vid_to_pid);
           assert!(can_write, "Could not resolve page with vid={}, off={}, type={:?}", vid, off, pg_type);
           vid_to_pid.insert(vid, self.mngr.write_next(&buf));
+
+          // Clean up the state in the cache.
+          self.offset_map.remove(&vid);
+          self.free_offsets.push(off);
+          self.lru.remove(vid);
         },
-        &PageInfo::VirtualDisk(vid, pid, pg_type) => {
+        PageInfo::VirtualDisk(vid, pid, pg_type) => {
           self.mngr.read(pid, &mut page);
           assert_eq!(pg::page_type(&page), pg_type);
           let can_write = Self::resolve_page(pg_type, &mut page, &vid_to_pid);
           assert!(can_write, "Could not resolve page with vid={}, pid={}, type={:?}", vid, pid, pg_type);
           self.mngr.write(pid, &page);
           vid_to_pid.insert(vid, pid);
+
+          // Clean up the state in the cache.
+          self.offset_map.remove(&vid);
+          self.lru.remove(vid);
         },
         _ => unreachable!("Should never happen"),
       }
     }
-
-    // Clear the state.
-    self.reset_cache();
 
     // Return the mapping of vid -> pid so root pages can be resolved.
     vid_to_pid
@@ -427,24 +423,41 @@ impl BlockManager for PageCache {
   // Does NOT call mngr.sync().
   #[inline]
   fn rollback(&mut self) {
-    for (_, v) in &self.offset_map {
-      match v {
-        &PageInfo::VirtualMem(_, _, _) => {}, // do nothing
+    let mut queue = Vec::new();
+
+    // Collect all of the pages that we need to clean up without directly modifying the map.
+    for (&id, &info) in &self.offset_map {
+      match info {
+        PageInfo::VirtualMem(_, _, _) => queue.push((id, info)),
+        PageInfo::VirtualDisk(_, _, _) => queue.push((id, info)),
+        PageInfo::Physical(_, _) => {}, // do nothing, see below
+      }
+    }
+
+    // Clean up the state in the cache, roll back the changes.
+    for (id, info) in &queue {
+      match info {
+        &PageInfo::VirtualMem(_, off, _) => {
+          self.offset_map.remove(id);
+          self.free_offsets.push(off);
+          self.lru.remove(*id);
+        },
         &PageInfo::VirtualDisk(_, pid, _) => {
           // Free all of the temporary pages that we have created.
           self.mngr.mark_as_free(pid);
+          self.offset_map.remove(id);
+          self.lru.remove(*id);
         },
-        &PageInfo::Physical(_, _) => {}, // do nothing, see below
+        _ => unreachable!("Should never happen"),
       }
     }
 
     // Reinstall all of the freed physical pages to reconstruct the previous state.
+    // TODO: maybe we should consider not removing pages from the cache so they stay in the cache
+    // after rollback.
     for &pid in &self.freed_pids {
       self.mngr.restore_from_free(pid);
     }
-
-    // Clear the state.
-    self.reset_cache();
   }
 
   #[inline]
