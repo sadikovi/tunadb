@@ -30,7 +30,6 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, pag
   if root == INVALID_PAGE_ID {
     // Create new leaf page
     pg::leaf_init(page);
-    pg::leaf_can_insert(&page, key, val);
     pg::leaf_insert(page, 0, key, val, mngr);
     BTreePut::Update(mngr.store(&page))
   } else {
