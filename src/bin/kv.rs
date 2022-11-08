@@ -144,25 +144,16 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
     Cmd::DebugDb => {
       let info = curr_db.stats();
 
-      let mem_used_pcnt = if info.cache_mem_max == 0 {
-        0f64
-      } else {
-        info.cache_mem_used as f64 / info.cache_mem_max as f64 * 100f64
-      };
-
-      let cache_hit_pcnt = if info.cache_num_hits + info.cache_num_misses == 0 {
-        0f64
-      } else {
-        info.cache_num_hits as f64 / (info.cache_num_hits + info.cache_num_misses) as f64 * 100f64
-      };
-
       println!("      page size: {}", info.page_size);
       println!("      num pages: {}", info.num_pages);
       println!(" num free pages: {}", info.num_free_pages);
       println!(" is cache proxy: {}", info.is_proxy_cache);
-      println!(" cache mem used: {} bytes ({:.2}%)", info.cache_mem_used, mem_used_pcnt);
+      println!(" cache mem used: {} bytes", info.cache_mem_used);
       println!("  cache mem max: {} bytes", info.cache_mem_max);
-      println!("cache hit ratio: {:.2}%", cache_hit_pcnt);
+      println!(" cache mem pcnt: {:.2}%", info.cache_mem_used_pcnt());
+      println!("     cache hits: {}", info.cache_num_hits);
+      println!("   cache misses: {}", info.cache_num_misses);
+      println!("cache hit ratio: {:.2}%", info.cache_hit_pcnt());
     },
     Cmd::DebugTable => {
       let info = with_table(curr_db, |table| {
