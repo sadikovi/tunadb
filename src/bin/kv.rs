@@ -145,7 +145,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       let info = curr_db.stats();
 
       println!("      page size: {}", info.page_size);
-      println!("      num pages: {}", info.num_pages);
+      println!("num total pages: {}", info.num_pages);
       println!(" num free pages: {}", info.num_free_pages);
       println!(" is cache proxy: {}", info.is_proxy_cache);
       println!(" cache mem used: {} bytes", info.cache_mem_used);
