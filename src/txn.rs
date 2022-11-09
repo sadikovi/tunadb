@@ -12,12 +12,13 @@ pub struct Transaction {
   mngr: Rc<RefCell<dyn BlockManager>>, // shared mutability
   trees: HashMap<String, (u32, bool)>, // mapping of tree name to page id + is_dirty flag
   is_valid: bool,
+  is_dirty: bool, // whether we have made any modifications
 }
 
 impl Transaction {
   // Creates new transaction.
   pub fn new(id: usize, mngr: Rc<RefCell<dyn BlockManager>>) -> Self {
-    Self { id, mngr, trees: HashMap::new(), is_valid: true }
+    Self { id, mngr, trees: HashMap::new(), is_valid: true, is_dirty: false }
   }
 
   // Returns transaction id.
@@ -32,6 +33,12 @@ impl Transaction {
     self.is_valid
   }
 
+  // Returns true if the transaction has made modifications.
+  #[inline]
+  pub fn is_dirty(&self) -> bool {
+    self.is_dirty
+  }
+
   // Checks if the current transaction is valid and panics otherwise.
   #[inline]
   pub fn assert_valid(&self) {
@@ -39,46 +46,56 @@ impl Transaction {
   }
 
   // Commits all of the tables updated in the transaction.
+  // If nothing was changed in the transaction, we skip commit and sync.
   pub fn commit(&mut self) {
     self.assert_valid();
 
-    // 1. Commit all of the written pages.
-    let vid_to_pid = self.mngr.borrow_mut().commit();
+    // If the transaction is read-only, no checks are required.
+    // If any modifications have been made, we need to check.
+    if self.is_dirty {
+      // 1. Commit all of the written pages.
+      let vid_to_pid = self.mngr.borrow_mut().commit();
 
-    // 2. Resolve root page id.
-    let mut root = self.get_root_page();
-    for (k, &(id, is_dirty)) in &self.trees {
-      let pid = match id {
+      // 2. Resolve root page id.
+      let mut root = self.get_root_page();
+      for (k, &(id, is_dirty)) in &self.trees {
+        let pid = match id {
+          vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
+            *vid_to_pid.get(&vid)
+              .expect(
+                &format!("Table {} (vid {}, dirty {}) could not be resolved", k, vid, is_dirty)
+              ),
+          pid => pid, // physical pages are never dirty
+        };
+        if is_dirty {
+          root = btree::put(root, k.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
+        }
+      }
+
+      // 3. Update the root tree + commit.
+      let vid_to_pid = self.mngr.borrow_mut().commit();
+      let root = match root {
         vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
           *vid_to_pid.get(&vid)
-            .expect(&format!("Table {} (vid {}, dirty {}) could not be resolved", k, vid, is_dirty)),
-        pid => pid, // physical pages are never dirty
+            .expect(&format!("Root page (vid {}) could not be resolved", root)),
+        pid => pid,
       };
-      if is_dirty {
-        root = btree::put(root, k.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
-      }
+
+      // 4. Sync storage manager.
+      self.set_root_page(root);
+      self.mngr.borrow_mut().get_mngr_mut().sync();
     }
-
-    // 3. Update the root tree + commit.
-    let vid_to_pid = self.mngr.borrow_mut().commit();
-    let root = match root {
-      vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
-        *vid_to_pid.get(&vid)
-          .expect(&format!("Root page (vid {}) could not be resolved", root)),
-      pid => pid,
-    };
-
-    // 4. Sync storage manager.
-    self.set_root_page(root);
-    self.mngr.borrow_mut().get_mngr_mut().sync();
     self.invalidate();
   }
 
   // Rolls back all of the written tables.
+  // If nothing was changed in the transaction, we skip rollback and sync.
   pub fn rollback(&mut self) {
     self.assert_valid();
-    self.mngr.borrow_mut().rollback();
-    self.mngr.borrow_mut().get_mngr_mut().sync();
+    if self.is_dirty {
+      self.mngr.borrow_mut().rollback();
+      self.mngr.borrow_mut().get_mngr_mut().sync();
+    }
     self.invalidate();
   }
 
@@ -91,6 +108,7 @@ impl Transaction {
       None,
       "BTree '{}' already exists", name
     );
+    self.is_dirty |= is_dirty;
   }
 
   // Updates the root page for the table with the provided name.
@@ -105,6 +123,7 @@ impl Transaction {
         panic!("No such btree '{}' in the current transaction {}", name, self.id);
       },
     }
+    self.is_dirty |= is_dirty;
   }
 
   // Invalidates transaction and clears state.
@@ -227,6 +246,13 @@ mod tests {
     Rc::new(RefCell::new(PageCache::new(1 * 1024 * 1024, mngr)))
   }
 
+  // A wrapper for transactions in tests.
+  fn with_txn<F>(id: usize, cache: Rc<RefCell<dyn BlockManager>>, func: F)
+      where F: Fn(Rc<RefCell<Transaction>>) -> () {
+    let txn = Rc::new(RefCell::new(Transaction::new(id, cache)));
+    func(txn);
+  }
+
   #[test]
   #[should_panic(expected = "BTree 'abc' already exists")]
   fn test_txn_register_already_exists() {
@@ -276,25 +302,27 @@ mod tests {
   #[test]
   fn test_txn_commit() {
     let cache = get_block_mngr();
-    let txn = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
+    with_txn(0, cache.clone(), |txn| {
+      let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+      let mut t2 = BTree::new("table2".to_owned(), txn.clone());
 
-    let mut t1 = BTree::new("table1".to_owned(), txn.clone());
-    let mut t2 = BTree::new("table2".to_owned(), txn.clone());
+      t1.put(&[1], &[10]);
+      t1.put(&[2], &[20]);
 
-    t1.put(&[1], &[10]);
-    t1.put(&[2], &[20]);
+      t2.put(&[8], &[80]);
+      t2.put(&[9], &[90]);
 
-    t2.put(&[8], &[80]);
-    t2.put(&[9], &[90]);
+      let v = t1.get(&[1]);
+      assert_eq!(v, Some(vec![10]));
 
-    let v = t1.get(&[1]);
-    assert_eq!(v, Some(vec![10]));
+      let v = v.unwrap();
+      t2.put(&v, &v);
 
-    let v = v.unwrap();
-    t2.put(&v, &v);
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
 
-    txn.borrow_mut().commit();
-
+    // 1 page for table1, 1 page for table2, 1 page for root.
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 3);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
   }
@@ -303,18 +331,65 @@ mod tests {
   fn test_txn_commit_non_modified() {
     let cache = get_block_mngr();
 
-    let txn1 = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
-    let mut t = BTree::new("table".to_owned(), txn1.clone());
-    t.put(&[1], &[10]);
-    txn1.borrow_mut().commit();
+    with_txn(1, cache.clone(), |txn| {
+      let mut t = BTree::new("table".to_owned(), txn.clone());
+      t.put(&[1], &[10]);
 
-    let txn2 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
-    let t = BTree::find("table", txn2.clone()).unwrap();
-    assert_eq!(t.get(&[1]), Some(vec![10]));
-    txn2.borrow_mut().commit();
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
+
+    with_txn(2, cache.clone(), |txn| {
+      let t = BTree::find("table", txn.clone()).unwrap();
+      assert_eq!(t.get(&[1]), Some(vec![10]));
+
+      assert!(!txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
 
     // 1 page is for table's btree, 1 page is for root btree.
     // No pages should be modified.
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_commit_chain() {
+    // The test verifies two commits and how the page ids change.
+    let cache = get_block_mngr();
+
+    with_txn(1, cache.clone(), |txn| {
+      let mut t = BTree::new("table".to_owned(), txn.clone());
+      t.put(&[1], &[10]);
+
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
+
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+
+    with_txn(2, cache.clone(), |txn| {
+      let mut t = BTree::find("table", txn.clone()).unwrap();
+      t.put(&[2], &[20]);
+
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
+
+    // 2 previous pages are empty, so we acquire the other two.
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 4);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 2);
+
+    with_txn(3, cache.clone(), |txn| {
+      let mut t = BTree::find("table", txn.clone()).unwrap();
+      t.put(&[3], &[30]);
+
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
+
+    // We overwrite the original two pages, the free pages are truncated.
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
   }
@@ -325,15 +400,21 @@ mod tests {
     // rewrite. Because we don't modify anything, there is no need to update root pid.
     let cache = get_block_mngr();
 
-    let txn1 = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
-    let mut t = BTree::new("table".to_owned(), txn1.clone());
-    t.put(&[1], &[10]);
-    txn1.borrow_mut().commit();
+    with_txn(1, cache.clone(), |txn| {
+      let mut t = BTree::new("table".to_owned(), txn.clone());
+      t.put(&[1], &[10]);
 
-    let txn2 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
-    let mut t = BTree::find("table", txn2.clone()).unwrap();
-    t.del(&[2]); // key does not exist in the table
-    txn2.borrow_mut().commit();
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
+
+    with_txn(2, cache.clone(), |txn| {
+      let mut t = BTree::find("table", txn.clone()).unwrap();
+      t.del(&[2]); // key does not exist in the table
+
+      assert!(!txn.borrow().is_dirty());
+      txn.borrow_mut().commit();
+    });
 
     // 1 page is for table's btree, 1 page is for root btree.
     // No other pages should be modified.
@@ -345,21 +426,79 @@ mod tests {
   fn test_txn_rollback_empty() {
     let cache = get_block_mngr();
     let mut txn = Transaction::new(0, cache);
+
+    assert!(!txn.is_dirty());
     txn.rollback();
     assert_eq!(txn.get_root_page(), INVALID_PAGE_ID);
   }
 
   #[test]
-  fn test_txn_rollback() {
+  fn test_txn_rollback_read_only_new_table() {
     let cache = get_block_mngr();
-    let txn = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
 
-    let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+    with_txn(0, cache.clone(), |txn| {
+      let t1 = BTree::new("table1".to_owned(), txn.clone());
+      assert_eq!(t1.get(&[1]), None);
 
-    t1.put(&[1], &[10]);
-    t1.put(&[2], &[20]);
+      assert!(txn.borrow().is_dirty()); // new trees need to be persisted
+      txn.borrow_mut().rollback();
+    });
 
-    txn.borrow_mut().rollback();
+    assert_eq!(cache.borrow_mut().get_mngr().root_page(), None);
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 0);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_rollback_read_only_existing_table() {
+    let cache = get_block_mngr();
+
+    // Test read-only mode for an existing table.
+    with_txn(1, cache.clone(), |txn| {
+      BTree::new("table".to_owned(), txn.clone());
+      txn.borrow_mut().commit();
+    });
+
+    with_txn(2, cache.clone(), |txn| {
+      let t = BTree::find("table", txn.clone()).unwrap();
+      assert_eq!(t.get(&[1]), None);
+
+      assert!(!txn.borrow().is_dirty());
+      txn.borrow_mut().rollback();
+    });
+
+    assert_eq!(cache.borrow_mut().get_mngr().root_page(), Some(0)); // table was stored
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 1); // root dispatch page
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_rollback_modified() {
+    let cache = get_block_mngr();
+
+    // Writes only.
+    with_txn(0, cache.clone(), |txn| {
+      let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+      t1.put(&[1], &[10]);
+      t1.put(&[2], &[20]);
+
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().rollback();
+    });
+
+    assert_eq!(cache.borrow_mut().get_mngr().root_page(), None);
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 0);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+
+    // Reads + writes.
+    with_txn(0, cache.clone(), |txn| {
+      let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+      t1.put(&[1], &[10]);
+      assert_eq!(t1.get(&[1]), Some(vec![10]));
+
+      assert!(txn.borrow().is_dirty());
+      txn.borrow_mut().rollback();
+    });
 
     assert_eq!(cache.borrow_mut().get_mngr().root_page(), None);
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 0);
