@@ -174,9 +174,11 @@ impl BTree {
   pub fn put(&mut self, key: &[u8], val: &[u8]) {
     self.txn.borrow().assert_valid();
     let mut txn = self.txn.borrow_mut();
-    self.root = btree::put(self.root, key, val, &mut *txn.mngr.borrow_mut());
-    txn.update(&self.name, self.root, true);
-
+    // Although we derive is_dirty check from root pid comparison, it will always be different
+    // in practice due to the fact that we always update key-value pair.
+    let curr_root = self.root;
+    self.root = btree::put(curr_root, key, val, &mut *txn.mngr.borrow_mut());
+    txn.update(&self.name, self.root, self.root != curr_root);
   }
 
   // Returns a value for the provided key.
@@ -192,8 +194,9 @@ impl BTree {
   pub fn del(&mut self, key: &[u8]) {
     self.txn.borrow().assert_valid();
     let mut txn = self.txn.borrow_mut();
-    self.root = btree::del(self.root, key, &mut *txn.mngr.borrow_mut());
-    txn.update(&self.name, self.root, true);
+    let curr_root = self.root;
+    self.root = btree::del(curr_root, key, &mut *txn.mngr.borrow_mut());
+    txn.update(&self.name, self.root, self.root != curr_root);
   }
 
   // Returns all of the key-value pairs in the btree.
@@ -312,6 +315,28 @@ mod tests {
 
     // 1 page is for table's btree, 1 page is for root btree.
     // No pages should be modified.
+    assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
+    assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_commit_delete_of_non_existent_key() {
+    // The test checks for regression when deleting a non-existent key would result in page
+    // rewrite. Because we don't modify anything, there is no need to update root pid.
+    let cache = get_block_mngr();
+
+    let txn1 = Rc::new(RefCell::new(Transaction::new(0, cache.clone())));
+    let mut t = BTree::new("table".to_owned(), txn1.clone());
+    t.put(&[1], &[10]);
+    txn1.borrow_mut().commit();
+
+    let txn2 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
+    let mut t = BTree::find("table", txn2.clone()).unwrap();
+    t.del(&[2]); // key does not exist in the table
+    txn2.borrow_mut().commit();
+
+    // 1 page is for table's btree, 1 page is for root btree.
+    // No other pages should be modified.
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 2);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
   }
