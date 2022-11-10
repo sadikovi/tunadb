@@ -6,12 +6,14 @@ use crate::error::Res;
 use crate::storage::{DEFAULT_PAGE_SIZE, StorageManager};
 use crate::txn::Transaction;
 
-// Handler for the database state.
-// TODO: implement file locking.
-pub struct DB {
-  mngr: Rc<RefCell<dyn BlockManager>>,
-  txn_counter: usize,
-  curr_txn: Option<Rc<RefCell<Transaction>>>,
+// Main entry to create a database client.
+// Opens a database using the provided path or an in-memory database.
+pub fn open(path: Option<&str>) -> DbBuilder {
+  DbBuilder {
+    path: path.map(|p| p.to_owned()),
+    page_size: DEFAULT_PAGE_SIZE,
+    max_mem: DEFAULT_PAGE_CACHE_MEM,
+  }
 }
 
 pub struct DbBuilder {
@@ -64,13 +66,12 @@ impl DbBuilder {
   }
 }
 
-// Opens a database using the provided path or an in-memory database.
-pub fn open(path: Option<&str>) -> DbBuilder {
-  DbBuilder {
-    path: path.map(|p| p.to_owned()),
-    page_size: DEFAULT_PAGE_SIZE,
-    max_mem: DEFAULT_PAGE_CACHE_MEM,
-  }
+// Handler for the database state.
+// TODO: implement file locking.
+pub struct DB {
+  mngr: Rc<RefCell<dyn BlockManager>>,
+  txn_counter: usize,
+  curr_txn: Option<Rc<RefCell<Transaction>>>,
 }
 
 impl DB {
