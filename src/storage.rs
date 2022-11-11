@@ -135,6 +135,37 @@ impl Drop for Descriptor {
   }
 }
 
+//====================
+// Storage file layout
+//====================
+//
+// [HEADER][PAGE 0][PAGE 1]...[PAGE N]
+//
+// HEADER:
+//
+// 0              4              8              12             16
+// +--------------+--------------+--------------+--------------+
+// | MAGIC        | Flags        | Page size    | Free page id |
+// +--------------+--------------+--------------+--------------+
+// 16             20             24             28             32
+// +--------------+--------------+--------------+--------------+
+// | Root page id | Reserved space                             |
+// +--------------+--------------+--------------+--------------+
+//
+// PAGE:
+// - Data page as a sequence of bytes of page size, general storage.
+// - Meta page that contains information about available free pages.
+//
+// META PAGE:
+// Free page id in the header points to a meta page:
+// 0              4              8              12 (META_OFFSET)          (page size)
+// +--------------+--------------+--------------+---------------------------+
+// | MAGIC        | Next meta id | Count        | Rest of the page data ... |
+// +--------------+--------------+--------------+---------------------------+
+//
+// Next meta id points to the next meta page containing free pages.
+//
+
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed header size, see sync() method for more information.
 const DB_HEADER_SIZE: usize = 32;
@@ -356,8 +387,15 @@ impl StorageManager {
     }
   }
 
+  // Returns true if the storage manager has lock, i.e. has an underlying file.
+  #[inline]
+  pub fn has_lock(&self) -> bool {
+    self.lock.is_some()
+  }
+
   // Returns root page id that is currently set.
   // The value is the one that is in memory (most recent) in case disk and memory have diverged.
+  #[inline]
   pub fn root_page(&self) -> Option<u32> {
     self.root_page
   }
@@ -579,12 +617,6 @@ impl StorageManager {
     let desc_mem_usage = self.desc.estimated_mem_usage();
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
-  }
-
-  // Returns true if the storage manager has lock, i.e. has an underlying file.
-  #[inline]
-  pub fn has_lock(&self) -> bool {
-    self.lock.is_some()
   }
 }
 
