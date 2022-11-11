@@ -67,7 +67,6 @@ impl DbBuilder {
 }
 
 // Handler for the database state.
-// TODO: implement file locking.
 pub struct DB {
   mngr: Rc<RefCell<dyn BlockManager>>,
   txn_counter: usize,
@@ -132,21 +131,27 @@ mod tests {
   #[test]
   fn test_db_open_close() {
     with_tmp_file(|path| {
-      let mut db = open(Some(path)).try_build().unwrap();
-      db.with_txn(true, |txn| {
-        let mut t1 = BTree::new("table1".to_owned(), txn.clone());
-        t1.put(&[1], &[10]);
-        t1.put(&[2], &[20]);
-        t1.put(&[3], &[30]);
-      });
+      // Once the scope is done, database should be persisted on disk and lock should be removed.
+      {
+        let mut db = open(Some(path)).try_build().unwrap();
+        db.with_txn(true, |txn| {
+          let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+          t1.put(&[1], &[10]);
+          t1.put(&[2], &[20]);
+          t1.put(&[3], &[30]);
+        });
+      }
 
-      let mut db = open(Some(path)).try_build().unwrap();
-      db.with_txn(false, |txn| {
-        let t1 = BTree::find("table1", txn.clone()).unwrap();
-        assert_eq!(t1.get(&[1]), Some(vec![10]));
-        assert_eq!(t1.get(&[2]), Some(vec![20]));
-        assert_eq!(t1.get(&[3]), Some(vec![30]));
-      });
+      // Scope 2: persisted data should be read correctly.
+      {
+        let mut db = open(Some(path)).try_build().unwrap();
+        db.with_txn(false, |txn| {
+          let t1 = BTree::find("table1", txn.clone()).unwrap();
+          assert_eq!(t1.get(&[1]), Some(vec![10]));
+          assert_eq!(t1.get(&[2]), Some(vec![20]));
+          assert_eq!(t1.get(&[3]), Some(vec![30]));
+        });
+      }
     });
   }
 }

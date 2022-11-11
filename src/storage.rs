@@ -1,8 +1,9 @@
 use std::cmp;
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions, remove_file};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::process;
 use crate::error::Res;
 
 // File descriptor and StorageManager code.
@@ -221,6 +222,7 @@ impl StorageManagerBuilder {
 
 pub struct StorageManager {
   desc: Descriptor,
+  lock: Option<LockManager>,
   flags: u32, //
   page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list as the first meta block
@@ -258,6 +260,8 @@ impl StorageManager {
         if res!(path.metadata()).len() < DB_HEADER_SIZE as u64 {
           return Err(err!("Corrupt database file, header is too small"));
         }
+
+        let lock = try_lock(path)?;
 
         let mut buf = vec![0u8; DB_HEADER_SIZE];
         let mut desc = Descriptor::disk(opts.disk_path.as_ref());
@@ -313,6 +317,7 @@ impl StorageManager {
 
         Ok(Self {
           desc,
+          lock: Some(lock),
           flags,
           page_size,
           free_page_id: INVALID_PAGE_ID, // free page id is updated in sync/drop
@@ -321,8 +326,10 @@ impl StorageManager {
           free_set,
         })
       } else {
+        let lock = try_lock(path)?;
         let mut mngr = Self {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
+          lock: Some(lock),
           flags: 0,
           page_size: opts.page_size,
           free_page_id: INVALID_PAGE_ID,
@@ -336,6 +343,7 @@ impl StorageManager {
     } else {
       let mut mngr = Self {
         desc: Descriptor::mem(opts.mem_capacity),
+        lock: None, // not needed for in-memory descriptor
         flags: 0,
         page_size: opts.page_size,
         free_page_id: INVALID_PAGE_ID,
@@ -572,13 +580,89 @@ impl StorageManager {
     let free_mem_usage = self.free_set.len() * 4 /* u32 size */ + self.free_list.len() * 4;
     desc_mem_usage + free_mem_usage
   }
+
+  // Returns true if the storage manager has lock, i.e. has an underlying file.
+  #[inline]
+  pub fn has_lock(&self) -> bool {
+    self.lock.is_some()
+  }
+}
+
+// Lock manager to ensure only one process can open the database.
+struct LockManager {
+  path: String, // full path to the lock file
+}
+
+impl Drop for LockManager {
+  fn drop(&mut self) {
+    let path = Path::new(&self.path);
+    if path.exists() {
+      // Drop the lock.
+      remove_file(path).unwrap();
+    }
+  }
+}
+
+// Tries to lock the database file and returns the lock manager to drop the lock later.
+// Lock file creation is atomic.
+fn try_lock(path: &Path) -> Res<LockManager> {
+  let file_name: &str = path.file_name()
+    .ok_or(err!("Failed to extract file name from {:?}", path))?
+    .to_str()
+    .ok_or(err!("Failed to convert file name from {:?}", path))?;
+
+  if file_name.starts_with(".") {
+    return Err(err!("Cannot create a lock for a file that starts with `.`"));
+  }
+
+  let lock_name = format!(".{}.lock", file_name);
+  let mut lock_buf = path.to_path_buf();
+  lock_buf.set_file_name(&lock_name);
+  let lock_path = lock_buf.as_path();
+
+  // Scope for locking.
+  {
+    let mut lock_file = match OpenOptions::new().write(true).create_new(true).open(lock_path) {
+      Ok(file) => file,
+      Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+        // Try to open a file and see if we can read the pid.
+        let mut prev_lock = OpenOptions::new().read(true).open(lock_path)?;
+
+        let mut buf = [0u8; 4];
+        prev_lock.read_exact(&mut buf)?;
+        let prev_pid = u8_u32!(buf);
+
+        // Lock already exists.
+        return Err(
+          err!("Database {:?} is being used by another process with pid {}. \
+            Please check if that process is running and if not, delete the lock file manually.",
+            path, prev_pid
+          )
+        );
+      },
+      Err(err) => {
+        // Other IO error, just return an error.
+        return Err(err.into());
+      },
+    };
+
+    // Write a pid file so we can potentially recognise if the process is alive.
+    write_u32!(lock_file, process::id());
+  }
+
+  Ok(
+    LockManager {
+      // Lock path is confirmed to be valid as it is derived from the file path.
+      // It is fine to have expect() here.
+      path: lock_path.to_str().expect("Invalid lock path").to_owned()
+    }
+  )
 }
 
 #[cfg(test)]
 pub mod tests {
   use super::*;
   use std::env::temp_dir;
-  use std::fs::remove_file;
   use std::path::Path;
   use rand::prelude::*;
 
@@ -895,7 +979,13 @@ pub mod tests {
   #[test]
   fn test_storage_manager_init_disk_2() {
     with_tmp_file(|path| {
-      let _mngr = storage_disk(24, path);
+      // Scope for the first storage sync.
+      // Lock file is dropped after the scope.
+      {
+        let _mngr = storage_disk(24, path);
+      }
+
+      // Scope for the second storage sync.
       let mngr = storage_disk(32, path);
 
       assert_eq!(mngr.flags, 0);
@@ -907,6 +997,49 @@ pub mod tests {
       assert_eq!(mngr.num_pages(), 0);
       assert_eq!(mngr.estimated_mem_usage(), 0);
     })
+  }
+
+  #[test]
+  fn test_storage_manager_init_lock_success() {
+    with_tmp_file(|path| {
+      {
+        // Lock is acquired.
+        let mngr1 = storage_disk(32, path);
+        assert!(mngr1.has_lock());
+        // Lock is released.
+      }
+      {
+        // Lock is acquired.
+        let mngr2 = storage_disk(32, path);
+        assert!(mngr2.has_lock());
+        // Lock is released.
+      }
+      // No lock files should be in the directory.
+      let path = Path::new(path);
+      let lock_name = format!(".{}.lock", path.file_name().unwrap().to_str().unwrap());
+
+      let dir = path.parent().unwrap();
+      for entry in dir.read_dir().unwrap() {
+        if let Ok(entry) = entry {
+          assert!(
+            entry.file_name().to_str().unwrap() != lock_name,
+            "Found lock file {} but no lock was expected", lock_name
+          );
+        }
+      }
+    });
+  }
+
+  #[test]
+  #[should_panic(expected = "Please check if that process is running")]
+  fn test_storage_manager_init_lock_failure() {
+    with_tmp_file(|path| {
+      // This process holds the lock, lock will be released at the end of the scope.
+      let _mngr1 = storage_disk(32, path);
+      // Initialisation within the current process should return an error.
+      // However, the function uses build() which will panic in this case.
+      let _mngr2 = storage_disk(32, path);
+    });
   }
 
   #[test]
