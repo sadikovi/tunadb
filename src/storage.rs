@@ -528,15 +528,15 @@ impl StorageManager {
         if curr == INVALID_PAGE_ID {
           curr = pid;
         } else {
-          res!((&mut buf[off..]).write(&u32_u8!(pid)));
+          res!((&mut buf[off..]).write_all(&u32_u8!(pid)));
           cnt += 1;
           off += 4;
         }
 
         if off > buf.len() - 4 /* u32 size */ || len == 0 {
-          res!((&mut buf[0..4]).write(META_PAGE_MAGIC));
-          res!((&mut buf[4..8]).write(&u32_u8!(prev)));
-          res!((&mut buf[8..12]).write(&u32_u8!(cnt)));
+          res!((&mut buf[0..4]).write_all(META_PAGE_MAGIC));
+          res!((&mut buf[4..8]).write_all(&u32_u8!(prev)));
+          res!((&mut buf[8..12]).write_all(&u32_u8!(cnt)));
           self.write(curr, &buf[..]);
           meta_block_cnt -= 1;
 
@@ -549,8 +549,8 @@ impl StorageManager {
 
       // Write the remaining data into one more page.
       if meta_block_cnt > 0 {
-        res!((&mut buf[0..4]).write(&u32_u8!(prev)));
-        res!((&mut buf[4..8]).write(&u32_u8!(cnt)));
+        res!((&mut buf[0..4]).write_all(&u32_u8!(prev)));
+        res!((&mut buf[4..8]).write_all(&u32_u8!(cnt)));
         self.write(curr, &buf[..]);
         self.free_page_id = curr;
         meta_block_cnt -= 1;
@@ -571,11 +571,11 @@ impl StorageManager {
 
     // Persist the database header.
     let mut buf = [0u8; DB_HEADER_SIZE];
-    res!((&mut buf[0..]).write(MAGIC));
-    res!((&mut buf[4..]).write(&u32_u8!(self.flags)));
-    res!((&mut buf[8..]).write(&u32_u8!(self.page_size)));
-    res!((&mut buf[12..]).write(&u32_u8!(self.free_page_id)));
-    res!((&mut buf[16..]).write(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID))));
+    res!((&mut buf[0..]).write_all(MAGIC));
+    res!((&mut buf[4..]).write_all(&u32_u8!(self.flags)));
+    res!((&mut buf[8..]).write_all(&u32_u8!(self.page_size)));
+    res!((&mut buf[12..]).write_all(&u32_u8!(self.free_page_id)));
+    res!((&mut buf[16..]).write_all(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID))));
     self.desc.write(0, &buf[..]);
 
     // Optionally truncate the file.
