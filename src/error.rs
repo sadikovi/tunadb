@@ -36,6 +36,12 @@ impl<T> From<std::sync::PoisonError<T>> for Error {
   }
 }
 
+impl From<std::string::FromUtf8Error> for Error {
+  fn from(err: std::string::FromUtf8Error) -> Self {
+    Self { msg: format!("UTF8: {}", err.to_string()) }
+  }
+}
+
 macro_rules! err {
   ($fmt:expr) => (crate::error::Error::from($fmt.to_owned()));
   ($fmt:expr, $($args:expr),*) => (crate::error::Error::from(format!($fmt, $($args),*)));

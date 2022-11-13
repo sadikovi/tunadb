@@ -149,7 +149,7 @@ impl Drop for Descriptor {
 // +--------------+--------------+--------------+--------------+
 // 16             20             24             28             32
 // +--------------+--------------+--------------+--------------+
-// | Root page id | Reserved for expansion                     |
+// | Root page id | Version used to write the file             |
 // +--------------+--------------+--------------+--------------+
 // 32             36             40             44             48
 // +--------------+--------------+--------------+--------------+
@@ -177,6 +177,7 @@ impl Drop for Descriptor {
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed header size, see sync() method for more information.
 const DB_HEADER_SIZE: usize = 64;
+const DB_VERSION: &str = env!("CARGO_PKG_VERSION"); // extracted from Cargo.toml
 pub const MIN_PAGE_SIZE: u32 = 16;
 pub const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 pub const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
@@ -195,6 +196,35 @@ const META_OFFSET: usize = 12;
 #[inline]
 fn pos(page_id: u32, page_size: u32) -> u64 {
   DB_HEADER_SIZE as u64 + page_id as u64 * page_size as u64
+}
+
+// Writes database version as string into the buffer.
+// The version string is written C-like, with any remaining bytes replaed with \0.
+#[inline]
+fn write_version(version: &str, buf: &mut [u8]) -> Res<()> {
+  if version.len() > buf.len() {
+    return Err(err!("Version {} is too long", version));
+  }
+  // We need to ensure we zero the remaining bytes,
+  // they are used as termination characters.
+  let mut out = vec![0u8; buf.len()];
+  (&mut out[..]).write_all(version.as_bytes())?;
+  (&mut buf[..]).write_all(&out[..])?;
+  Ok(())
+}
+
+// Reads the database version as string from the buffer.
+// Note that this function must be used in conjunction with `write_version`.
+#[inline]
+fn read_version(buf: &[u8]) -> Res<String> {
+  let mut i = 0;
+  // We don't store length of the version string,
+  // stop at the first terminating zero.
+  while i < buf.len() && buf[i] != b'\0' {
+    i += 1;
+  }
+  let version = String::from_utf8((&buf[..i]).to_owned())?;
+  Ok(version)
 }
 
 // StorageManager options.
@@ -262,7 +292,8 @@ impl StorageManagerBuilder {
 pub struct StorageManager {
   desc: Descriptor,
   lock: Option<LockManager>,
-  flags: u32, //
+  version: String,
+  flags: u32, // database flags
   page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list as the first meta block
   root_page: Option<u32>, // root page for the first btree
@@ -354,9 +385,13 @@ impl StorageManager {
           page_id => Some(page_id)
         };
 
+        // Version that was used to write the database file.
+        let version = read_version(&buf[20..32])?;
+
         Ok(Self {
           desc,
           lock: Some(lock),
+          version,
           flags,
           page_size,
           free_page_id: INVALID_PAGE_ID, // free page id is updated in sync/drop
@@ -369,6 +404,7 @@ impl StorageManager {
         let mut mngr = Self {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
           lock: Some(lock),
+          version: DB_VERSION.to_owned(),
           flags: 0,
           page_size: opts.page_size,
           free_page_id: INVALID_PAGE_ID,
@@ -383,6 +419,7 @@ impl StorageManager {
       let mut mngr = Self {
         desc: Descriptor::mem(opts.mem_capacity),
         lock: None, // not needed for in-memory descriptor
+        version: DB_VERSION.to_owned(),
         flags: 0,
         page_size: opts.page_size,
         free_page_id: INVALID_PAGE_ID,
@@ -399,6 +436,13 @@ impl StorageManager {
   #[inline]
   pub fn has_lock(&self) -> bool {
     self.lock.is_some()
+  }
+
+  // Returns database version that was used to write the file.
+  // In other words, storage layout version which may be different from the engine version.
+  #[inline]
+  pub fn version(&self) -> &str {
+    &self.version
   }
 
   // Returns root page id that is currently set.
@@ -579,11 +623,12 @@ impl StorageManager {
 
     // Persist the database header.
     let mut buf = [0u8; DB_HEADER_SIZE];
-    res!((&mut buf[0..]).write_all(MAGIC));
-    res!((&mut buf[4..]).write_all(&u32_u8!(self.flags)));
-    res!((&mut buf[8..]).write_all(&u32_u8!(self.page_size)));
-    res!((&mut buf[12..]).write_all(&u32_u8!(self.free_page_id)));
-    res!((&mut buf[16..]).write_all(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID))));
+    res!((&mut buf[0..]).write_all(MAGIC)); // 0..4
+    res!((&mut buf[4..]).write_all(&u32_u8!(self.flags))); // 4..8
+    res!((&mut buf[8..]).write_all(&u32_u8!(self.page_size))); // 8..12
+    res!((&mut buf[12..]).write_all(&u32_u8!(self.free_page_id))); // 12..16
+    res!((&mut buf[16..]).write_all(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID)))); // 16..20
+    res!(write_version(&self.version, &mut buf[20..32])); // 20..32
     self.desc.write(0, &buf[..]);
 
     // Optionally truncate the file.
@@ -988,8 +1033,39 @@ pub mod tests {
   //=====================
 
   #[test]
+  fn test_storage_manager_version_write() {
+    assert!(write_version("1.2.3", &mut [0u8; 0]).is_err());
+    assert!(write_version("1.2.3", &mut [0u8; 4]).is_err());
+    assert!(write_version("1.2.3", &mut [0u8; 5]).is_ok());
+    assert!(write_version("1.2.3", &mut [0u8; 10]).is_ok());
+
+    let mut buf = [2u8; 5];
+    write_version("1.1.1", &mut buf).unwrap();
+    assert_eq!(buf, [49, 46, 49, 46, 49]);
+
+    // Check that the remaining bytes are zero-ed out.
+    let mut buf = [2u8; 10];
+    write_version("1.1.1", &mut buf).unwrap();
+    assert_eq!(buf, [49, 46, 49, 46, 49, 0, 0, 0, 0, 0]);
+  }
+
+  #[test]
+  fn test_storage_manager_version_read() {
+    let mut buf = [1u8; 10];
+    write_version("1.2.3", &mut buf).unwrap();
+    let version = read_version(&buf).unwrap();
+    assert_eq!(version, "1.2.3");
+
+    let mut buf = [1u8; 10];
+    write_version("", &mut buf).unwrap();
+    let version = read_version(&buf).unwrap();
+    assert_eq!(version, "");
+  }
+
+  #[test]
   fn test_storage_manager_init_mem() {
     let mngr = storage_mem(24);
+    assert_eq!(mngr.version(), DB_VERSION);
     assert_eq!(mngr.flags, 0);
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
@@ -1004,6 +1080,7 @@ pub mod tests {
   fn test_storage_manager_init_disk() {
     with_tmp_file(|path| {
       let mngr = storage_disk(24, path);
+      assert_eq!(mngr.version(), DB_VERSION);
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
@@ -1028,6 +1105,7 @@ pub mod tests {
       // Scope for the second storage sync.
       let mngr = storage_disk(32, path);
 
+      assert_eq!(mngr.version(), DB_VERSION);
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
