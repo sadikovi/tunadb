@@ -149,7 +149,15 @@ impl Drop for Descriptor {
 // +--------------+--------------+--------------+--------------+
 // 16             20             24             28             32
 // +--------------+--------------+--------------+--------------+
-// | Root page id | Reserved space                             |
+// | Root page id | Reserved for expansion                     |
+// +--------------+--------------+--------------+--------------+
+// 32             36             40             44             48
+// +--------------+--------------+--------------+--------------+
+// | Reserved for expansion                                    |
+// +--------------+--------------+--------------+--------------+
+// 48             52             56             60             64
+// +--------------+--------------+--------------+--------------+
+// | Reserved for expansion                                    |
 // +--------------+--------------+--------------+--------------+
 //
 // PAGE:
@@ -168,7 +176,7 @@ impl Drop for Descriptor {
 
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed header size, see sync() method for more information.
-const DB_HEADER_SIZE: usize = 32;
+const DB_HEADER_SIZE: usize = 64;
 pub const MIN_PAGE_SIZE: u32 = 16;
 pub const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 pub const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB
@@ -1059,6 +1067,28 @@ pub mod tests {
           );
         }
       }
+    });
+  }
+
+  #[test]
+  #[should_panic(expected = "header is too small")]
+  fn test_storage_manager_init_header_only_magic() {
+    // Header only contains magic.
+    with_tmp_file(|path| {
+      let mut file = File::create(path).unwrap();
+      file.write_all(MAGIC).unwrap();
+      let _mngr = storage_disk(32, path); // fails due to the incomplete header
+    });
+  }
+
+  #[test]
+  #[should_panic(expected = "header is too small")]
+  fn test_storage_manager_init_header_is_too_small() {
+    // Header is short by 1 byte.
+    with_tmp_file(|path| {
+      let mut file = File::create(path).unwrap();
+      file.write_all(&[2u8; DB_HEADER_SIZE - 1]).unwrap();
+      let _mngr = storage_disk(32, path); // fails due to the short header
     });
   }
 
