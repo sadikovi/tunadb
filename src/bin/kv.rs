@@ -2,7 +2,7 @@ use std::io;
 use std::io::Write;
 use tunadb::db;
 use tunadb::page as pg;
-use tunadb::txn::BTree;
+use tunadb::txn::{Set, create_set, get_set};
 
 #[derive(Clone, Debug)]
 enum Cmd {
@@ -129,7 +129,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
     },
     Cmd::List => {
       with_table(curr_db, |table| {
-        let mut iter = table.list();
+        let mut iter = table.list(None, None);
         while let Some((key, val)) = iter.next() {
           let key = std::str::from_utf8(&key).unwrap();
           let val = std::str::from_utf8(&val).unwrap();
@@ -200,10 +200,10 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
   Ok(true)
 }
 
-fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut BTree) -> T, {
+fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut Set) -> T, {
   db.with_txn(true, |txn| {
-    let mut table = BTree::find("kv", txn.clone())
-      .unwrap_or_else(|| BTree::new("kv".to_owned(), txn));
+    let mut table = get_set(txn.clone(), "kv")
+      .unwrap_or_else(|| create_set(txn.clone(), "kv").unwrap());
     func(&mut table)
   })
 }

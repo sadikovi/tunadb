@@ -5,6 +5,7 @@ use crate::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
 use crate::error::Res;
 use crate::storage::{DEFAULT_PAGE_SIZE, StorageManager};
 use crate::txn::Transaction;
+use crate::util::DB_VERSION;
 
 // Main entry to create a database client.
 // Opens a database using the provided path or an in-memory database.
@@ -58,11 +59,13 @@ impl DbBuilder {
       }
     };
 
-    Ok(DB {
-      mngr: mngr,
-      txn_counter: 0, // TODO: make it persistent
-      curr_txn: None,
-    })
+    Ok(
+      DB {
+        mngr: mngr,
+        txn_counter: 0, // TODO: make it persistent
+        curr_txn: None,
+      }
+    )
   }
 }
 
@@ -78,6 +81,12 @@ impl DB {
   // Used for debugging.
   pub fn get_mngr(&self) -> Rc<RefCell<dyn BlockManager>> {
     self.mngr.clone()
+  }
+
+  // Returns the database version.
+  #[inline]
+  pub fn version(&self) -> &str {
+    DB_VERSION
   }
 
   // Database/storage statistics.
@@ -102,7 +111,7 @@ impl DB {
     self.curr_txn = Some(txn.clone());
     let res = func(txn.clone());
     // Roll back all of the changes if they have not been explicitly committed.
-    if txn.borrow().is_valid() {
+    if !txn.borrow().is_finalised() {
       if auto_commit {
         txn.borrow_mut().commit();
       } else {
@@ -126,7 +135,7 @@ impl DB {
 mod tests {
   use super::*;
   use crate::storage::tests::with_tmp_file;
-  use crate::txn::BTree;
+  use crate::txn::{create_set, get_set};
 
   #[test]
   fn test_db_open_close() {
@@ -135,7 +144,7 @@ mod tests {
       {
         let mut db = open(Some(path)).try_build().unwrap();
         db.with_txn(true, |txn| {
-          let mut t1 = BTree::new("table1".to_owned(), txn.clone());
+          let mut t1 = create_set(txn.clone(), "t1").unwrap();
           t1.put(&[1], &[10]);
           t1.put(&[2], &[20]);
           t1.put(&[3], &[30]);
@@ -146,7 +155,7 @@ mod tests {
       {
         let mut db = open(Some(path)).try_build().unwrap();
         db.with_txn(false, |txn| {
-          let t1 = BTree::find("table1", txn.clone()).unwrap();
+          let t1 = get_set(txn.clone(), "t1").unwrap();
           assert_eq!(t1.get(&[1]), Some(vec![10]));
           assert_eq!(t1.get(&[2]), Some(vec![20]));
           assert_eq!(t1.get(&[3]), Some(vec![30]));

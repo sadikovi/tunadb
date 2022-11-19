@@ -5,6 +5,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process;
 use crate::error::Res;
+use crate::util::DB_VERSION;
 
 // File descriptor and StorageManager code.
 // All methods do not return `Res` because any error that occurs at this level is considered
@@ -177,7 +178,6 @@ impl Drop for Descriptor {
 const MAGIC: &[u8] = &[b'T', b'U', b'N', b'A'];
 // We have a fixed header size, see sync() method for more information.
 const DB_HEADER_SIZE: usize = 64;
-const DB_VERSION: &str = env!("CARGO_PKG_VERSION"); // extracted from Cargo.toml
 pub const MIN_PAGE_SIZE: u32 = 16;
 pub const MAX_PAGE_SIZE: u32 = 1 * 1024 * 1024; // 1MB
 pub const DEFAULT_PAGE_SIZE: u32 = 4096; // 4KB

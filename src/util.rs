@@ -35,6 +35,12 @@ macro_rules! write_bytes {
 }
 
 // ========================
+// Version
+// ========================
+
+pub const DB_VERSION: &str = env!("CARGO_PKG_VERSION"); // extracted from Cargo.toml
+
+// ========================
 // LRU cache implementation
 // ========================
 
