@@ -16,10 +16,10 @@ pub const DEFAULT_PAGE_CACHE_MEM: usize = 128 * 1024 * 1024;
 // Max virtual id is 2,147,483,647.
 const VID_MASK: u32 = !0x7fffffff;
 
-// Returns true if it is a physical page id.
+// Returns true if it is a virtual page id.
 #[inline]
-pub fn is_physical_page_id(id: u32) -> bool {
-  VID_MASK & id == 0
+pub fn is_virtual_page_id(id: u32) -> bool {
+  id != INVALID_PAGE_ID && VID_MASK & id != 0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,7 +214,7 @@ impl PageCache {
     match page_type {
       pg::PageType::Overflow => {
         let next_pid = pg::next_page(&buf);
-        if next_pid == INVALID_PAGE_ID || is_physical_page_id(next_pid) {
+        if !is_virtual_page_id(next_pid) {
           // Overflow page does not depend on any other pages, write to disk.
           true
         } else if let Some(&pid) = vid_to_pid.get(&next_pid) {
@@ -231,7 +231,7 @@ impl PageCache {
         for i in 0..pg::num_slots(&buf) {
           let cell = pg::leaf_get_cell_mut(buf, i);
           let overflow_pid = u8_u32!(&cell[12..16]);
-          if overflow_pid != INVALID_PAGE_ID && !is_physical_page_id(overflow_pid) {
+          if is_virtual_page_id(overflow_pid) {
             let pid = vid_to_pid.get(&overflow_pid).expect("Not all overflow pages were resolved");
             write_u32!(&mut cell[12..16], pid);
           }
@@ -243,7 +243,7 @@ impl PageCache {
         for i in 0..pg::num_slots(&buf) {
           let cell = pg::internal_get_cell_mut(buf, i);
           let overflow_pid = u8_u32!(&cell[12..16]);
-          if overflow_pid != INVALID_PAGE_ID && !is_physical_page_id(overflow_pid) {
+          if is_virtual_page_id(overflow_pid) {
             let pid = vid_to_pid.get(&overflow_pid).expect("Not all leaf pages were resolved");
             write_u32!(&mut cell[12..16], pid);
           }
@@ -254,7 +254,7 @@ impl PageCache {
         let mut can_write = true;
         for i in 0..pg::num_slots(&buf) + 1 {
           let ptr = pg::internal_get_ptr(&buf, i);
-          if ptr != INVALID_PAGE_ID && !is_physical_page_id(ptr) {
+          if is_virtual_page_id(ptr) {
             if let Some(&pid) = vid_to_pid.get(&ptr) {
               pg::internal_set_ptr(buf, i, pid);
             } else {
@@ -302,7 +302,7 @@ impl BlockManager for PageCache {
         write_bytes!(&mut buf[..], &self.buf[off..off + self.page_size]);
         self.lru.update(id);
       },
-      None if is_physical_page_id(id) => {
+      None if !is_virtual_page_id(id) => {
         self.num_cache_misses += 1;
         // Simply load from storage.
         self.mngr.read(id, buf);
@@ -350,7 +350,7 @@ impl BlockManager for PageCache {
         self.lru.remove(id);
         self.freed_pids.push(id);
       },
-      None if is_physical_page_id(id) => {
+      None if !is_virtual_page_id(id) => {
         self.mngr.mark_as_free(id);
         self.freed_pids.push(id);
       },

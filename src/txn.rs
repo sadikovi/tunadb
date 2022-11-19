@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use crate::btree;
 use crate::block::BlockManager;
-use crate::cache::is_physical_page_id;
+use crate::cache::is_virtual_page_id;
 use crate::error::Res;
 use crate::storage::INVALID_PAGE_ID;
 
@@ -88,7 +88,7 @@ impl Transaction {
             // Do nothing, the page was not modified.
           },
           State::Modified => {
-            let pid = if id != INVALID_PAGE_ID && !is_physical_page_id(id) {
+            let pid = if is_virtual_page_id(id) {
               // The page is a virtual page.
               *vid_to_pid.get(&id)
                 .expect(
@@ -110,7 +110,7 @@ impl Transaction {
       // 3. Update the root tree + commit.
       let vid_to_pid = self.mngr.borrow_mut().commit();
       let root = match root {
-        vid if vid != INVALID_PAGE_ID && !is_physical_page_id(vid) =>
+        vid if is_virtual_page_id(vid) =>
           *vid_to_pid.get(&vid)
             .expect(&format!("Root page (vid {}) could not be resolved", root)),
         pid => pid,
