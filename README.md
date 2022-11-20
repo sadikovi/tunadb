@@ -1,11 +1,13 @@
 # TunaDB
 
 A simple single-threaded implementation of a storage engine based on
-copy-on-write B+tree in Rust.
+copy-on-write B+tree with unconstrained key and value length in Rust.
 
-This was done mostly for educational purposes to learn more about storage
-layout and B+trees. There is a number of TODOs scattered around the codebase so
-if you are interested, feel free to open PRs for features or bug fixes.
+I am also working on adding other parts of the database such as query parsing,
+analysis, and execution using the storage engine.
+
+If you are interested in helping out, feel free to open PRs for features or
+bug fixes. There is also a number of TODOs scattered around the codebase.
 
 # Simple key-value store
 
