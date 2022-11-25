@@ -203,7 +203,7 @@ fn pos(page_id: u32, page_size: u32) -> u64 {
 #[inline]
 fn write_version(version: &str, buf: &mut [u8]) -> Res<()> {
   if version.len() > buf.len() {
-    return Err(err!("Version {} is too long", version));
+    return Err(internal_err!("Version {} is too long", version));
   }
   // We need to ensure we zero the remaining bytes,
   // they are used as termination characters.
@@ -313,22 +313,22 @@ impl StorageManager {
   // Consider using `builder()` method instead.
   fn try_new(opts: &Options) -> Res<Self> {
     if opts.page_size < MIN_PAGE_SIZE || opts.page_size > MAX_PAGE_SIZE {
-      return Err(err!("Corrupt database file, invalid page size {}", opts.page_size));
+      return Err(internal_err!("Corrupt database file, invalid page size {}", opts.page_size));
     }
 
     if opts.is_disk {
       if opts.disk_path.len() == 0 {
-        return Err(err!("Empty file path"));
+        return Err(internal_err!("Empty file path"));
       }
 
       let path = Path::new(&opts.disk_path);
 
       if path.exists() {
         if !path.is_file() {
-          return Err(err!("Not a file: {}", path.display()));
+          return Err(internal_err!("Not a file: {}", path.display()));
         }
         if res!(path.metadata()).len() < DB_HEADER_SIZE as u64 {
-          return Err(err!("Corrupt database file, header is too small"));
+          return Err(internal_err!("Corrupt database file, header is too small"));
         }
 
         let lock = try_lock(path)?;
@@ -338,7 +338,7 @@ impl StorageManager {
         desc.read(0, &mut buf[..]);
 
         if &buf[0..4] != MAGIC {
-          return Err(err!("Corrupt database file, invalid MAGIC"));
+          return Err(internal_err!("Corrupt database file, invalid MAGIC"));
         }
 
         // Reserved for database flags.
@@ -346,7 +346,7 @@ impl StorageManager {
 
         let page_size = u8_u32!(&buf[8..12]);
         if page_size < MIN_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
-          return Err(err!("Corrupt database file, invalid page size {}", page_size));
+          return Err(internal_err!("Corrupt database file, invalid page size {}", page_size));
         }
 
         let mut free_page_id = u8_u32!(&buf[12..16]);
@@ -692,12 +692,12 @@ impl Drop for LockManager {
 // Lock file creation is atomic.
 fn try_lock(path: &Path) -> Res<LockManager> {
   let file_name: &str = path.file_name()
-    .ok_or(err!("Failed to extract file name from {:?}", path))?
+    .ok_or(internal_err!("Failed to extract file name from {:?}", path))?
     .to_str()
-    .ok_or(err!("Failed to convert file name from {:?}", path))?;
+    .ok_or(internal_err!("Failed to convert file name from {:?}", path))?;
 
   if file_name.starts_with(".") {
-    return Err(err!("Cannot create a lock for a file that starts with `.`"));
+    return Err(internal_err!("Cannot create a lock for a file that starts with `.`"));
   }
 
   let lock_name = format!(".{}.lock", file_name);
@@ -719,7 +719,7 @@ fn try_lock(path: &Path) -> Res<LockManager> {
 
         // Lock already exists.
         return Err(
-          err!("Database {:?} is being used by another process with pid {}. \
+          internal_err!("Database {:?} is being used by another process with pid {}. \
             Please check if that process is running and if not, delete the lock file manually.",
             path, prev_pid
           )

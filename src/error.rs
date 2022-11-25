@@ -1,53 +1,67 @@
 //! Module for various errors used in the project
 
-// Generic error for the crate.
+// List of errors available in the project.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Error {
-  msg: String
+pub enum Error {
+  // Generic error for an object that already exists.
+  InternalAlreadyExists(String),
+  // One of the IO, Lock, or UTF8 errors, not user-facing.
+  InternalError(String),
 }
 
 impl Error {
   pub fn msg(&self) -> &str {
-    self.msg.as_ref()
+    match self {
+      Error::InternalAlreadyExists(msg) => msg.as_ref(),
+      Error::InternalError(msg) => msg.as_ref(),
+    }
   }
 }
 
+// Creates an internal error with the provided message.
 impl From<String> for Error {
   fn from(msg: String) -> Self {
-    Self { msg }
+    Error::InternalError(msg)
   }
 }
 
+// Creates an internal error with the provided message.
 impl From<&str> for Error {
   fn from(msg: &str) -> Self {
-    Self { msg: msg.to_owned() }
+    Error::InternalError(msg.to_owned())
   }
 }
 
 impl From<std::io::Error> for Error {
   fn from(err: std::io::Error) -> Self {
-    Self { msg: format!("IO Error: {}", err.to_string()) }
+    Error::InternalError(format!("IO Error: {}", err.to_string()))
   }
 }
 
 impl<T> From<std::sync::PoisonError<T>> for Error {
   fn from(err: std::sync::PoisonError<T>) -> Self {
-    Self { msg: format!("Lock Error: {}", err.to_string()) }
+    Error::InternalError(format!("Lock Error: {}", err.to_string()))
   }
 }
 
 impl From<std::string::FromUtf8Error> for Error {
   fn from(err: std::string::FromUtf8Error) -> Self {
-    Self { msg: format!("UTF8: {}", err.to_string()) }
+    Error::InternalError(format!("UTF8 Conversion Error: {}", err.to_string()))
   }
 }
 
-macro_rules! err {
-  ($fmt:expr) => (crate::error::Error::from($fmt.to_owned()));
-  ($fmt:expr, $($args:expr),*) => (crate::error::Error::from(format!($fmt, $($args),*)));
-  ($e:expr, $fmt:expr) => (crate::error::Error::from($fmt.to_owned(), $e));
-  ($e:ident, $fmt:expr, $($args:tt),*) =>
-    (crate::error::Error::from(&format!($fmt, $($args),*), $e));
+macro_rules! internal_err {
+  ($fmt:expr) =>
+    (crate::error::Error::InternalError($fmt.to_owned()));
+  ($fmt:expr, $($args:expr),*) =>
+    (crate::error::Error::InternalError(format!($fmt, $($args),*)));
+}
+
+macro_rules! already_exists_err {
+  ($fmt:expr) =>
+    (crate::error::Error::InternalAlreadyExists($fmt.to_owned()));
+  ($fmt:expr, $($args:expr),*) =>
+    (crate::error::Error::InternalAlreadyExists(format!($fmt, $($args),*)));
 }
 
 // Internal type for the Result.

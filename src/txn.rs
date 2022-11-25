@@ -195,13 +195,13 @@ pub fn create_set(txn: Rc<RefCell<Transaction>>, name: &str) -> Res<Set> {
 
   // Check if there is such name in active sets.
   if let Some(_) = txn.borrow().active_sets.get(name) {
-    return Err(err!("Set {} already exists", name));
+    return Err(already_exists_err!("Set {} already exists", name));
   }
 
   // Check if we already have such a set in the btree.
   let root = txn.borrow().get_root_page();
   if let Some(_) = btree::get(root, name.as_bytes(), &mut *txn.borrow_mut().mngr.borrow_mut()) {
-    return Err(err!("Set {} already exists", name));
+    return Err(already_exists_err!("Set {} already exists", name));
   }
 
   // The new set has an empty page and is not modified.
