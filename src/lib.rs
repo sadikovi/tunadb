@@ -9,3 +9,4 @@ pub mod btree;
 pub mod cache;
 pub mod txn;
 pub mod db;
+pub mod row;
