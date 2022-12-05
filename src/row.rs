@@ -69,14 +69,14 @@ fn nulls_part_len(num_fields: usize) -> usize {
 // Returns fixed slot for the field `i`.
 #[inline]
 fn get_fixed_slot(buf: &Vec<u8>, i: usize) -> &[u8] {
-  let start = FIXED_FIELD_LEN << i;
+  let start = FIXED_FIELD_LEN * i;
   &buf[start..start + FIXED_FIELD_LEN]
 }
 
 // Returns mutable fixed slot for the field `i`.
 #[inline]
 fn get_fixed_slot_mut(buf: &mut Vec<u8>, i: usize) -> &mut [u8] {
-  let start = FIXED_FIELD_LEN << i;
+  let start = FIXED_FIELD_LEN * i;
   &mut buf[start..start + FIXED_FIELD_LEN]
 }
 
@@ -287,7 +287,7 @@ impl BufferRow {
     let fixed_len = fixed_part_len(num_fields);
     let nulls_len = nulls_part_len(num_fields);
     assert!(
-      buf.len() < fixed_len + nulls_len,
+      buf.len() >= fixed_len + nulls_len,
       "The provided row buffer is too short: buf {} < fixed {} + nulls {}",
       buf.len(), fixed_len, nulls_len
     );
@@ -330,20 +330,20 @@ impl Row for BufferRow {
   #[inline]
   fn get_f32(&self, i: usize) -> f32 {
     let slot = get_fixed_slot(&self.buf, i);
-    u8_u64!(slot) as f32
+    u8_f64!(slot) as f32
   }
 
   #[inline]
   fn get_f64(&self, i: usize) -> f64 {
     let slot = get_fixed_slot(&self.buf, i);
-    u8_u64!(slot) as f64
+    u8_f64!(slot)
   }
 
   fn get_str(&self, i: usize) -> &str {
     let slot = get_fixed_slot(&self.buf, i);
     let fixed_part = u8_u64!(slot);
     let off = (fixed_part >> 32) as usize;
-    let len = (fixed_part & !(1 << 33)) as usize;
+    let len = (fixed_part & ((1 << 32) - 1)) as usize;
     std::str::from_utf8(&self.buf[off..off + len])
       .expect(&format!("Could not read UTF8 string at pos {}", i))
   }
@@ -425,6 +425,13 @@ mod tests {
   }
 
   #[test]
+  fn test_row_mutable_new_zero_fields() {
+    let row = MutableRow::new(0);
+    assert_eq!(row.num_fields(), 0);
+    assert_eq!(row.to_vec(), Vec::new());
+  }
+
+  #[test]
   fn test_row_mutable_simple_set_get_positive() {
     let mut row = MutableRow::new(6);
     row.set_bool(0, true);
@@ -458,5 +465,98 @@ mod tests {
     assert_eq!(row.get_f32(3), -1.2f32);
     assert_eq!(row.get_f64(4), -2.4f64);
     assert_eq!(row.get_str(5), "");
+  }
+
+  #[test]
+  fn test_row_mutable_override_values() {
+    let mut row = MutableRow::new(6);
+    row.set_null(0, true);
+    assert_eq!(row.is_null(0), true);
+
+    row.set_i32(0, 123);
+    assert_eq!(row.is_null(0), false);
+    assert_eq!(row.get_i32(0), 123);
+
+    row.set_str(0, "123");
+    assert_eq!(row.is_null(0), false);
+    assert_eq!(row.get_str(0), "123");
+    // Check the variable vector length.
+    assert_eq!(row.var[0].len(), 3);
+
+    row.set_i64(0, 234);
+    assert_eq!(row.is_null(0), false);
+    assert_eq!(row.get_i64(0), 234);
+    // Check that the variable vector has been cleared.
+    assert_eq!(row.var[0].len(), 0);
+  }
+
+  #[test]
+  fn test_row_mutable_to_vec() {
+    let row = MutableRow::new(3);
+    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3));
+
+    let mut row = MutableRow::new(3);
+    row.set_str(0, "123");
+    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3) + 3);
+
+    let mut row = MutableRow::new(3);
+    row.set_i32(0, 1);
+    row.set_i32(1, 2);
+    row.set_i32(2, 3);
+    row.set_str(0, "123");
+    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3) + 3);
+  }
+
+  #[test]
+  #[should_panic(expected = "row buffer is too short")]
+  fn test_row_buffer_buf_is_too_short() {
+    BufferRow::from_buf(3, Vec::new());
+  }
+
+  #[test]
+  fn test_row_buffer_from_buf_zero_fields() {
+    let row = BufferRow::from_buf(0, Vec::new());
+    assert_eq!(row.num_fields(), 0);
+    assert_eq!(row.to_vec(), Vec::new());
+  }
+
+  #[test]
+  fn test_row_buffer_from_buf() {
+    let mut row = MutableRow::new(7);
+    row.set_bool(0, true);
+    row.set_i32(1, 1i32);
+    row.set_i64(2, 2i64);
+    row.set_f32(3, 1.2f32);
+    row.set_f64(4, 2.4f64);
+    row.set_str(5, "123");
+    row.set_null(6, true);
+
+    let row = BufferRow::from_buf(7, row.to_vec());
+    assert_eq!(row.num_fields(), 7);
+
+    assert_eq!(row.is_null(0), false);
+    assert_eq!(row.is_null(1), false);
+    assert_eq!(row.is_null(2), false);
+    assert_eq!(row.is_null(3), false);
+    assert_eq!(row.is_null(4), false);
+    assert_eq!(row.is_null(5), false);
+    assert_eq!(row.is_null(6), true);
+
+    assert_eq!(row.get_bool(0), true);
+    assert_eq!(row.get_i32(1), 1);
+    assert_eq!(row.get_i64(2), 2);
+    assert_eq!(row.get_f32(3), 1.2);
+    assert_eq!(row.get_f64(4), 2.4);
+    assert_eq!(row.get_str(5), "123");
+  }
+
+  #[test]
+  fn test_row_buffer_to_vec() {
+    let mut row = MutableRow::new(10);
+    row.set_str(5, "123");
+    let expected = row.to_vec();
+
+    let row = BufferRow::from_buf(10, expected.clone());
+    assert_eq!(row.to_vec(), expected);
   }
 }
