@@ -50,6 +50,12 @@ impl From<std::string::FromUtf8Error> for Error {
   }
 }
 
+impl From<std::str::Utf8Error> for Error {
+  fn from(err: std::str::Utf8Error) -> Self {
+    Error::InternalError(format!("UTF8 Conversion Error: {}", err.to_string()))
+  }
+}
+
 macro_rules! internal_err {
   ($fmt:expr) =>
     (crate::error::Error::InternalError($fmt.to_owned()));
