@@ -4,7 +4,7 @@ use crate::common::DB_VERSION;
 use crate::common::error::Res;
 use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
-use crate::storage::storage::{DEFAULT_PAGE_SIZE, StorageManager};
+use crate::storage::smgr::{DEFAULT_PAGE_SIZE, StorageManager};
 use crate::storage::txn::Transaction;
 
 // Main entry to create a database client.
@@ -134,7 +134,7 @@ impl DB {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::storage::storage::tests::with_tmp_file;
+  use crate::storage::smgr::tests::with_tmp_file;
   use crate::storage::txn::{create_set, get_set};
 
   #[test]

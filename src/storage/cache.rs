@@ -5,7 +5,7 @@ use std::mem::size_of;
 use crate::common::lru::LruCache;
 use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::page as pg;
-use crate::storage::storage::{INVALID_PAGE_ID, StorageManager};
+use crate::storage::smgr::{INVALID_PAGE_ID, StorageManager};
 
 //===========
 // Page cache

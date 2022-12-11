@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::storage::block::BlockManager;
 use crate::storage::page as pg;
-use crate::storage::storage::INVALID_PAGE_ID;
+use crate::storage::smgr::INVALID_PAGE_ID;
 
 // Inserts key and value in the btree and returns a new snapshot via a new root page.
 pub fn put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) -> u32 {
@@ -528,7 +528,7 @@ mod tests {
   use super::*;
   use std::collections::HashSet;
   use rand::prelude::*;
-  use crate::storage::storage::StorageManager;
+  use crate::storage::smgr::StorageManager;
 
   #[test]
   fn test_btree_put_insert_empty() {

@@ -1,4 +1,4 @@
-pub mod storage;
+pub mod smgr;
 pub mod block;
 pub mod page;
 pub mod btree;

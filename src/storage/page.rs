@@ -1,6 +1,6 @@
 use std::io::Write;
 use crate::storage::block::BlockManager;
-use crate::storage::storage::INVALID_PAGE_ID;
+use crate::storage::smgr::INVALID_PAGE_ID;
 
 // Max page header size (in bytes).
 const PAGE_HEADER_SIZE: usize = 20;
@@ -1328,7 +1328,7 @@ mod tests {
   use super::*;
   use std::collections::HashMap;
   use crate::storage::block::BlockManagerStats;
-  use crate::storage::storage::StorageManager;
+  use crate::storage::smgr::StorageManager;
 
   // Used for testing only.
   impl BlockManager for StorageManager {

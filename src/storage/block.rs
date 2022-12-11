@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::storage::storage::StorageManager;
+use crate::storage::smgr::StorageManager;
 
 // BlockManager is wrapper trait on top of StorageManager that allows to implement page cache,
 // commit and roll back changes.

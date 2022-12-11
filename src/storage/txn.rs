@@ -5,7 +5,7 @@ use crate::common::error::Res;
 use crate::storage::btree;
 use crate::storage::block::BlockManager;
 use crate::storage::cache::is_virtual_page_id;
-use crate::storage::storage::INVALID_PAGE_ID;
+use crate::storage::smgr::INVALID_PAGE_ID;
 
 // State enum for sets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -315,7 +315,7 @@ impl Set {
 mod tests {
   use super::*;
   use crate::storage::cache::PageCache;
-  use crate::storage::storage::StorageManager;
+  use crate::storage::smgr::StorageManager;
 
   fn get_block_mngr() -> Rc<RefCell<dyn BlockManager>> {
     let mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
