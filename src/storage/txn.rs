@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::btree;
-use crate::block::BlockManager;
-use crate::cache::is_virtual_page_id;
-use crate::error::Res;
-use crate::storage::INVALID_PAGE_ID;
+use crate::common::error::Res;
+use crate::storage::btree;
+use crate::storage::block::BlockManager;
+use crate::storage::cache::is_virtual_page_id;
+use crate::storage::storage::INVALID_PAGE_ID;
 
 // State enum for sets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -314,8 +314,8 @@ impl Set {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::cache::PageCache;
-  use crate::storage::StorageManager;
+  use crate::storage::cache::PageCache;
+  use crate::storage::storage::StorageManager;
 
   fn get_block_mngr() -> Rc<RefCell<dyn BlockManager>> {
     let mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
@@ -531,8 +531,6 @@ mod tests {
     with_txn(2, cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "t").unwrap();
       t.del(&[1]);
-
-      println!("{}", t.btree_debug());
 
       assert!(txn.borrow().is_modified());
       txn.borrow_mut().commit();
@@ -797,6 +795,22 @@ mod tests {
     assert_eq!(cache.borrow_mut().get_mngr().root_page(), None);
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), 0);
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
+  }
+
+  #[test]
+  fn test_txn_race() {
+    let cache = get_block_mngr();
+    let txn1 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
+    let txn2 = Rc::new(RefCell::new(Transaction::new(2, cache.clone())));
+
+    let mut t = create_set(txn1.clone(), "t1").unwrap();
+    t.put(&[1], &[10]);
+
+    let mut t = create_set(txn2.clone(), "t1").unwrap();
+    t.put(&[2], &[20]);
+
+    txn2.borrow_mut().commit();
+    txn1.borrow_mut().commit();
   }
 
   #[test]

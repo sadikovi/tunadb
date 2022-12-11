@@ -1,5 +1,8 @@
 //! Module for various errors used in the project
 
+// Internal type for the Result.
+pub type Res<T> = Result<T, Error>;
+
 // List of errors available in the project.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
@@ -54,27 +57,4 @@ impl From<std::str::Utf8Error> for Error {
   fn from(err: std::str::Utf8Error) -> Self {
     Error::InternalError(format!("UTF8 Conversion Error: {}", err.to_string()))
   }
-}
-
-macro_rules! internal_err {
-  ($fmt:expr) =>
-    (crate::error::Error::InternalError($fmt.to_owned()));
-  ($fmt:expr, $($args:expr),*) =>
-    (crate::error::Error::InternalError(format!($fmt, $($args),*)));
-}
-
-macro_rules! already_exists_err {
-  ($fmt:expr) =>
-    (crate::error::Error::InternalAlreadyExists($fmt.to_owned()));
-  ($fmt:expr, $($args:expr),*) =>
-    (crate::error::Error::InternalAlreadyExists(format!($fmt, $($args),*)));
-}
-
-// Internal type for the Result.
-pub type Res<T> = Result<T, Error>;
-
-macro_rules! res {
-  ($e:expr) => ($e.unwrap());
-  ($e:expr, $fmt:expr) => ($e.expect(&format!($fmt)));
-  ($e:expr, $fmt:expr, $($args:expr),*) => ($e.expect(&format!($fmt, $($args),*)));
 }

@@ -2,10 +2,10 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::Write;
 use std::mem::size_of;
-use crate::block::{BlockManager, BlockManagerStats};
-use crate::page as pg;
-use crate::storage::{INVALID_PAGE_ID, StorageManager};
-use crate::util::LruCache;
+use crate::common::lru::LruCache;
+use crate::storage::block::{BlockManager, BlockManagerStats};
+use crate::storage::page as pg;
+use crate::storage::storage::{INVALID_PAGE_ID, StorageManager};
 
 //===========
 // Page cache
@@ -585,7 +585,7 @@ impl BlockManager for PageCacheProxy {
 mod tests {
   use super::*;
   use rand::prelude::*;
-  use crate::btree;
+  use crate::storage::btree;
 
   fn get_mngr(page_size: u32) -> StorageManager {
     StorageManager::builder().as_mem(0).with_page_size(page_size).build()

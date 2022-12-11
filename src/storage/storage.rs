@@ -4,8 +4,8 @@ use std::fs::{File, OpenOptions, remove_file};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process;
-use crate::error::Res;
-use crate::util::DB_VERSION;
+use crate::common::DB_VERSION;
+use crate::common::error::Res;
 
 // File descriptor and StorageManager code.
 // All methods do not return `Res` because any error that occurs at this level is considered

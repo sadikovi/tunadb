@@ -1,8 +1,8 @@
 use std::io;
 use std::io::Write;
-use tunadb::db;
-use tunadb::page as pg;
-use tunadb::txn::{Set, create_set, get_set};
+use tunadb::storage::db;
+use tunadb::storage::page as pg;
+use tunadb::storage::txn::{Set, create_set, get_set};
 
 #[derive(Clone, Debug)]
 enum Cmd {

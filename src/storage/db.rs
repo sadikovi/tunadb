@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::block::{BlockManager, BlockManagerStats};
-use crate::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
-use crate::error::Res;
-use crate::storage::{DEFAULT_PAGE_SIZE, StorageManager};
-use crate::txn::Transaction;
-use crate::util::DB_VERSION;
+use crate::common::DB_VERSION;
+use crate::common::error::Res;
+use crate::storage::block::{BlockManager, BlockManagerStats};
+use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
+use crate::storage::storage::{DEFAULT_PAGE_SIZE, StorageManager};
+use crate::storage::txn::Transaction;
 
 // Main entry to create a database client.
 // Opens a database using the provided path or an in-memory database.
@@ -134,8 +134,8 @@ impl DB {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::storage::tests::with_tmp_file;
-  use crate::txn::{create_set, get_set};
+  use crate::storage::storage::tests::with_tmp_file;
+  use crate::storage::txn::{create_set, get_set};
 
   #[test]
   fn test_db_open_close() {
