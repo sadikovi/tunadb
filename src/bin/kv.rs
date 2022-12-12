@@ -88,7 +88,7 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
       finish(&mut iter)?;
       Cmd::Help
     },
-    Some("QUIT") | Some("quit") => {
+    Some("QUIT") | Some("quit") | Some("EXIT") | Some("exit") => {
       finish(&mut iter)?;
       Cmd::Quit
     },
@@ -174,7 +174,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       println!("  OPEN <path>           opens a database at the path.");
       println!("  DEBUG (DB|TABLE|PAGE) shows debug information for the table or database.");
       println!("  HELP                  shows this message.");
-      println!("  QUIT                  quit the REPL.");
+      println!("  QUIT|EXIT             quit the REPL.");
       println!();
     },
     Cmd::Quit => {
