@@ -1,7 +1,6 @@
 use std::io;
 use std::io::Write;
 use tunadb::storage::db;
-use tunadb::storage::page as pg;
 use tunadb::storage::txn::{Set, create_set, get_set};
 
 #[derive(Clone, Debug)]
@@ -162,17 +161,8 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       println!("{}", info);
     },
     Cmd::DebugPage => {
-      let block_mngr = curr_db.get_mngr();
-      let mut block_mngr_mut = block_mngr.borrow_mut();
-      let mngr = block_mngr_mut.get_mngr_mut();
-      let mut page = vec![0u8; mngr.page_size()];
-      for pid in 0..mngr.num_pages() {
-        let pid = pid as u32;
-        if mngr.is_accessible(pid) {
-          mngr.read(pid, &mut page);
-          pg::debug(pid, &page);
-        }
-      }
+      // TODO: Add page debugging.
+      println!("DebugPage is not implemented");
     },
     Cmd::Help => {
       println!("Available commands:");

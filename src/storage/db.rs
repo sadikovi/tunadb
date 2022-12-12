@@ -5,7 +5,7 @@ use crate::common::error::Res;
 use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
 use crate::storage::smgr::{DEFAULT_PAGE_SIZE, StorageManager};
-use crate::storage::txn::Transaction;
+use crate::storage::txn::{Transaction, TransactionManager};
 
 // Main entry to create a database client.
 // Opens a database using the provided path or an in-memory database.
@@ -59,30 +59,16 @@ impl DbBuilder {
       }
     };
 
-    Ok(
-      DB {
-        mngr: mngr,
-        txn_counter: 0, // TODO: make it persistent
-        curr_txn: None,
-      }
-    )
+    Ok(DB { mngr: TransactionManager::new(mngr) })
   }
 }
 
 // Handler for the database state.
 pub struct DB {
-  mngr: Rc<RefCell<dyn BlockManager>>,
-  txn_counter: usize,
-  curr_txn: Option<Rc<RefCell<Transaction>>>,
+  mngr: TransactionManager,
 }
 
 impl DB {
-  // Returns block manager reference.
-  // Used for debugging.
-  pub fn get_mngr(&self) -> Rc<RefCell<dyn BlockManager>> {
-    self.mngr.clone()
-  }
-
   // Returns the database version.
   #[inline]
   pub fn version(&self) -> &str {
@@ -91,43 +77,14 @@ impl DB {
 
   // Database/storage statistics.
   pub fn stats(&self) -> BlockManagerStats {
-    self.mngr.borrow().stats()
+    self.mngr.block_mngr().stats()
   }
 
   // Starts a new transaction and runs any operations within it.
   // When auto_commit is enabled, commits by the end of the function.
   pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> T
       where F: Fn(Rc<RefCell<Transaction>>) -> T, {
-    match &self.curr_txn {
-      Some(txn) => {
-        panic!("Transaction {} is active", txn.borrow().id());
-      },
-      None => {
-        // No active transactions, proceed.
-      }
-    }
-
-    let txn = Rc::new(RefCell::new(self.new_txn()));
-    self.curr_txn = Some(txn.clone());
-    let res = func(txn.clone());
-    // Roll back all of the changes if they have not been explicitly committed.
-    if !txn.borrow().is_finalised() {
-      if auto_commit {
-        txn.borrow_mut().commit();
-      } else {
-        txn.borrow_mut().rollback();
-      }
-    }
-    self.curr_txn = None;
-
-    res
-  }
-
-  // Creates a new transaction.
-  fn new_txn(&mut self) -> Transaction {
-    let id = self.txn_counter;
-    self.txn_counter += 1;
-    Transaction::new(id, self.mngr.clone())
+    self.mngr.with_txn(auto_commit, func).expect("Encountered error in transaction")
   }
 }
 

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use crate::common::error::Res;
@@ -6,6 +6,72 @@ use crate::storage::btree;
 use crate::storage::block::BlockManager;
 use crate::storage::cache::is_virtual_page_id;
 use crate::storage::smgr::INVALID_PAGE_ID;
+
+// Transaction manager.
+// Used as a wrapper on block manager to handle transactions.
+// All locks should be implemented here.
+pub struct TransactionManager {
+  counter: usize, // transaction counter
+  mngr: Rc<RefCell<dyn BlockManager>>, // block manager for transaction
+  // Current active transaction.
+  // We only allow one transaction at the time for now.
+  curr_txn: Option<Rc<RefCell<Transaction>>>,
+}
+
+impl TransactionManager {
+  // Creates a new transaction manager.
+  pub fn new(mngr: Rc<RefCell<dyn BlockManager>>) -> Self {
+    Self {
+      counter: 1,
+      mngr: mngr,
+      curr_txn: None
+    }
+  }
+
+  // Returns reference to the underlying block manager (read-only).
+  pub fn block_mngr(&self) -> Ref<dyn BlockManager> {
+    self.mngr.borrow()
+  }
+
+  // Starts a new transaction and runs any operations within it.
+  // When auto_commit is enabled, commits by the end of the function.
+  pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> Res<T>
+      where F: Fn(Rc<RefCell<Transaction>>) -> T, {
+    let txn = self.create_txn()?;
+    let res = func(txn.clone());
+    // Roll back all of the changes if they have not been explicitly committed.
+    if !txn.borrow().is_finalised() {
+      if auto_commit {
+        txn.borrow_mut().commit();
+      } else {
+        txn.borrow_mut().rollback();
+      }
+    }
+    self.curr_txn = None;
+    Ok(res)
+  }
+
+  // Creates a new transaction.
+  fn create_txn(&mut self) -> Res<Rc<RefCell<Transaction>>> {
+    match &self.curr_txn {
+      Some(txn) => Err(internal_err!("Transaction {} is active", txn.borrow().id())),
+      None => {
+        let txn = Transaction {
+          id: self.counter,
+          mngr: self.mngr.clone(),
+          active_sets: HashMap::new(),
+          is_finalised: false,
+          is_modified: false
+        };
+        self.counter += 1;
+
+        let txn_ref = Rc::new(RefCell::new(txn));
+        self.curr_txn = Some(txn_ref.clone());
+        Ok(txn_ref)
+      },
+    }
+  }
+}
 
 // State enum for sets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,13 +110,6 @@ pub struct Transaction {
 }
 
 impl Transaction {
-  // Creates new transaction.
-  // Although it is public, it is considered an internal method and should not be used to create
-  // a transaction.
-  pub fn new(id: usize, mngr: Rc<RefCell<dyn BlockManager>>) -> Self {
-    Self { id, mngr, active_sets: HashMap::new(), is_finalised: false, is_modified: false }
-  }
-
   // Returns transaction id.
   #[inline]
   pub fn id(&self) -> usize {
@@ -323,10 +382,10 @@ mod tests {
   }
 
   // A wrapper for transactions in tests.
-  fn with_txn<F>(id: usize, cache: Rc<RefCell<dyn BlockManager>>, func: F)
-      where F: Fn(Rc<RefCell<Transaction>>) -> () {
-    let txn = Rc::new(RefCell::new(Transaction::new(id, cache)));
-    func(txn);
+  fn with_txn<F>(cache: Rc<RefCell<dyn BlockManager>>, func: F)
+      where F: Fn(Rc<RefCell<Transaction>>) {
+    let mut mngr = TransactionManager::new(cache);
+    mngr.with_txn(/* no auto-commit */ false, func).unwrap();
   }
 
   // Helper function to check total pages and free pages.
@@ -340,10 +399,22 @@ mod tests {
   }
 
   #[test]
+  fn test_txn_id_increment() {
+    let cache = get_block_mngr();
+    let mut mngr = TransactionManager::new(cache);
+
+    for i in 1..10 {
+      mngr.with_txn(false, |txn| {
+        assert_eq!(txn.borrow().id(), i);
+      }).unwrap();
+    }
+  }
+
+  #[test]
   fn test_txn_create_set_already_exists() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache, |txn| {
+    with_txn(cache, |txn| {
       assert!(create_set(txn.clone(), "abc").is_ok());
       // Should return an error.
       assert!(!create_set(txn.clone(), "abc").is_ok());
@@ -354,13 +425,13 @@ mod tests {
   fn test_txn_create_set_already_exists_persistent() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut set = create_set(txn.clone(), "abc").unwrap();
       set.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       assert!(!create_set(txn.clone(), "abc").is_ok());
     });
   }
@@ -370,24 +441,24 @@ mod tests {
     let cache = get_block_mngr();
 
     // Set does not exist.
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       assert!(get_set(txn.clone(), "abc").is_none());
     });
 
     // Set has been created but not committed yet.
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       create_set(txn.clone(), "abc").unwrap();
       assert!(get_set(txn.clone(), "abc").is_some());
     });
 
     // Set has been created and committed.
-    with_txn(3, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut set = create_set(txn.clone(), "abc").unwrap();
       set.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
-    with_txn(4, cache, |txn| {
+    with_txn(cache, |txn| {
       assert!(get_set(txn.clone(), "abc").is_some());
     });
   }
@@ -395,7 +466,7 @@ mod tests {
   #[test]
   fn test_txn_commit_empty() {
     let cache = get_block_mngr();
-    with_txn(1, cache, |txn| {
+    with_txn(cache, |txn| {
       txn.borrow_mut().commit();
       assert_eq!(txn.borrow().get_root_page(), INVALID_PAGE_ID);
     });
@@ -405,7 +476,7 @@ mod tests {
   fn test_txn_commit() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t1 = create_set(txn.clone(), "t1").unwrap();
       let mut t2 = create_set(txn.clone(), "t2").unwrap();
 
@@ -433,7 +504,7 @@ mod tests {
   fn test_txn_commit_ops_order() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t1 = create_set(txn.clone(), "t1").unwrap();
 
       t1.put(&[1], &[10]);
@@ -453,7 +524,7 @@ mod tests {
     // Test verifies that get operations on the existing table don't result in modified pages.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "t").unwrap();
       t.put(&[1], &[10]);
 
@@ -461,7 +532,7 @@ mod tests {
       txn.borrow_mut().commit();
     });
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = get_set(txn.clone(), "t").unwrap();
       assert_eq!(t.get(&[1]), Some(vec![10]));
 
@@ -478,7 +549,7 @@ mod tests {
     // The test verifies two commits and how the page ids change.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
 
@@ -489,7 +560,7 @@ mod tests {
     // 2 = 1 page for table, 1 page for root.
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "table").unwrap();
       t.put(&[2], &[20]);
 
@@ -500,7 +571,7 @@ mod tests {
     // 2 previous pages are empty, so we acquire the other two.
     assert_block_mngr(cache.clone(), 4, 2);
 
-    with_txn(3, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "table").unwrap();
       t.put(&[3], &[30]);
 
@@ -517,7 +588,7 @@ mod tests {
     // Test verifies that get operations on the existing table don't result in modified pages.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "t").unwrap();
       t.put(&[1], &[10]);
 
@@ -528,7 +599,7 @@ mod tests {
     // 2 = 1 page for data + 1 page for root.
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "t").unwrap();
       t.del(&[1]);
 
@@ -546,7 +617,7 @@ mod tests {
     // rewrite. Because we don't modify anything, there is no need to update root pid.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
 
@@ -554,7 +625,7 @@ mod tests {
       txn.borrow_mut().commit();
     });
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "table").unwrap();
       t.del(&[2]); // key does not exist in the table
 
@@ -572,7 +643,7 @@ mod tests {
     // We should not create a new table when it is just a list operation.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       assert_eq!(t.list(None, None).next(), None);
 
@@ -590,7 +661,7 @@ mod tests {
     // We should not create a new table when it is just a get operation.
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = create_set(txn.clone(), "table").unwrap();
       assert_eq!(t.get(&[1]), None);
 
@@ -607,7 +678,7 @@ mod tests {
   fn test_txn_truncate_commit() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
       t.put(&[2], &[20]);
@@ -618,7 +689,7 @@ mod tests {
     // 2 = 1 page for data + 1 page for root.
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "table").unwrap();
       t.truncate();
       txn.borrow_mut().commit();
@@ -632,7 +703,7 @@ mod tests {
   fn test_txn_truncate_rollback() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
       t.put(&[2], &[20]);
@@ -643,7 +714,7 @@ mod tests {
     // 2 = 1 page for data + 1 page for root.
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = get_set(txn.clone(), "table").unwrap();
       t.truncate();
       txn.borrow_mut().rollback();
@@ -652,7 +723,7 @@ mod tests {
     // 2 = 1 page for data + 1 page for root.
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(3, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = get_set(txn.clone(), "table").unwrap();
       assert_eq!(t.get(&[1]), Some(vec![10]));
       assert_eq!(t.get(&[2]), Some(vec![20]));
@@ -664,7 +735,7 @@ mod tests {
   fn test_txn_drop_commit() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = create_set(txn.clone(), "table").unwrap();
       drop_set(txn.clone(), t);
       txn.borrow_mut().commit();
@@ -673,7 +744,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 0, 0);
 
     // Try to insert data into the table and then drop.
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
       txn.borrow_mut().commit();
@@ -682,7 +753,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     // Drop should delete all of the pages.
-    with_txn(3, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = get_set(txn.clone(), "table").unwrap();
       drop_set(txn.clone(), t);
       txn.borrow_mut().commit();
@@ -695,7 +766,7 @@ mod tests {
   fn test_txn_drop_rollback() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[10]);
       txn.borrow_mut().commit();
@@ -703,7 +774,7 @@ mod tests {
 
     assert_block_mngr(cache.clone(), 2, 0);
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = get_set(txn.clone(), "table").unwrap();
       drop_set(txn.clone(), t);
       txn.borrow_mut().rollback();
@@ -716,7 +787,7 @@ mod tests {
   fn test_txn_rollback_empty() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache, |txn| {
+    with_txn(cache, |txn| {
       assert!(!txn.borrow().is_modified());
       txn.borrow_mut().rollback();
       assert_eq!(txn.borrow().get_root_page(), INVALID_PAGE_ID);
@@ -727,7 +798,7 @@ mod tests {
   fn test_txn_rollback_read_only_new_table() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = create_set(txn.clone(), "table").unwrap();
       assert_eq!(t.get(&[1]), None);
 
@@ -745,13 +816,13 @@ mod tests {
     let cache = get_block_mngr();
 
     // Test read-only mode for an existing table.
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t = create_set(txn.clone(), "table").unwrap();
       t.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let t = get_set(txn.clone(), "table").unwrap();
       assert_eq!(t.get(&[2]), None);
 
@@ -769,7 +840,7 @@ mod tests {
     let cache = get_block_mngr();
 
     // Writes only.
-    with_txn(1, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t1 = create_set(txn.clone(), "t1").unwrap();
       t1.put(&[1], &[10]);
       t1.put(&[2], &[20]);
@@ -783,7 +854,7 @@ mod tests {
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), 0);
 
     // Reads + writes.
-    with_txn(2, cache.clone(), |txn| {
+    with_txn(cache.clone(), |txn| {
       let mut t1 = create_set(txn.clone(), "t1").unwrap();
       t1.put(&[1], &[10]);
       assert_eq!(t1.get(&[1]), Some(vec![10]));
@@ -800,24 +871,20 @@ mod tests {
   #[test]
   fn test_txn_race() {
     let cache = get_block_mngr();
-    let txn1 = Rc::new(RefCell::new(Transaction::new(1, cache.clone())));
-    let txn2 = Rc::new(RefCell::new(Transaction::new(2, cache.clone())));
+    let mut mngr = TransactionManager::new(cache);
 
-    let mut t = create_set(txn1.clone(), "t1").unwrap();
-    t.put(&[1], &[10]);
+    let txn1 = mngr.create_txn();
+    let txn2 = mngr.create_txn();
 
-    let mut t = create_set(txn2.clone(), "t1").unwrap();
-    t.put(&[2], &[20]);
-
-    txn2.borrow_mut().commit();
-    txn1.borrow_mut().commit();
+    assert!(txn1.is_ok());
+    assert!(txn2.is_err());
   }
 
   #[test]
   fn test_txn_btree_debug() {
     let cache = get_block_mngr();
 
-    with_txn(1, cache, |txn| {
+    with_txn(cache, |txn| {
       let mut t1 = create_set(txn.clone(), "t1").unwrap();
       assert_eq!(t1.btree_debug(), format!(" ! INVALID PAGE\n"));
 
