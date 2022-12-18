@@ -107,7 +107,7 @@ pub type TransactionRef = Rc<RefCell<Transaction>>;
 pub struct Transaction {
   id: usize,
   mngr: Rc<RefCell<dyn BlockManager>>, // shared mutability
-  active_sets: HashMap<String, (u32, State)>, // mapping of the set name to page id + state
+  active_sets: HashMap<Vec<u8>, (u32, State)>, // mapping of the set id to page id + state
   is_finalised: bool, // whether or not transaction has been committed or rolled back
   is_modified: bool, // whether or not we require commit/rollback
 }
@@ -144,27 +144,31 @@ impl Transaction {
 
       // 2. Resolve root page id.
       let mut root = self.get_root_page();
-      for (name, &(id, state)) in &self.active_sets {
+      for (identifier, &(page_id, state)) in &self.active_sets {
         match state {
           State::Clean => {
             // Do nothing, the page was not modified.
           },
           State::Modified => {
-            let pid = if is_virtual_page_id(id) {
+            let pid = if is_virtual_page_id(page_id) {
               // The page is a virtual page.
-              *vid_to_pid.get(&id)
+              *vid_to_pid.get(&page_id)
                 .expect(
-                  &format!("Set {} (root {}) could not be resolved", name, id)
+                  &format!("Set {} (root {}) could not be resolved", hex!(identifier), page_id)
                 )
             } else {
-              id // physical page, no need to resolve it
+              page_id // physical page, no need to resolve it
             };
-            root = btree::put(root, name.as_bytes(), &u32_u8!(pid), &mut *self.mngr.borrow_mut());
+            root = btree::put(root, identifier, &u32_u8!(pid), &mut *self.mngr.borrow_mut());
           },
           State::Deleted => {
-            assert_eq!(id, INVALID_PAGE_ID, "Set {} (root {}) data was not deleted", name, id);
+            assert_eq!(
+              page_id,
+              INVALID_PAGE_ID,
+              "Set {} (root {}) data was not deleted", hex!(identifier), page_id
+            );
             // The set must have been deleted or was never created on disk.
-            root = btree::del(root, name.as_bytes(), &mut *self.mngr.borrow_mut());
+            root = btree::del(root, identifier, &mut *self.mngr.borrow_mut());
           },
         }
       }
@@ -203,16 +207,16 @@ impl Transaction {
     assert!(!self.is_finalised, "Transaction {} has been finalised", self.id);
   }
 
-  // Updates the root page for the table with the provided name.
+  // Updates the root page for the table with the provided identifier.
   #[inline]
-  fn update(&mut self, name: &str, root: u32, new_state: State) {
-    match self.active_sets.get_mut(name) {
+  fn update(&mut self, identifier: &[u8], root: u32, new_state: State) {
+    match self.active_sets.get_mut(identifier) {
       Some((pid, state)) => {
         *pid = root;
         *state = merge_state(*state, new_state);
       },
       None => {
-        self.active_sets.insert(name.to_owned(), (root, new_state));
+        self.active_sets.insert(identifier.to_vec(), (root, new_state));
       },
     }
     self.is_modified |= is_state_modified(new_state);
@@ -250,42 +254,42 @@ impl Drop for Transaction {
   }
 }
 
-// Creates a new set with the provided name.
-// If a set with the name already exists, an error is returned.
-pub fn create_set(txn: &TransactionRef, name: &str) -> Res<Set> {
+// Creates a new set with the provided identifier.
+// If a set with the identifier already exists, an error is returned.
+pub fn create_set(txn: &TransactionRef, identifier: &[u8]) -> Res<Set> {
   txn.borrow().assert_not_finalised();
 
-  // Check if there is such name in active sets.
-  if let Some(_) = txn.borrow().active_sets.get(name) {
-    return Err(already_exists_err!("Set {} already exists", name));
+  // Check if there is such identifier in active sets.
+  if let Some(_) = txn.borrow().active_sets.get(identifier) {
+    return Err(already_exists_err!("Set {} already exists", hex!(identifier)));
   }
 
   // Check if we already have such a set in the btree.
   let root = txn.borrow().get_root_page();
-  if let Some(_) = btree::get(root, name.as_bytes(), &mut *txn.borrow_mut().mngr.borrow_mut()) {
-    return Err(already_exists_err!("Set {} already exists", name));
+  if let Some(_) = btree::get(root, identifier, &mut *txn.borrow_mut().mngr.borrow_mut()) {
+    return Err(already_exists_err!("Set {} already exists", hex!(identifier)));
   }
 
   // The new set has an empty page and is not modified.
   // This allows us to ignore writes when no put or del operations have been done.
-  txn.borrow_mut().update(name, INVALID_PAGE_ID, State::Clean);
+  txn.borrow_mut().update(identifier, INVALID_PAGE_ID, State::Clean);
 
-  Ok(Set { name: name.to_owned(), root: INVALID_PAGE_ID, txn: txn.clone() })
+  Ok(Set { identifier: identifier.to_vec(), root: INVALID_PAGE_ID, txn: txn.clone() })
 }
 
-// Returns a set for the provided name if it exists.
-pub fn get_set(txn: &TransactionRef, name: &str) -> Option<Set> {
+// Returns a set for the provided identifier if it exists.
+pub fn get_set(txn: &TransactionRef, identifier: &[u8]) -> Option<Set> {
   txn.borrow().assert_not_finalised();
 
-  if let Some(&(root, _)) = txn.borrow().active_sets.get(name) {
-    return Some(Set { name: name.to_owned(), root: root, txn: txn.clone() })
+  if let Some(&(root, _)) = txn.borrow().active_sets.get(identifier) {
+    return Some(Set { identifier: identifier.to_vec(), root: root, txn: txn.clone() })
   }
 
   let root = txn.borrow().get_root_page();
-  match btree::get(root, name.as_bytes(), &mut *txn.borrow_mut().mngr.borrow_mut()) {
+  match btree::get(root, identifier, &mut *txn.borrow_mut().mngr.borrow_mut()) {
     Some(buf) => {
       let pid = u8_u32!(&buf[..]);
-      Some(Set { name: name.to_owned(), root: pid, txn: txn.clone() })
+      Some(Set { identifier: identifier.to_vec(), root: pid, txn: txn.clone() })
     },
     None => None,
   }
@@ -295,7 +299,7 @@ pub fn get_set(txn: &TransactionRef, name: &str) -> Option<Set> {
 // No-op if no such set exists.
 pub fn drop_set(txn: &TransactionRef, mut set: Set) {
   set.truncate();
-  txn.borrow_mut().update(&set.name, set.root, State::Deleted);
+  txn.borrow_mut().update(&set.identifier, set.root, State::Deleted);
 }
 
 // Returns the next object id (monotonically increasing u64 value).
@@ -304,9 +308,9 @@ pub fn next_object_id(txn: &TransactionRef) -> u64 {
 }
 
 // A high-level wrapper on btree module.
-// Has a unique name and the root page and is associated with a transaction.
+// Has a unique identifier and the root page and is associated with a transaction.
 pub struct Set {
-  name: String,
+  identifier: Vec<u8>,
   root: u32,
   txn: TransactionRef,
 }
@@ -339,7 +343,7 @@ impl Set {
     self.root = btree::put(curr_root, key, value, &mut *txn.mngr.borrow_mut());
 
     let new_state = if self.root != curr_root { State::Modified } else { State::Clean };
-    txn.update(&self.name, self.root, new_state);
+    txn.update(&self.identifier, self.root, new_state);
   }
 
   // Deletes key if exists.
@@ -351,7 +355,7 @@ impl Set {
     self.root = btree::del(curr_root, key, &mut *txn.mngr.borrow_mut());
 
     let new_state = if self.root != curr_root { State::Modified } else { State::Clean };
-    txn.update(&self.name, self.root, new_state);
+    txn.update(&self.identifier, self.root, new_state);
   }
 
   // Deletes all of the data in the set.
@@ -365,7 +369,7 @@ impl Set {
     assert_eq!(self.root, INVALID_PAGE_ID, "Root must be INVALID_PAGE_ID after truncate");
 
     let new_state = if self.root != curr_root { State::Modified } else { State::Clean };
-    txn.update(&self.name, self.root, new_state);
+    txn.update(&self.identifier, self.root, new_state);
   }
 
   // Returns btree debug information.
@@ -434,9 +438,9 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache, |txn| {
-      assert!(create_set(&txn, "abc").is_ok());
+      assert!(create_set(&txn, b"abc").is_ok());
       // Should return an error.
-      assert!(!create_set(&txn, "abc").is_ok());
+      assert!(!create_set(&txn, b"abc").is_ok());
     });
   }
 
@@ -445,13 +449,13 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut set = create_set(&txn, "abc").unwrap();
+      let mut set = create_set(&txn, b"abc").unwrap();
       set.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
     with_txn(cache.clone(), |txn| {
-      assert!(!create_set(&txn, "abc").is_ok());
+      assert!(!create_set(&txn, b"abc").is_ok());
     });
   }
 
@@ -461,24 +465,24 @@ mod tests {
 
     // Set does not exist.
     with_txn(cache.clone(), |txn| {
-      assert!(get_set(&txn, "abc").is_none());
+      assert!(get_set(&txn, b"abc").is_none());
     });
 
     // Set has been created but not committed yet.
     with_txn(cache.clone(), |txn| {
-      create_set(&txn, "abc").unwrap();
-      assert!(get_set(&txn, "abc").is_some());
+      create_set(&txn, b"abc").unwrap();
+      assert!(get_set(&txn, b"abc").is_some());
     });
 
     // Set has been created and committed.
     with_txn(cache.clone(), |txn| {
-      let mut set = create_set(&txn, "abc").unwrap();
+      let mut set = create_set(&txn, b"abc").unwrap();
       set.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
     with_txn(cache, |txn| {
-      assert!(get_set(&txn, "abc").is_some());
+      assert!(get_set(&txn, b"abc").is_some());
     });
   }
 
@@ -496,8 +500,8 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t1 = create_set(&txn, "t1").unwrap();
-      let mut t2 = create_set(&txn, "t2").unwrap();
+      let mut t1 = create_set(&txn, b"t1").unwrap();
+      let mut t2 = create_set(&txn, b"t2").unwrap();
 
       t1.put(&[1], &[10]);
       t1.put(&[2], &[20]);
@@ -524,7 +528,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t1 = create_set(&txn, "t1").unwrap();
+      let mut t1 = create_set(&txn, b"t1").unwrap();
 
       t1.put(&[1], &[10]);
       assert_eq!(t1.get(&[1]), Some(vec![10])); // should not overwrite Modified state
@@ -544,7 +548,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "t").unwrap();
+      let mut t = create_set(&txn, b"t").unwrap();
       t.put(&[1], &[10]);
 
       assert!(txn.borrow().is_modified());
@@ -552,7 +556,7 @@ mod tests {
     });
 
     with_txn(cache.clone(), |txn| {
-      let t = get_set(&txn, "t").unwrap();
+      let t = get_set(&txn, b"t").unwrap();
       assert_eq!(t.get(&[1]), Some(vec![10]));
 
       assert!(!txn.borrow().is_modified());
@@ -569,7 +573,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
 
       assert!(txn.borrow().is_modified());
@@ -580,7 +584,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "table").unwrap();
+      let mut t = get_set(&txn, b"table").unwrap();
       t.put(&[2], &[20]);
 
       assert!(txn.borrow().is_modified());
@@ -591,7 +595,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 4, 2);
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "table").unwrap();
+      let mut t = get_set(&txn, b"table").unwrap();
       t.put(&[3], &[30]);
 
       assert!(txn.borrow().is_modified());
@@ -608,7 +612,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "t").unwrap();
+      let mut t = create_set(&txn, b"t").unwrap();
       t.put(&[1], &[10]);
 
       assert!(txn.borrow().is_modified());
@@ -619,7 +623,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "t").unwrap();
+      let mut t = get_set(&txn, b"t").unwrap();
       t.del(&[1]);
 
       assert!(txn.borrow().is_modified());
@@ -637,7 +641,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
 
       assert!(txn.borrow().is_modified());
@@ -645,7 +649,7 @@ mod tests {
     });
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "table").unwrap();
+      let mut t = get_set(&txn, b"table").unwrap();
       t.del(&[2]); // key does not exist in the table
 
       assert!(!txn.borrow().is_modified());
@@ -663,7 +667,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       assert_eq!(t.list(None, None).next(), None);
 
       assert!(!txn.borrow().is_modified()); // new trees should not be persisted
@@ -681,7 +685,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let t = create_set(&txn, "table").unwrap();
+      let t = create_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[1]), None);
 
       assert!(!txn.borrow().is_modified()); // new trees should not be persisted
@@ -698,7 +702,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
       t.put(&[2], &[20]);
       t.put(&[3], &[30]);
@@ -709,7 +713,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "table").unwrap();
+      let mut t = get_set(&txn, b"table").unwrap();
       t.truncate();
       txn.borrow_mut().commit();
     });
@@ -723,7 +727,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
       t.put(&[2], &[20]);
       t.put(&[3], &[30]);
@@ -734,7 +738,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let mut t = get_set(&txn, "table").unwrap();
+      let mut t = get_set(&txn, b"table").unwrap();
       t.truncate();
       txn.borrow_mut().rollback();
     });
@@ -743,7 +747,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let t = get_set(&txn, "table").unwrap();
+      let t = get_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[1]), Some(vec![10]));
       assert_eq!(t.get(&[2]), Some(vec![20]));
       assert_eq!(t.get(&[3]), Some(vec![30]));
@@ -755,7 +759,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let t = create_set(&txn, "table").unwrap();
+      let t = create_set(&txn, b"table").unwrap();
       drop_set(&txn, t);
       txn.borrow_mut().commit();
     });
@@ -764,7 +768,7 @@ mod tests {
 
     // Try to insert data into the table and then drop.
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
       txn.borrow_mut().commit();
     });
@@ -773,7 +777,7 @@ mod tests {
 
     // Drop should delete all of the pages.
     with_txn(cache.clone(), |txn| {
-      let t = get_set(&txn, "table").unwrap();
+      let t = get_set(&txn, b"table").unwrap();
       drop_set(&txn, t);
       txn.borrow_mut().commit();
     });
@@ -786,7 +790,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[10]);
       txn.borrow_mut().commit();
     });
@@ -794,7 +798,7 @@ mod tests {
     assert_block_mngr(cache.clone(), 2, 0);
 
     with_txn(cache.clone(), |txn| {
-      let t = get_set(&txn, "table").unwrap();
+      let t = get_set(&txn, b"table").unwrap();
       drop_set(&txn, t);
       txn.borrow_mut().rollback();
     });
@@ -818,7 +822,7 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache.clone(), |txn| {
-      let t = create_set(&txn, "table").unwrap();
+      let t = create_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[1]), None);
 
       assert!(!txn.borrow().is_modified());
@@ -836,13 +840,13 @@ mod tests {
 
     // Test read-only mode for an existing table.
     with_txn(cache.clone(), |txn| {
-      let mut t = create_set(&txn, "table").unwrap();
+      let mut t = create_set(&txn, b"table").unwrap();
       t.put(&[1], &[2]);
       txn.borrow_mut().commit();
     });
 
     with_txn(cache.clone(), |txn| {
-      let t = get_set(&txn, "table").unwrap();
+      let t = get_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[2]), None);
 
       assert!(!txn.borrow().is_modified());
@@ -860,7 +864,7 @@ mod tests {
 
     // Writes only.
     with_txn(cache.clone(), |txn| {
-      let mut t1 = create_set(&txn, "t1").unwrap();
+      let mut t1 = create_set(&txn, b"t1").unwrap();
       t1.put(&[1], &[10]);
       t1.put(&[2], &[20]);
 
@@ -874,7 +878,7 @@ mod tests {
 
     // Reads + writes.
     with_txn(cache.clone(), |txn| {
-      let mut t1 = create_set(&txn, "t1").unwrap();
+      let mut t1 = create_set(&txn, b"t1").unwrap();
       t1.put(&[1], &[10]);
       assert_eq!(t1.get(&[1]), Some(vec![10]));
 
@@ -904,14 +908,14 @@ mod tests {
     let cache = get_block_mngr();
 
     with_txn(cache, |txn| {
-      let mut t1 = create_set(&txn, "t1").unwrap();
+      let mut t1 = create_set(&txn, b"t1").unwrap();
       assert_eq!(t1.btree_debug(), format!(" ! INVALID PAGE\n"));
 
-      let mut t2 = create_set(&txn, "t2").unwrap();
+      let mut t2 = create_set(&txn, b"t2").unwrap();
       t2.put(&[1], &[2]);
       assert_eq!(t2.btree_debug(), format!(" * 2147483649 | cnt: 1 | min: [1] | max: [1]\n"));
 
-      let mut t3 = create_set(&txn, "t3").unwrap();
+      let mut t3 = create_set(&txn, b"t3").unwrap();
       t3.put(&[1; 128], &[2; 128]);
       assert_eq!(
         t3.btree_debug(),

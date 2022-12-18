@@ -7,6 +7,17 @@ pub mod lru;
 
 pub const DB_VERSION: &str = env!("CARGO_PKG_VERSION"); // extracted from Cargo.toml
 
+//======
+// Misc
+//======
+
+// Macro to render binary data as hex.
+macro_rules! hex {
+  ($slice:expr) => {{
+    $slice.iter().map(|x| format!("{:02x}", x)).collect::<Vec<String>>().join("")
+  }}
+}
+
 //==============
 // Error macros
 //==============
