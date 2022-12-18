@@ -192,8 +192,8 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
 
 fn with_table<F, T>(db: &mut db::DB, func: F) -> T where F: Fn(&mut Set) -> T, {
   db.with_txn(true, |txn| {
-    let mut table = get_set(txn.clone(), "kv")
-      .unwrap_or_else(|| create_set(txn.clone(), "kv").unwrap());
+    let mut table = get_set(&txn, "kv")
+      .unwrap_or_else(|| create_set(&txn, "kv").unwrap());
     func(&mut table)
   })
 }

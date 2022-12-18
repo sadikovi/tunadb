@@ -101,7 +101,7 @@ mod tests {
       {
         let mut db = open(Some(path)).try_build().unwrap();
         db.with_txn(true, |txn| {
-          let mut t1 = create_set(txn.clone(), "t1").unwrap();
+          let mut t1 = create_set(&txn, "t1").unwrap();
           t1.put(&[1], &[10]);
           t1.put(&[2], &[20]);
           t1.put(&[3], &[30]);
@@ -112,7 +112,7 @@ mod tests {
       {
         let mut db = open(Some(path)).try_build().unwrap();
         db.with_txn(false, |txn| {
-          let t1 = get_set(txn.clone(), "t1").unwrap();
+          let t1 = get_set(&txn, "t1").unwrap();
           assert_eq!(t1.get(&[1]), Some(vec![10]));
           assert_eq!(t1.get(&[2]), Some(vec![20]));
           assert_eq!(t1.get(&[3]), Some(vec![30]));
@@ -127,25 +127,25 @@ mod tests {
 
     // Changes are persisted, auto-commit should be a no-op.
     db.with_txn(true, |txn| {
-      let mut t1 = create_set(txn.clone(), "t1").unwrap();
+      let mut t1 = create_set(&txn, "t1").unwrap();
       t1.put(&[1], &[10]);
       txn.borrow_mut().commit();
     });
 
     // Changes are rolled back.
     db.with_txn(false, |txn| {
-      let mut t1 = get_set(txn.clone(), "t1").unwrap();
+      let mut t1 = get_set(&txn, "t1").unwrap();
       t1.put(&[2], &[20]);
     });
 
     // Changes are committed.
     db.with_txn(true, |txn| {
-      let mut t1 = get_set(txn.clone(), "t1").unwrap();
+      let mut t1 = get_set(&txn, "t1").unwrap();
       t1.put(&[3], &[30]);
     });
 
     db.with_txn(false, |txn| {
-      let t1 = get_set(txn.clone(), "t1").unwrap();
+      let t1 = get_set(&txn, "t1").unwrap();
       assert_eq!(t1.get(&[1]), Some(vec![10]));
       assert_eq!(t1.get(&[2]), None);
       assert_eq!(t1.get(&[3]), Some(vec![30]));
