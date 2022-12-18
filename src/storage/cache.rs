@@ -82,7 +82,7 @@ impl Ord for PageInfo {
 
 // Buffer pool for StorageManager.
 pub struct PageCache {
-  counter: u32, // counter for virtual page ids
+  virtual_page_id: u32, // increment for virtual page ids
   page_size: usize, // page size for fast access
   max_mem: usize, // maximum amount of memory in bytes allowed
   mngr: StorageManager,
@@ -107,7 +107,7 @@ impl PageCache {
   // Creates new page cache.
   pub fn new(max_mem: usize, mngr: StorageManager) -> Self {
     Self {
-      counter: 1,
+      virtual_page_id: 1,
       page_size: mngr.page_size(),
       max_mem: max_mem,
       mngr: mngr,
@@ -124,9 +124,9 @@ impl PageCache {
 
   // Returns the next virtual id from a counter.
   #[inline]
-  fn next_virtual_id(&mut self) -> u32 {
-    let id = self.counter;
-    self.counter += 1;
+  fn next_virtual_page_id(&mut self) -> u32 {
+    let id = self.virtual_page_id;
+    self.virtual_page_id += 1;
     assert!(id < !VID_MASK, "Reached the limit of virtual ids");
     id | VID_MASK
   }
@@ -324,7 +324,7 @@ impl BlockManager for PageCache {
   #[inline]
   fn store(&mut self, buf: &[u8]) -> u32 {
     // This method only writes virtual pages.
-    let vid = self.next_virtual_id();
+    let vid = self.next_virtual_page_id();
     let off = self.get_free_offset();
     let pg_type = pg::page_type(buf);
     write_bytes!(&mut self.buf[off..off + self.page_size], &buf[..]);

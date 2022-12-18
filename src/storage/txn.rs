@@ -15,7 +15,7 @@ pub struct TransactionManager {
   mngr: Rc<RefCell<dyn BlockManager>>, // block manager for transaction
   // Current active transaction.
   // We only allow one transaction at the time for now.
-  curr_txn: Option<Rc<RefCell<Transaction>>>,
+  curr_txn: Option<TransactionRef>,
 }
 
 impl TransactionManager {
@@ -36,7 +36,7 @@ impl TransactionManager {
   // Starts a new transaction and runs any operations within it.
   // When auto_commit is enabled, commits by the end of the function.
   pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> Res<T>
-      where F: Fn(Rc<RefCell<Transaction>>) -> T, {
+      where F: Fn(TransactionRef) -> T, {
     let txn = self.create_txn()?;
     let res = func(txn.clone());
     // Roll back all of the changes if they have not been explicitly committed.
@@ -52,7 +52,7 @@ impl TransactionManager {
   }
 
   // Creates a new transaction.
-  fn create_txn(&mut self) -> Res<Rc<RefCell<Transaction>>> {
+  fn create_txn(&mut self) -> Res<TransactionRef> {
     match &self.curr_txn {
       Some(txn) => Err(internal_err!("Transaction {} is active", txn.borrow().id())),
       None => {
@@ -99,6 +99,9 @@ fn merge_state(state1: State, state2: State) -> State {
 fn is_state_modified(state: State) -> bool {
   state == State::Modified || state == State::Deleted
 }
+
+// Alias for a reference counted transaction, easier to work with.
+pub type TransactionRef = Rc<RefCell<Transaction>>;
 
 // Transaction for working with sets.
 pub struct Transaction {
@@ -249,7 +252,7 @@ impl Drop for Transaction {
 
 // Creates a new set with the provided name.
 // If a set with the name already exists, an error is returned.
-pub fn create_set(txn: Rc<RefCell<Transaction>>, name: &str) -> Res<Set> {
+pub fn create_set(txn: TransactionRef, name: &str) -> Res<Set> {
   txn.borrow().assert_not_finalised();
 
   // Check if there is such name in active sets.
@@ -271,7 +274,7 @@ pub fn create_set(txn: Rc<RefCell<Transaction>>, name: &str) -> Res<Set> {
 }
 
 // Returns a set for the provided name if it exists.
-pub fn get_set(txn: Rc<RefCell<Transaction>>, name: &str) -> Option<Set> {
+pub fn get_set(txn: TransactionRef, name: &str) -> Option<Set> {
   txn.borrow().assert_not_finalised();
 
   if let Some(&(root, _)) = txn.borrow().active_sets.get(name) {
@@ -290,9 +293,14 @@ pub fn get_set(txn: Rc<RefCell<Transaction>>, name: &str) -> Option<Set> {
 
 // Drops set so it is no longer accessible, all of the data is also deleted.
 // No-op if no such set exists.
-pub fn drop_set(txn: Rc<RefCell<Transaction>>, mut set: Set) {
+pub fn drop_set(txn: TransactionRef, mut set: Set) {
   set.truncate();
   txn.borrow_mut().update(&set.name, set.root, State::Deleted);
+}
+
+// Returns the next object id (monotonically increasing u64 value).
+pub fn next_object_id(txn: &TransactionRef) -> u64 {
+  txn.borrow_mut().mngr.borrow_mut().get_mngr_mut().next_id()
 }
 
 // A high-level wrapper on btree module.
@@ -300,7 +308,7 @@ pub fn drop_set(txn: Rc<RefCell<Transaction>>, mut set: Set) {
 pub struct Set {
   name: String,
   root: u32,
-  txn: Rc<RefCell<Transaction>>,
+  txn: TransactionRef,
 }
 
 impl Set {
@@ -383,7 +391,7 @@ mod tests {
 
   // A wrapper for transactions in tests.
   fn with_txn<F>(cache: Rc<RefCell<dyn BlockManager>>, func: F)
-      where F: Fn(Rc<RefCell<Transaction>>) {
+      where F: Fn(TransactionRef) {
     let mut mngr = TransactionManager::new(cache);
     mngr.with_txn(/* no auto-commit */ false, func).unwrap();
   }
@@ -408,6 +416,17 @@ mod tests {
         assert_eq!(txn.borrow().id(), i);
       }).unwrap();
     }
+  }
+
+  #[test]
+  fn test_txn_next_object_id() {
+    let cache = get_block_mngr();
+
+    with_txn(cache, |txn| {
+      for i in 0..10 {
+        assert_eq!(next_object_id(&txn), i);
+      }
+    });
   }
 
   #[test]

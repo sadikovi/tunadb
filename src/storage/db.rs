@@ -5,7 +5,7 @@ use crate::common::error::Res;
 use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
 use crate::storage::smgr::{DEFAULT_PAGE_SIZE, StorageManager};
-use crate::storage::txn::{Transaction, TransactionManager};
+use crate::storage::txn::{TransactionRef, TransactionManager};
 
 // Main entry to create a database client.
 // Opens a database using the provided path or an in-memory database.
@@ -83,7 +83,7 @@ impl DB {
   // Starts a new transaction and runs any operations within it.
   // When auto_commit is enabled, commits by the end of the function.
   pub fn with_txn<F, T>(&mut self, auto_commit: bool, func: F) -> T
-      where F: Fn(Rc<RefCell<Transaction>>) -> T, {
+      where F: Fn(TransactionRef) -> T, {
     self.mngr.with_txn(auto_commit, func).expect("Encountered error in transaction")
   }
 }
