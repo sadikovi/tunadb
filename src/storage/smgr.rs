@@ -154,7 +154,7 @@ impl Drop for Descriptor {
 // +--------------+--------------+--------------+--------------+
 // 32             36             40             44             48
 // +--------------+--------------+--------------+--------------+
-// | Reserved for expansion                                    |
+// | Global counter              | Reserved for expansion      |
 // +--------------+--------------+--------------+--------------+
 // 48             52             56             60             64
 // +--------------+--------------+--------------+--------------+
@@ -293,6 +293,7 @@ pub struct StorageManager {
   desc: Descriptor,
   lock: Option<LockManager>,
   version: String,
+  counter: u64, // global counter
   flags: u32, // database flags
   page_size: u32, // page size on disk
   free_page_id: u32, // pointer to the free list as the first meta block
@@ -388,10 +389,14 @@ impl StorageManager {
         // Version that was used to write the database file.
         let version = read_version(&buf[20..32])?;
 
+        // Global counter used to track objects.
+        let counter = u8_u64!(&buf[32..40]);
+
         Ok(Self {
           desc,
           lock: Some(lock),
           version,
+          counter,
           flags,
           page_size,
           free_page_id: INVALID_PAGE_ID, // free page id is updated in sync/drop
@@ -405,6 +410,7 @@ impl StorageManager {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
           lock: Some(lock),
           version: DB_VERSION.to_owned(),
+          counter: 0,
           flags: 0,
           page_size: opts.page_size,
           free_page_id: INVALID_PAGE_ID,
@@ -420,6 +426,7 @@ impl StorageManager {
         desc: Descriptor::mem(opts.mem_capacity),
         lock: None, // not needed for in-memory descriptor
         version: DB_VERSION.to_owned(),
+        counter: 0,
         flags: 0,
         page_size: opts.page_size,
         free_page_id: INVALID_PAGE_ID,
@@ -443,6 +450,14 @@ impl StorageManager {
   #[inline]
   pub fn version(&self) -> &str {
     &self.version
+  }
+
+  // Returns the next motonically increasing id from the counter.
+  #[inline]
+  pub fn next_id(&mut self) -> u64 {
+    let id = self.counter;
+    self.counter += 1;
+    id
   }
 
   // Returns root page id that is currently set.
@@ -629,6 +644,7 @@ impl StorageManager {
     res!((&mut buf[12..]).write_all(&u32_u8!(self.free_page_id))); // 12..16
     res!((&mut buf[16..]).write_all(&u32_u8!(self.root_page.unwrap_or(INVALID_PAGE_ID)))); // 16..20
     res!(write_version(&self.version, &mut buf[20..32])); // 20..32
+    res!((&mut buf[32..]).write_all(&u64_u8!(self.counter))); // 32..40
     self.desc.write(0, &buf[..]);
 
     // Optionally truncate the file.
@@ -1066,6 +1082,7 @@ pub mod tests {
   fn test_storage_manager_init_mem() {
     let mngr = storage_mem(24);
     assert_eq!(mngr.version(), DB_VERSION);
+    assert_eq!(mngr.counter, 0);
     assert_eq!(mngr.flags, 0);
     assert_eq!(mngr.page_size, 24);
     assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
@@ -1081,6 +1098,7 @@ pub mod tests {
     with_tmp_file(|path| {
       let mngr = storage_disk(24, path);
       assert_eq!(mngr.version(), DB_VERSION);
+      assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
@@ -1106,6 +1124,7 @@ pub mod tests {
       let mngr = storage_disk(32, path);
 
       assert_eq!(mngr.version(), DB_VERSION);
+      assert_eq!(mngr.counter, 0);
       assert_eq!(mngr.flags, 0);
       assert_eq!(mngr.page_size, 24);
       assert_eq!(mngr.free_page_id, INVALID_PAGE_ID);
@@ -1197,7 +1216,29 @@ pub mod tests {
         let mngr = storage_disk(32, path);
         assert_eq!(mngr.root_page(), Some(100));
       }
-    })
+    });
+  }
+
+  #[test]
+  fn test_storage_manager_counter_persist() {
+    with_tmp_file(|path| {
+      {
+        let mut mngr = storage_disk(32, path);
+        assert_eq!(mngr.counter, 0);
+        mngr.sync();
+      }
+      {
+        let mut mngr = storage_disk(32, path);
+        for i in 0..10 {
+          assert_eq!(mngr.next_id(), i);
+        }
+        mngr.sync();
+      }
+      {
+        let mut mngr = storage_disk(32, path);
+        assert_eq!(mngr.next_id(), 10);
+      }
+    });
   }
 
   #[test]
@@ -1479,7 +1520,7 @@ pub mod tests {
         assert_eq!(mngr.free_list.len(), 0);
         assert_eq!(mngr.free_set.len(), 0);
       }
-    })
+    });
   }
 
   #[test]
@@ -1509,7 +1550,7 @@ pub mod tests {
         // Because the meta block is corrupted, free list will only contain part of the pids.
         assert_eq!(mngr.free_list, vec![8, 2, 1, 0]);
       }
-    })
+    });
   }
 
   #[test]
