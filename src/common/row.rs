@@ -4,6 +4,8 @@ use std::io::Write;
 // Rows
 //======
 
+const ROW_SERDE_VERSION_1: u8 = 1;
+
 // Generic row interface.
 // Depending on the implementation, certain methods may not be available.
 
@@ -14,6 +16,8 @@ use std::io::Write;
 // Variable length is reserved for fields that require byte arrays, e.g. TEXT.
 
 pub trait Row {
+  // Row serialisation version.
+  fn version(&self) -> u8;
   // Returns the number of fields in the row.
   fn num_fields(&self) -> usize;
   // Returns true if the field `i` is null.
@@ -106,6 +110,7 @@ fn set_null_bit(nulls_buf: &mut [u8], i: usize, is_null: bool) {
 // Read-write row used to manually construct records for writes.
 #[derive(Clone, Debug)]
 pub struct MutableRow {
+  version: u8,
   num_fields: usize,
   is_fixed: Vec<bool>,
   fixed: Vec<u64>,
@@ -118,6 +123,7 @@ impl MutableRow {
   // All values are NULL initially.
   pub fn new(num_fields: usize) -> Self {
     Self {
+      version: ROW_SERDE_VERSION_1,
       num_fields: num_fields,
       is_fixed: vec![true; num_fields],
       fixed: vec![0u64; num_fields],
@@ -135,6 +141,11 @@ impl MutableRow {
 }
 
 impl Row for MutableRow {
+  #[inline]
+  fn version(&self) -> u8 {
+    self.version
+  }
+
   #[inline]
   fn num_fields(&self) -> usize {
     self.num_fields
@@ -262,6 +273,7 @@ impl Row for MutableRow {
         let mut slot = get_fixed_slot_mut(&mut buf, i);
         write_u64!(slot, self.fixed[i]);
       } else {
+        // Write variable length data.
         let off = buf.len() as u64;
         let len = self.var[i].len() as u64;
         let val = off << 32 | len;
@@ -270,6 +282,8 @@ impl Row for MutableRow {
         buf.extend_from_slice(&self.var[i]);
       }
     }
+    // Add version.
+    buf.push(self.version);
     buf
   }
 }
@@ -277,6 +291,7 @@ impl Row for MutableRow {
 // Buffer row is a read-only row that wraps the raw bytes from BTree.
 #[derive(Clone, Debug)]
 pub struct BufferRow {
+  version: u8,
   num_fields: usize,
   buf: Vec<u8>,
 }
@@ -287,15 +302,21 @@ impl BufferRow {
     let fixed_len = fixed_part_len(num_fields);
     let nulls_len = nulls_part_len(num_fields);
     assert!(
-      buf.len() >= fixed_len + nulls_len,
-      "The provided row buffer is too short: buf {} < fixed {} + nulls {}",
+      buf.len() >= fixed_len + nulls_len + 1 /* version */,
+      "The provided row buffer is too short: buf {} < version + fixed {} + nulls {}",
       buf.len(), fixed_len, nulls_len
     );
-    Self { num_fields, buf }
+    let version = buf[buf.len() - 1]; // version is written last
+    Self { version, num_fields, buf }
   }
 }
 
 impl Row for BufferRow {
+  #[inline]
+  fn version(&self) -> u8 {
+    self.version
+  }
+
   #[inline]
   fn num_fields(&self) -> usize {
     self.num_fields
@@ -425,10 +446,17 @@ mod tests {
   }
 
   #[test]
+  fn test_row_mutable_version() {
+    // All fields must be null.
+    let row = MutableRow::new(4);
+    assert_eq!(row.version(), ROW_SERDE_VERSION_1);
+  }
+
+  #[test]
   fn test_row_mutable_new_zero_fields() {
     let row = MutableRow::new(0);
     assert_eq!(row.num_fields(), 0);
-    assert_eq!(row.to_vec(), Vec::new());
+    assert_eq!(row.to_vec(), vec![ROW_SERDE_VERSION_1]);
   }
 
   #[test]
@@ -493,18 +521,18 @@ mod tests {
   #[test]
   fn test_row_mutable_to_vec() {
     let row = MutableRow::new(3);
-    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3));
+    assert_eq!(row.to_vec().len(), 1 /* version */ + fixed_part_len(3) + nulls_part_len(3));
 
     let mut row = MutableRow::new(3);
     row.set_str(0, "123");
-    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3) + 3);
+    assert_eq!(row.to_vec().len(), 1 /* version */ + fixed_part_len(3) + nulls_part_len(3) + 3);
 
     let mut row = MutableRow::new(3);
     row.set_i32(0, 1);
     row.set_i32(1, 2);
     row.set_i32(2, 3);
     row.set_str(0, "123");
-    assert_eq!(row.to_vec().len(), fixed_part_len(3) + nulls_part_len(3) + 3);
+    assert_eq!(row.to_vec().len(), 1 /* version */ + fixed_part_len(3) + nulls_part_len(3) + 3);
   }
 
   #[test]
@@ -514,10 +542,28 @@ mod tests {
   }
 
   #[test]
+  #[should_panic(expected = "row buffer is too short")]
+  fn test_row_buffer_buf_is_too_short_no_version() {
+    BufferRow::from_buf(0, Vec::new());
+  }
+
+  #[test]
+  fn test_row_buffer_version() {
+    for num_fields in 0..128 {
+      let row = MutableRow::new(num_fields);
+      let original_version = row.version();
+
+      let row = BufferRow::from_buf(num_fields, row.to_vec());
+      assert_eq!(row.version(), original_version);
+    }
+  }
+
+  #[test]
   fn test_row_buffer_from_buf_zero_fields() {
-    let row = BufferRow::from_buf(0, Vec::new());
+    // In this case only version is written.
+    let row = BufferRow::from_buf(0, vec![ROW_SERDE_VERSION_1]);
     assert_eq!(row.num_fields(), 0);
-    assert_eq!(row.to_vec(), Vec::new());
+    assert_eq!(row.to_vec(), vec![ROW_SERDE_VERSION_1]);
   }
 
   #[test]

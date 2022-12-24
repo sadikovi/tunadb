@@ -1,6 +1,3 @@
-pub mod error;
-pub mod lru;
-
 // =========
 // Versions
 // =========
@@ -122,3 +119,8 @@ macro_rules! write_bytes {
     res!(($slice).write($data));
   }}
 }
+
+pub mod error;
+pub mod lru;
+pub mod row;
+pub mod serde;
