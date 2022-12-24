@@ -316,6 +316,15 @@ pub struct Set {
 }
 
 impl Set {
+  // Returns true if the key exists, false otherwise.
+  pub fn exists(&self, key: &[u8]) -> bool {
+    self.txn.borrow().assert_not_finalised();
+    let txn = self.txn.borrow_mut();
+    let res = btree::exists(self.root, key, &mut *txn.mngr.borrow_mut());
+    // The operation is read-only, no need to update the entry.
+    res
+  }
+
   // Returns value for the key if exists.
   pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
     self.txn.borrow().assert_not_finalised();
@@ -511,6 +520,7 @@ mod tests {
 
       let v = t1.get(&[1]);
       assert_eq!(v, Some(vec![10]));
+      assert!(t1.exists(&[1]));
 
       let v = v.unwrap();
       t2.put(&v, &v);
@@ -532,6 +542,7 @@ mod tests {
 
       t1.put(&[1], &[10]);
       assert_eq!(t1.get(&[1]), Some(vec![10])); // should not overwrite Modified state
+      assert!(t1.exists(&[1]));
 
       assert!(txn.borrow().is_modified());
       txn.borrow_mut().commit();
@@ -558,6 +569,7 @@ mod tests {
     with_txn(cache.clone(), |txn| {
       let t = get_set(&txn, b"t").unwrap();
       assert_eq!(t.get(&[1]), Some(vec![10]));
+      assert!(t.exists(&[1]));
 
       assert!(!txn.borrow().is_modified());
       txn.borrow_mut().commit();
@@ -687,6 +699,7 @@ mod tests {
     with_txn(cache.clone(), |txn| {
       let t = create_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[1]), None);
+      assert!(!t.exists(&[1]));
 
       assert!(!txn.borrow().is_modified()); // new trees should not be persisted
       txn.borrow_mut().commit();
@@ -751,6 +764,10 @@ mod tests {
       assert_eq!(t.get(&[1]), Some(vec![10]));
       assert_eq!(t.get(&[2]), Some(vec![20]));
       assert_eq!(t.get(&[3]), Some(vec![30]));
+
+      assert!(t.exists(&[1]));
+      assert!(t.exists(&[2]));
+      assert!(t.exists(&[3]));
     });
   }
 
@@ -824,6 +841,7 @@ mod tests {
     with_txn(cache.clone(), |txn| {
       let t = create_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[1]), None);
+      assert!(!t.exists(&[1]));
 
       assert!(!txn.borrow().is_modified());
       txn.borrow_mut().rollback(); // rollback should be a no-op
@@ -848,6 +866,7 @@ mod tests {
     with_txn(cache.clone(), |txn| {
       let t = get_set(&txn, b"table").unwrap();
       assert_eq!(t.get(&[2]), None);
+      assert!(!t.exists(&[2]));
 
       assert!(!txn.borrow().is_modified());
       txn.borrow_mut().rollback();
@@ -881,6 +900,7 @@ mod tests {
       let mut t1 = create_set(&txn, b"t1").unwrap();
       t1.put(&[1], &[10]);
       assert_eq!(t1.get(&[1]), Some(vec![10]));
+      assert!(t1.exists(&[1]));
 
       assert!(txn.borrow().is_modified());
       txn.borrow_mut().rollback();
