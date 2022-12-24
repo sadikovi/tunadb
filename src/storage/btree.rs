@@ -142,11 +142,34 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, pag
 }
 
 // Returns value for the key if the key exists, otherwise None.
-pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> Option<Vec<u8>> {
+pub fn get(root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> Option<Vec<u8>> {
   if root == INVALID_PAGE_ID {
     return None;
   }
 
+  let (page, pos, exists) = _get(root, key, mngr);
+  if exists {
+    Some(pg::leaf_get_val(&page, pos, mngr))
+  } else {
+    None
+  }
+}
+
+// The optimised version of `get` that can be used to check if the key exists or not
+// without materialising the value.
+pub fn exists(root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> bool {
+  if root == INVALID_PAGE_ID {
+    return false;
+  }
+
+  let (_page, _pos, exists) = _get(root, key, mngr);
+  exists
+}
+
+// Internal method returns leaf page content, position, and whether the key exists or not.
+// The method does not check the root page.
+#[inline]
+fn _get(mut root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> (Vec<u8>, usize, bool) {
   let mut page = vec![0u8; mngr.page_size()];
 
   loop {
@@ -154,7 +177,7 @@ pub fn get(mut root: u32, key: &[u8], mngr: &mut dyn BlockManager) -> Option<Vec
     let (pos, exists) = pg::bsearch(&page, key, mngr);
     match pg::page_type(&page) {
       pg::PageType::Leaf => {
-        return if exists { Some(pg::leaf_get_val(&page, pos, mngr)) } else { None }
+        return (page /* valid leaf page */, pos /* pos in the page */, exists /* exists */);
       },
       pg::PageType::Internal => {
         let ptr = if exists { pos + 1 } else { pos };
@@ -554,12 +577,15 @@ mod tests {
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
 
     root = put(root, &[1], &[10], &mut mngr);
+    assert!(exists(root, &[1], &mut mngr));
     assert_eq!(get(root, &[1], &mut mngr), Some(vec![10]));
 
     root = put(root, &[1], &[20], &mut mngr);
+    assert!(exists(root, &[1], &mut mngr));
     assert_eq!(get(root, &[1], &mut mngr), Some(vec![20]));
 
     root = put(root, &[1], &[30; 256], &mut mngr);
+    assert!(exists(root, &[1], &mut mngr));
     assert_eq!(get(root, &[1], &mut mngr), Some(vec![30; 256]));
   }
 
@@ -630,6 +656,7 @@ mod tests {
     }
 
     for i in 0..3 {
+      assert!(exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr).unwrap(), vec![i * 10]);
     }
   }
@@ -649,6 +676,7 @@ mod tests {
 
     assert_eq!(root, INVALID_PAGE_ID);
     for i in 0..5 {
+      assert!(!exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), None);
     }
 
@@ -671,6 +699,7 @@ mod tests {
 
     assert_eq!(root, INVALID_PAGE_ID);
     for i in 0..5 {
+      assert!(!exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), None);
     }
 
@@ -739,9 +768,16 @@ mod tests {
     root = del(root, &[6], &mut mngr);
     root = del(root, &[7], &mut mngr);
 
+    assert!(exists(root, &[3], &mut mngr));
     assert_eq!(get(root, &[3], &mut mngr).unwrap(), &[3]);
+
+    assert!(exists(root, &[4], &mut mngr));
     assert_eq!(get(root, &[4], &mut mngr).unwrap(), &[4]);
+
+    assert!(exists(root, &[11], &mut mngr));
     assert_eq!(get(root, &[11], &mut mngr).unwrap(), &[11]);
+
+    assert!(exists(root, &[12], &mut mngr));
     assert_eq!(get(root, &[12], &mut mngr).unwrap(), &[12]);
   }
 
@@ -802,6 +838,7 @@ mod tests {
 
     // Check that the tree structure is correct.
     for &i in &[1, 2, 4, 5, 6, 7, 9, 10] {
+      assert!(exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), Some(vec![i]));
     }
 
@@ -853,7 +890,14 @@ mod tests {
   }
 
   #[test]
-  fn test_btree_get_existent_key() {
+  fn test_btree_exists_empty() {
+    let root = INVALID_PAGE_ID;
+    let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
+    assert!(!exists(root, &[1], &mut mngr));
+  }
+
+  #[test]
+  fn test_btree_get_and_exists_existent_key() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
 
@@ -861,15 +905,17 @@ mod tests {
       root = put(root, &[i], &[i], &mut mngr);
     }
     for i in 0..100 {
+      assert!(exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), Some(vec![i]));
     }
     for i in (0..100).rev() {
+      assert!(exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), Some(vec![i]));
     }
   }
 
   #[test]
-  fn test_btree_get_non_existent_key() {
+  fn test_btree_get_and_exists_non_existent_key() {
     let mut root = INVALID_PAGE_ID;
     let mut mngr = StorageManager::builder().as_mem(0).with_page_size(256).build();
 
@@ -878,9 +924,11 @@ mod tests {
     }
 
     for i in 100..200 {
+      assert!(!exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), None);
     }
     for i in (100..200).rev() {
+      assert!(!exists(root, &[i], &mut mngr));
       assert_eq!(get(root, &[i], &mut mngr), None);
     }
   }
@@ -900,6 +948,7 @@ mod tests {
       // This insert results in split
       root = put(root, &[i * 2 + 1], &[i * 2 + 1], &mut mngr);
 
+      assert!(exists(root, &[i * 2 + 1], &mut mngr));
       assert_eq!(get(root, &[i * 2 + 1], &mut mngr), Some(vec![i * 2 + 1]));
     }
   }
@@ -1038,8 +1087,10 @@ mod tests {
     for key in keys {
       let res = get(root, key, mngr);
       if assert_match && res != Some(key.to_vec()) {
+        assert!(exists(root, key, mngr));
         assert!(false, "Failed to find {:?}", key);
       } else if !assert_match && res == Some(key.to_vec()) {
+        assert!(!exists(root, key, mngr));
         assert!(false, "Failed, the key {:?} exists", key);
       }
     }
@@ -1118,6 +1169,7 @@ mod tests {
 
       for i in 0..input.len() {
         let mngr_mut = &mut *mngr.borrow_mut();
+        assert!(exists(root, &input[i], mngr_mut));
         assert!(get(root, &input[i], mngr_mut).is_some());
       }
 
