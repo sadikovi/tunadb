@@ -9,8 +9,11 @@ pub enum Error {
   InvalidIdentifier(String /* msg */),
   SchemaAlreadyExists(String /* schema */),
   SchemaDoesNotExist(String /* schema */),
+  SchemaIsNotEmpty(String /* schema */),
   TableAlreadyExists(String /* schema */, String /* table */),
   TableDoesNotExist(String /* schema */, String /* table */),
+  TableInvalidSchema(String /* msg */),
+  OperationIsNotAllowed(String /* msg */),
   // Internal error for an object that already exists.
   InternalAlreadyExists(String /* msg */),
   // One of the IO, Lock, or UTF8 errors, not user-facing.
@@ -24,8 +27,11 @@ impl Error {
       Error::InvalidIdentifier(msg) => msg.as_ref(),
       Error::SchemaAlreadyExists(schema) => schema.as_ref(),
       Error::SchemaDoesNotExist(schema) => schema.as_ref(),
+      Error::SchemaIsNotEmpty(schema) => schema.as_ref(),
       Error::TableAlreadyExists(_schema, table) => table.as_ref(),
       Error::TableDoesNotExist(_schema, table) => table.as_ref(),
+      Error::TableInvalidSchema(msg) => msg.as_ref(),
+      Error::OperationIsNotAllowed(msg) => msg.as_ref(),
       Error::InternalAlreadyExists(msg) => msg.as_ref(),
       Error::InternalError(msg) => msg.as_ref(),
     }
