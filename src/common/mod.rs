@@ -124,3 +124,4 @@ pub mod error;
 pub mod lru;
 pub mod row;
 pub mod serde;
+pub mod trees;
