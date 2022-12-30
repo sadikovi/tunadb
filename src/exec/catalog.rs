@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
 use crate::exec::types::{Field, Type};
@@ -52,7 +53,7 @@ fn to_unique_table_key(schema_id: u64, table_identifier: &str) -> Vec<u8> {
 }
 
 // Table type to differentiate between base tables and views.
-// Used in analysis.
+// Used in query analysis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(non_camel_case_types)]
 pub enum TableType {
@@ -78,88 +79,126 @@ impl SerDe for TableType {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SchemaDesc {
-  id: u64,
-  schema_ident: String,
+pub struct SchemaInfo {
+  schema_id: u64, // globally unique id
+  schema_identifier: String,
 }
 
-impl SchemaDesc {
-  #[inline]
-  pub fn id(&self) -> u64 {
-    self.id
-  }
-
-  #[inline]
-  pub fn schema_identifier(&self) -> &str {
-    &self.schema_ident
-  }
-}
-
-impl SerDe for SchemaDesc {
-  fn serialise(&self, writer: &mut Writer) {
-    writer.write_u64(self.id);
-    writer.write_str(&self.schema_ident);
-  }
-
-  fn deserialise(reader: &mut Reader) -> Self {
-    let id = reader.read_u64();
-    let schema_ident = reader.read_str().to_owned();
-    Self { id, schema_ident }
-  }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TableDesc {
-  id: u64,
-  schema_id: u64,
-  table_ident: String,
-  table_type: TableType,
-  table_schema: Type,
-}
-
-impl TableDesc {
-  #[inline]
-  pub fn id(&self) -> u64 {
-    self.id
-  }
-
+impl SchemaInfo {
+  // Returns globally unique object id for the schema.
   #[inline]
   pub fn schema_id(&self) -> u64 {
     self.schema_id
   }
 
+  // Returns the schema identifier.
   #[inline]
-  pub fn table_identifier(&self) -> &str {
-    &self.table_ident
-  }
-
-  #[inline]
-  pub fn table_type(&self) -> TableType {
-    self.table_type
-  }
-
-  #[inline]
-  pub fn table_schema(&self) -> &Type {
-    &self.table_schema
+  pub fn schema_identifier(&self) -> &str {
+    &self.schema_identifier
   }
 }
 
-impl SerDe for TableDesc {
+impl SerDe for SchemaInfo {
   fn serialise(&self, writer: &mut Writer) {
-    writer.write_u64(self.id);
     writer.write_u64(self.schema_id);
-    writer.write_str(&self.table_ident);
+    writer.write_str(&self.schema_identifier);
+  }
+
+  fn deserialise(reader: &mut Reader) -> Self {
+    let schema_id = reader.read_u64();
+    let schema_identifier = reader.read_str().to_owned();
+    Self { schema_id, schema_identifier }
+  }
+}
+
+// Private struct that is used for serialisation/deserialisation.
+// We do not store schema identifier since it can change while schema id is unique.
+#[derive(Clone, Debug, PartialEq)]
+struct TableSerDeInfo {
+  table_id: u64, // globally unique id
+  schema_id: u64, // globally unique id
+  table_identifier: String, // unique within the schema
+  table_type: TableType,
+  table_schema: Type,
+}
+
+impl SerDe for TableSerDeInfo {
+  fn serialise(&self, writer: &mut Writer) {
+    writer.write_u64(self.table_id);
+    writer.write_u64(self.schema_id);
+    writer.write_str(&self.table_identifier);
     self.table_type.serialise(writer);
     self.table_schema.serialise(writer);
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
-    let id = reader.read_u64();
+    let table_id = reader.read_u64();
     let schema_id = reader.read_u64();
-    let table_ident = reader.read_str().to_owned();
+    let table_identifier = reader.read_str().to_owned();
     let table_type = TableType::deserialise(reader);
     let table_schema = Type::deserialise(reader);
-    Self { id, schema_id, table_ident, table_type, table_schema }
+    Self { table_id, schema_id, table_identifier, table_type, table_schema }
+  }
+}
+
+// Public version of `TableSerDeInfo`, contains schema information.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableInfo {
+  schema_id: u64,
+  schema_identifier: Rc<String>,
+  table_id: u64,
+  table_identifier: String,
+  table_type: TableType,
+  table_schema: Type,
+}
+
+impl TableInfo {
+  // Private constructor for table info.
+  fn from(schema_id: u64, schema_identifier: Rc<String>, table: TableSerDeInfo) -> Self {
+    Self {
+      schema_id: schema_id,
+      schema_identifier: schema_identifier,
+      table_id: table.table_id,
+      table_identifier: table.table_identifier,
+      table_type: table.table_type,
+      table_schema: table.table_schema,
+    }
+  }
+
+  // Returns globally unique id for the schema.
+  #[inline]
+  pub fn schema_id(&self) -> u64 {
+    self.schema_id
+  }
+
+  // Returns the schema identifier.
+  #[inline]
+  pub fn schema_identifier(&self) -> &str {
+    &self.schema_identifier
+  }
+
+  // Returns globally unique id for the table.
+  #[inline]
+  pub fn table_id(&self) -> u64 {
+    self.table_id
+  }
+
+  // Returns the table identifier.
+  #[inline]
+  pub fn table_identifier(&self) -> &str {
+    &self.table_identifier
+  }
+
+  // Returns the table type.
+  #[inline]
+  pub fn table_type(&self) -> TableType {
+    self.table_type
+  }
+
+  // Returns the table schema.
+  #[inline]
+  pub fn table_schema(&self) -> &Type {
+    &self.table_schema
   }
 }
 
@@ -197,40 +236,32 @@ fn get_system_tables(txn: &TransactionRef) -> Res<Set> {
 
 const INFORMATION_SCHEMA: &str = "INFORMATION_SCHEMA";
 
-// Assert if the current schema is information schema.
-// We don't allow any modifications in the information schema.
-fn assert_information_schema(schema_ident: &str) -> Res<()> {
-  if schema_ident == INFORMATION_SCHEMA {
-    Err(Error::OperationIsNotAllowed(format!("Cannot modify {}", INFORMATION_SCHEMA)))
-  } else {
-    Ok(())
-  }
-}
-
 // Initialise catalog and system tables.
-// This method is only called once during the database setup.
-#[inline]
+// This method must only be called once during the database setup.
 pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
-  create_set(txn, SYSTEM_SCHEMAS)?;
-  create_schema0(txn, INFORMATION_SCHEMA, false, false /* enable_assert */)?;
-  create_set(txn, SYSTEM_TABLES)?;
-  create_table0(
-    txn,
-    INFORMATION_SCHEMA,
-    "SCHEMATA",
+  create_set(&txn, SYSTEM_SCHEMAS)?;
+  create_set(&txn, SYSTEM_TABLES)?;
+
+  create_schema_internal(&txn, INFORMATION_SCHEMA.to_owned(), false)?;
+  let schema = get_schema(&txn, INFORMATION_SCHEMA)?;
+
+  create_table_internal(
+    &txn,
+    &schema,
+    "SCHEMATA".to_owned(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
       vec![
         Field::new(String::from("SCHEMA_NAME"), Type::TEXT, false),
       ]
     ),
-    false,
-    false /* enable_assert */
+    false
   )?;
-  create_table0(
-    txn,
-    INFORMATION_SCHEMA,
-    "TABLES",
+
+  create_table_internal(
+    &txn,
+    &schema,
+    "TABLES".to_owned(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
       vec![
@@ -239,186 +270,40 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
         Field::new(String::from("TABLE_TYPE"), Type::TEXT, false),
       ]
     ),
-    false,
-    false /* enable_assert */
+    false
   )?;
+
   Ok(())
-}
-
-// Internal method to create a schema.
-// Do not use it directly, assertion must be enabled.
-#[inline]
-fn create_schema0(
-  txn: &TransactionRef,
-  schema_name: &str,
-  optional: bool,
-  enable_assert: bool
-) -> Res<()> {
-  let schema_ident = to_valid_identifier(schema_name)?;
-  if enable_assert {
-    assert_information_schema(&schema_ident)?;
-  }
-
-  let set = get_system_schemas(&txn)?;
-  if set.exists(&schema_ident.as_bytes()) {
-    if !optional {
-      Err(Error::SchemaAlreadyExists(schema_ident))
-    } else {
-      Ok(()) // the schema already exists
-    }
-  } else {
-    let schema = SchemaDesc {
-      id: next_object_id(&txn),
-      schema_ident: schema_ident
-    };
-    // Serialise to store in the set.
-    let mut writer = Writer::new();
-    schema.serialise(&mut writer);
-    // Store in the sys table, the key must be the schema identifier.
-    let mut set = get_system_schemas(&txn)?;
-    set.put(&schema.schema_identifier().as_bytes(), &writer.to_vec());
-    Ok(())
-  }
 }
 
 // Catalog API: Creates schema with the provided name.
 // When `optional` is set to true, ignores the operation if the schema already exists.
 pub fn create_schema(txn: &TransactionRef, schema_name: &str, optional: bool) -> Res<()> {
-  create_schema0(txn, schema_name, optional, true /* enable_assert */)
+  let schema_identifier = to_valid_identifier(schema_name)?;
+  assert_information_schema(&schema_identifier)?;
+  create_schema_internal(&txn, schema_identifier, optional)
 }
 
-// Catalog API: Returns schema info for the name if exists.
-pub fn get_schema(txn: &TransactionRef, schema_name: &str) -> Res<SchemaDesc> {
-  let schema_ident = to_valid_identifier(schema_name)?;
+ // Catalog API: Returns schema info for the name if exists.
+pub fn get_schema(txn: &TransactionRef, schema_name: &str) -> Res<SchemaInfo> {
+  let schema_identifier = to_valid_identifier(schema_name)?;
   let set = get_system_schemas(&txn)?;
-  match set.get(&schema_ident.as_bytes()) {
-    Some(data) => {
-      let mut reader = Reader::from_buf(data);
-      Ok(SchemaDesc::deserialise(&mut reader))
-    },
-    None => Err(Error::SchemaDoesNotExist(schema_ident)),
-  }
+  get_schema_internal(&set, schema_identifier)
 }
 
 // Catalog API: Returns the list of all schemas in the catalog.
-pub fn list_schemas(txn: &TransactionRef) -> Res<SchemaDescIter> {
+pub fn list_schemas(txn: &TransactionRef) -> Res<SchemaInfoIter> {
   let mut set = get_system_schemas(&txn)?;
-  let iter = set.list(None, None);
-  Ok(SchemaDescIter { iter })
-}
-
-// Internal method to drop a schema.
-// Do not use it directly, assertion must be enabled.
-#[inline]
-fn drop_schema0(
-  txn: &TransactionRef,
-  schema_name: &str,
-  cascade: bool,
-  optional: bool,
-  enable_assert: bool
-) -> Res<()> {
-  let schema_ident = to_valid_identifier(schema_name)?;
-  if enable_assert {
-    assert_information_schema(&schema_ident)?;
-  }
-
-  let mut set = get_system_schemas(&txn)?;
-  if set.exists(&schema_ident.as_bytes()) {
-    // If the schema contains at least one table, we cannot drop it without "cascade" property.
-    let has_tables;
-    {
-      let mut iter = list_tables(&txn, &schema_ident)?;
-      has_tables = iter.next().is_some();
-    }
-
-    if has_tables && !cascade {
-      Err(Error::SchemaIsNotEmpty(schema_ident))
-    } else {
-      let mut tables = Vec::new();
-      {
-        let mut iter = list_tables(&txn, &schema_ident)?;
-        while let Some(table) = iter.next() {
-          tables.push(table);
-        }
-      }
-      // The "tables" vector must be empty in the case of an empty schema.
-      assert!(has_tables || tables.len() == 0);
-
-      // Drop all of the tables in the schema.
-      for table in &tables {
-        drop_table_internal(&txn, &table)?;
-      }
-      // Drop the schema.
-      set.del(&schema_ident.as_bytes());
-      Ok(())
-    }
-  } else {
-    if !optional {
-      Err(Error::SchemaDoesNotExist(schema_ident))
-    } else {
-      Ok(())
-    }
-  }
+  list_schemas_internal(&mut set)
 }
 
 // Catalog API: Drops the schema.
 // If `optional` is set to true, no operation is performed if the schema does not exist.
 // If `cascade` is set to true, everything in the schema is also dropped (both metadata and data).
-pub fn drop_schema(
-  txn: &TransactionRef,
-  schema_name: &str,
-  cascade: bool,
-  optional: bool
-) -> Res<()> {
-  drop_schema0(txn, schema_name, cascade, optional, true /* enable_assert */)
-}
-
-// Internal method to create a table.
-// Do not use it directly, assertion must be enabled.
-#[inline]
-fn create_table0(
-  txn: &TransactionRef,
-  schema_name: &str,
-  table_name: &str,
-  table_type: TableType,
-  table_schema: Type,
-  optional: bool,
-  enable_assert: bool
-) -> Res<()> {
-  let schema = get_schema(txn, schema_name)?;
-  if enable_assert {
-    assert_information_schema(&schema.schema_identifier())?;
-  }
-
-  let table_ident = to_valid_identifier(table_name)?;
-  let table_key = to_unique_table_key(schema.id(), &table_ident);
-
-  let mut set = get_system_tables(&txn)?;
-  if set.exists(&table_key) {
-    if !optional {
-      Err(Error::TableAlreadyExists(schema.schema_identifier().to_owned(), table_ident))
-    } else {
-      Ok(()) // the table already exists
-    }
-  } else {
-    if !table_schema.is_struct() {
-      return Err(Error::TableInvalidSchema(format!("Invalid table schema: {:?}", table_schema)));
-    }
-
-    let table = TableDesc {
-      id: next_object_id(&txn),
-      schema_id: schema.id(),
-      table_ident: table_ident,
-      table_type: table_type,
-      table_schema: table_schema,
-    };
-    // Serialise to store in the set.
-    let mut writer = Writer::new();
-    table.serialise(&mut writer);
-    // Store in the sys table, the key must be the "schema_id.table".
-    set.put(&table_key, &writer.to_vec());
-    Ok(())
-  }
+pub fn drop_schema(txn: &TransactionRef, schema_name: &str, cascade: bool, optional: bool) -> Res<()> {
+  let schema_identifier = to_valid_identifier(schema_name)?;
+  assert_information_schema(&schema_identifier)?;
+  drop_schema_internal(&txn, schema_identifier, cascade, optional)
 }
 
 // Catalog API: Creates a table with the provided schema name and table name.
@@ -431,146 +316,236 @@ pub fn create_table(
   table_schema: Type,
   optional: bool
 ) -> Res<()> {
-  create_table0(
-    txn,
-    schema_name,
-    table_name,
-    TableType::TABLE,
-    table_schema,
-    optional,
-    true /* enable_assert */
-  )
+  let schema = get_schema(&txn, schema_name)?;
+  assert_information_schema(&schema.schema_identifier)?;
+  let table_identifier = to_valid_identifier(table_name)?;
+  create_table_internal(&txn, &schema, table_identifier, TableType::TABLE, table_schema, optional)
 }
 
 // Catalog API: Returns the table description for "schema.table".
-pub fn get_table(txn: &TransactionRef, schema_name: &str, table_name: &str) -> Res<TableDesc> {
-  let schema = get_schema(txn, schema_name)?;
-  let table_ident = to_valid_identifier(table_name)?;
-  let table_key = to_unique_table_key(schema.id(), &table_ident);
-
+pub fn get_table(txn: &TransactionRef, schema_name: &str, table_name: &str) -> Res<TableInfo> {
+  let schema = get_schema(&txn, schema_name)?;
+  let table_identifier = to_valid_identifier(table_name)?;
   let set = get_system_tables(&txn)?;
-  match set.get(&table_key) {
-    Some(data) => {
-      let mut reader = Reader::from_buf(data);
-      Ok(TableDesc::deserialise(&mut reader))
-    },
-    None => Err(Error::TableDoesNotExist(schema.schema_identifier().to_owned(), table_ident)),
-  }
+  get_table_internal(&set, schema, table_identifier)
 }
 
 // Catalog API: Returns the list of all tables in the provided schema.
-pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<TableDescIter> {
-  let schema = get_schema(txn, schema_name)?;
+pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<TableInfoIter> {
+  let schema = get_schema(&txn, schema_name)?;
   let mut set = get_system_tables(&txn)?;
-
-  // When listing, we use a dummy empty table name as the first key to locate the schema's tables.
-  let table_key = to_unique_table_key(schema.id(), "");
-
-  let iter = set.list(Some(&table_key), None);
-  Ok(TableDescIter { schema_id: schema.id(), iter: iter })
-}
-
-// Internal method to drop the table if the table exists.
-// The method also drops the associated data if it exists.
-fn drop_table_internal(txn: &TransactionRef, table: &TableDesc) -> Res<()> {
-  // If the table has just been created, there may not be any set for the data yet.
-  // Ignore if that is the case.
-  if let Some(set) = get_set(&txn, &u64_u8!(table.id())) {
-    drop_set(&txn, set);
-  }
-  // Delete table metadata.
-  let table_key = to_unique_table_key(table.schema_id(), &table.table_identifier());
-  let mut set = get_system_tables(&txn)?;
-  set.del(&table_key);
-  Ok(())
-}
-
-// Internal method to drop a table.
-// Do not use it directly, assertion must be enabled.
-#[inline]
-fn drop_table0(
-  txn: &TransactionRef,
-  schema_name: &str,
-  table_name: &str,
-  optional: bool,
-  enable_assert: bool
-) -> Res<()> {
-  let schema = get_schema(txn, schema_name)?;
-  if enable_assert {
-    assert_information_schema(&schema.schema_identifier())?;
-  }
-
-  let table_ident = to_valid_identifier(table_name)?;
-  let table_key = to_unique_table_key(schema.id(), &table_ident);
-
-  let set = get_system_tables(&txn)?;
-  let table_opt = match set.get(&table_key) {
-    Some(data) => {
-      let mut reader = Reader::from_buf(data);
-      Some(TableDesc::deserialise(&mut reader))
-    },
-    None => None,
-  };
-
-  if let Some(table) = table_opt {
-    drop_table_internal(&txn, &table)
-  } else {
-    if !optional {
-      Err(Error::TableDoesNotExist(schema.schema_identifier().to_owned(), table_ident))
-    } else {
-      Ok(())
-    }
-  }
+  list_tables_internal(&mut set, &schema)
 }
 
 // Catalog API: Drops a table for the provided schema and table names.
 // The schema must exist.
 // If `optional` is set to true, the operation is ignored if the table does not exist.
-pub fn drop_table(
-  txn: &TransactionRef,
-  schema_name: &str,
-  table_name: &str,
-  optional: bool
-) -> Res<()> {
-  drop_table0(txn, schema_name, table_name, optional, true /* enable_assert */)
+pub fn drop_table(txn: &TransactionRef, schema_name: &str, table_name: &str, optional: bool) -> Res<()> {
+  let schema = get_schema(&txn, schema_name)?;
+  assert_information_schema(&schema.schema_identifier)?;
+  let table_identifier = to_valid_identifier(table_name)?;
+  drop_table_internal(&txn, &schema, table_identifier, optional)
 }
 
-// Iterator for `SchemaDesc`.
-pub struct SchemaDescIter {
+// Assert if the current schema is information schema.
+// We don't allow any modifications in the information schema.
+#[inline]
+fn assert_information_schema(schema_identifier: &str) -> Res<()> {
+  if schema_identifier == INFORMATION_SCHEMA {
+    Err(Error::OperationIsNotAllowed(format!("Cannot modify {}", INFORMATION_SCHEMA)))
+  } else {
+    Ok(())
+  }
+}
+
+#[inline]
+fn create_schema_internal(txn: &TransactionRef, schema_identifier: String, optional: bool) -> Res<()> {
+  let mut set = get_system_schemas(&txn)?;
+  if set.exists(&schema_identifier.as_bytes()) {
+    if !optional {
+      Err(Error::SchemaAlreadyExists(schema_identifier))
+    } else {
+      Ok(()) // the schema already exists
+    }
+  } else {
+    let schema = SchemaInfo {
+      schema_id: next_object_id(&txn),
+      schema_identifier: schema_identifier
+    };
+    // Serialise to store in the set.
+    let mut writer = Writer::new();
+    schema.serialise(&mut writer);
+    // Store in the sys table, the key must be the schema identifier.
+    set.put(&schema.schema_identifier.as_bytes(), &writer.to_vec());
+    Ok(())
+  }
+}
+
+#[inline]
+fn get_schema_internal(set: &Set, schema_identifier: String) -> Res<SchemaInfo> {
+  match set.get(&schema_identifier.as_bytes()) {
+    Some(data) => {
+      let mut reader = Reader::from_buf(data);
+      Ok(SchemaInfo::deserialise(&mut reader))
+    },
+    None => Err(Error::SchemaDoesNotExist(schema_identifier)),
+  }
+}
+
+#[inline]
+fn list_schemas_internal(set: &mut Set) -> Res<SchemaInfoIter> {
+  let iter = set.list(None, None);
+  Ok(SchemaInfoIter { iter })
+}
+
+// Iterator for `SchemaInfo`.
+pub struct SchemaInfoIter {
   iter: BTreeIter,
 }
 
-impl Iterator for SchemaDescIter {
-  type Item = SchemaDesc;
+impl Iterator for SchemaInfoIter {
+  type Item = SchemaInfo;
 
   fn next(&mut self) -> Option<Self::Item> {
     match self.iter.next() {
       Some((_key, data)) => {
         let mut reader = Reader::from_buf(data);
-        Some(SchemaDesc::deserialise(&mut reader))
+        Some(SchemaInfo::deserialise(&mut reader))
       },
       None => None,
     }
   }
 }
 
-// Iterator for `TableDesc`.
-pub struct TableDescIter {
+#[inline]
+fn drop_schema_internal(
+  txn: &TransactionRef,
+  schema_identifier: String,
+  cascade: bool,
+  optional: bool
+) -> Res<()> {
+  let mut set = get_system_schemas(&txn)?;
+  let schema = match get_schema_internal(&set, schema_identifier) {
+    Ok(schema) => schema,
+    Err(err) => {
+      return if !optional { Err(err) } else { Ok(()) };
+    },
+  };
+
+  // Drop all of the tables in the schema.
+  let mut tables = Vec::new();
+  {
+    let mut table_set = get_system_tables(&txn)?;
+    let mut iter = list_tables_internal(&mut table_set, &schema)?;
+    while let Some(table) = iter.next() {
+      // If the schema contains at least one table, we cannot drop it without "cascade" property.
+      if !cascade {
+        return Err(Error::SchemaIsNotEmpty(schema.schema_identifier));
+      }
+      tables.push(table)
+    }
+  }
+
+  for table in tables {
+    drop_table_internal(&txn, &schema, table.table_identifier, false)?;
+  }
+
+  // Drop the schema.
+  set.del(schema.schema_identifier.as_bytes());
+  Ok(())
+}
+
+#[inline]
+fn create_table_internal(
+  txn: &TransactionRef,
+  schema: &SchemaInfo,
+  table_identifier: String,
+  table_type: TableType,
+  table_schema: Type,
+  optional: bool
+) -> Res<()> {
+  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
+
+  let mut set = get_system_tables(&txn)?;
+  if set.exists(&table_key) {
+    if !optional {
+      Err(Error::TableAlreadyExists(schema.schema_identifier.to_owned(), table_identifier))
+    } else {
+      Ok(()) // the table already exists
+    }
+  } else {
+    if !table_schema.is_struct() {
+      return Err(Error::TableInvalidSchema(format!("Invalid table schema: {:?}", table_schema)));
+    }
+
+    let table = TableSerDeInfo {
+      table_id: next_object_id(&txn),
+      schema_id: schema.schema_id,
+      table_identifier: table_identifier,
+      table_type: table_type,
+      table_schema: table_schema,
+    };
+    // Serialise to store in the set.
+    let mut writer = Writer::new();
+    table.serialise(&mut writer);
+    // Store in the sys table, the key must be the "schema_id.table".
+    set.put(&table_key, &writer.to_vec());
+    Ok(())
+  }
+}
+
+#[inline]
+fn get_table_internal(set: &Set, schema: SchemaInfo, table_identifier: String) -> Res<TableInfo> {
+  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
+  match set.get(&table_key) {
+    Some(data) => {
+      let mut reader = Reader::from_buf(data);
+      let table = TableSerDeInfo::deserialise(&mut reader);
+      Ok(TableInfo::from(schema.schema_id, Rc::new(schema.schema_identifier), table))
+    },
+    None => {
+      Err(
+        Error::TableDoesNotExist(
+          schema.schema_identifier,
+          table_identifier
+        )
+      )
+    },
+  }
+}
+
+#[inline]
+fn list_tables_internal(set: &mut Set, schema: &SchemaInfo) -> Res<TableInfoIter> {
+  // When listing, we use a dummy empty table name as the first key to locate the schema's tables.
+  let start_table_key = to_unique_table_key(schema.schema_id, "");
+  let iter = set.list(Some(&start_table_key), None);
+  Ok(
+    TableInfoIter {
+      schema_id: schema.schema_id,
+      schema_identifier: Rc::new(schema.schema_identifier.to_owned()),
+      iter: iter
+    }
+  )
+}
+
+// Iterator for `TableInfo`.
+pub struct TableInfoIter {
   schema_id: u64,
+  schema_identifier: Rc<String>, // must be Rc to clone for each table
   iter: BTreeIter,
 }
 
-impl Iterator for TableDescIter {
-  type Item = TableDesc;
+impl Iterator for TableInfoIter {
+  type Item = TableInfo;
 
   fn next(&mut self) -> Option<Self::Item> {
     match self.iter.next() {
       Some((_key, data)) => {
         let mut reader = Reader::from_buf(data);
-        let table = TableDesc::deserialise(&mut reader);
+        let table = TableSerDeInfo::deserialise(&mut reader);
         // We need to stop our search when the schema changes.
-        if table.schema_id() == self.schema_id {
-          Some(table)
+        if table.schema_id == self.schema_id {
+          Some(TableInfo::from(self.schema_id, self.schema_identifier.clone() /* Rc<String> */, table))
         } else {
           // We have seen all of the tables with this schema id.
           None
@@ -578,6 +553,38 @@ impl Iterator for TableDescIter {
       },
       None => None,
     }
+  }
+}
+
+#[inline]
+fn drop_table_internal(
+  txn: &TransactionRef,
+  schema: &SchemaInfo,
+  table_identifier: String,
+  optional: bool
+) -> Res<()> {
+  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
+
+  let mut set = get_system_tables(&txn)?;
+  match set.get(&table_key) {
+    Some(data) => {
+      let mut reader = Reader::from_buf(data);
+      let table = TableSerDeInfo::deserialise(&mut reader);
+      // Delete the content of the table if it exists.
+      if let Some(set) = get_set(&txn, &u64_u8!(table.table_id)) {
+        drop_set(&txn, set);
+      }
+      // Delete table metadata.
+      set.del(&table_key);
+      Ok(())
+    },
+    None => {
+      if !optional {
+        Err(Error::TableDoesNotExist(schema.schema_identifier.to_owned(), table_identifier))
+      } else {
+        Ok(())
+      }
+    },
   }
 }
 
@@ -635,42 +642,42 @@ pub mod tests {
 
   #[test]
   fn test_catalog_schema_desc_serde() {
-    fn serde(schema: &SchemaDesc) -> SchemaDesc {
+    fn serde(schema: &SchemaInfo) -> SchemaInfo {
       let mut writer = Writer::new();
       schema.serialise(&mut writer);
       let mut reader = Reader::from_buf(writer.to_vec());
-      SchemaDesc::deserialise(&mut reader)
+      SchemaInfo::deserialise(&mut reader)
     }
 
-    let schema = SchemaDesc { id: 0, schema_ident: String::from("") };
+    let schema = SchemaInfo { schema_id: 0, schema_identifier: String::from("") };
     assert_eq!(serde(&schema), schema);
 
-    let schema = SchemaDesc { id: 123, schema_ident: String::from("ABC") };
+    let schema = SchemaInfo { schema_id: 123, schema_identifier: String::from("ABC") };
     assert_eq!(serde(&schema), schema);
   }
 
   #[test]
   fn test_catalog_table_desc_serde() {
-    fn serde(table: &TableDesc) -> TableDesc {
+    fn serde(table: &TableSerDeInfo) -> TableSerDeInfo {
       let mut writer = Writer::new();
       table.serialise(&mut writer);
       let mut reader = Reader::from_buf(writer.to_vec());
-      TableDesc::deserialise(&mut reader)
+      TableSerDeInfo::deserialise(&mut reader)
     }
 
-    let table = TableDesc {
-      id: 0,
+    let table = TableSerDeInfo {
+      table_id: 0,
       schema_id: 0,
-      table_ident: String::from(""),
+      table_identifier: String::from(""),
       table_type: TableType::SYSTEM_VIEW,
       table_schema: Type::STRUCT(vec![]),
     };
     assert_eq!(serde(&table), table);
 
-    let table = TableDesc {
-      id: 123,
+    let table = TableSerDeInfo {
+      table_id: 123,
       schema_id: 234,
-      table_ident: String::from("TEST"),
+      table_identifier: String::from("TEST"),
       table_type: TableType::TABLE,
       table_schema: Type::STRUCT(
         vec![
@@ -699,16 +706,16 @@ pub mod tests {
     // All system table must be created.
     dbc.with_txn(true, |txn| {
       let schema = get_schema(&txn, INFORMATION_SCHEMA).unwrap();
-      assert_eq!(schema.id(), 0);
+      assert_eq!(schema.schema_id(), 0);
       assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
 
       let table = get_table(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
-      assert_eq!(table.id(), 1);
+      assert_eq!(table.table_id(), 1);
       assert_eq!(table.schema_id(), 0);
       assert_eq!(table.table_identifier(), "SCHEMATA");
 
       let table = get_table(&txn, INFORMATION_SCHEMA, "TABLES").unwrap();
-      assert_eq!(table.id(), 2);
+      assert_eq!(table.table_id(), 2);
       assert_eq!(table.schema_id(), 0);
       assert_eq!(table.table_identifier(), "TABLES");
     });
@@ -995,7 +1002,7 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       let table = get_table(&txn, "test_schema", "table").unwrap();
-      assert_eq!(table.id(), 4);
+      assert_eq!(table.table_id(), 4);
       assert_eq!(table.schema_id(), 3);
       assert_eq!(table.table_identifier(), "TABLE");
       assert_eq!(table.table_type(), TableType::TABLE);
