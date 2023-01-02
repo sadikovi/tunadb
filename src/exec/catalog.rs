@@ -1,8 +1,8 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
+use crate::common::types::{Field, Fields, Type};
 use crate::common::util::to_valid_identifier;
-use crate::exec::types::{Field, Type};
 use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
 
@@ -218,9 +218,11 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     "SCHEMATA".to_string(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
-      vec![
-        Field::new(String::from("SCHEMA_NAME"), Type::TEXT, false),
-      ]
+      Fields::new(
+        vec![
+          Field::new("SCHEMA_NAME", Type::TEXT, false)?,
+        ]
+      )?
     ),
     false
   )?;
@@ -231,11 +233,13 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     "TABLES".to_string(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
-      vec![
-        Field::new(String::from("TABLE_SCHEMA"), Type::TEXT, false),
-        Field::new(String::from("TABLE_NAME"), Type::TEXT, false),
-        Field::new(String::from("TABLE_TYPE"), Type::TEXT, false),
-      ]
+      Fields::new(
+        vec![
+          Field::new("TABLE_SCHEMA", Type::TEXT, false)?,
+          Field::new("TABLE_NAME", Type::TEXT, false)?,
+          Field::new("TABLE_TYPE", Type::TEXT, false)?,
+        ]
+      )?
     ),
     false
   )?;
@@ -580,6 +584,11 @@ pub mod tests {
     dbc
   }
 
+  // Returns an empty schema for tests.
+  fn empty_schema() -> Type {
+    Type::STRUCT(Fields::new(vec![]).unwrap())
+  }
+
   #[test]
   fn test_catalog_to_unique_table_key() {
     assert_eq!(to_unique_table_key(0, ""), vec![0, 0, 0, 0, 0, 0, 0, 0]);
@@ -631,7 +640,7 @@ pub mod tests {
       schema_id: 0,
       table_identifier: String::from(""),
       table_type: TableType::SYSTEM_VIEW,
-      table_schema: Type::STRUCT(vec![]),
+      table_schema: empty_schema(),
     };
     assert_eq!(serde(&table), table);
 
@@ -641,11 +650,13 @@ pub mod tests {
       table_identifier: String::from("TEST"),
       table_type: TableType::TABLE,
       table_schema: Type::STRUCT(
-        vec![
-          Field::new("c1".to_string(), Type::INT, false),
-          Field::new("c2".to_string(), Type::TEXT, false),
-          Field::new("c3".to_string(), Type::STRUCT(vec![]), true),
-        ]
+        Fields::new(
+          vec![
+            Field::new("c1", Type::INT, false).unwrap(),
+            Field::new("c2", Type::TEXT, false).unwrap(),
+            Field::new("c3", empty_schema(), true).unwrap(),
+          ]
+        ).unwrap()
       ),
     };
     assert_eq!(serde(&table), table);
@@ -701,11 +712,11 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", Type::STRUCT(vec![]), false),
+        create_table(&txn, INFORMATION_SCHEMA, "test", empty_schema(), false),
         err
       );
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", Type::STRUCT(vec![]), true),
+        create_table(&txn, INFORMATION_SCHEMA, "test", empty_schema(), true),
         err
       );
     });
@@ -870,9 +881,9 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "test_schema", "table2", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "test_schema", "table3", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "test_schema", "table1", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table2", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table3", empty_schema(), false).unwrap();
     });
 
     // Drop schema with tables is not allowed.
@@ -908,7 +919,7 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table", Type::STRUCT(vec![]), false),
+        create_table(&txn, "test_schema", "table", empty_schema(), false),
         Err(Error::SchemaDoesNotExist("TEST_SCHEMA".to_string()))
       );
     });
@@ -921,7 +932,7 @@ pub mod tests {
     // Create a new table.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "test_schema", "table1", empty_schema(), false).unwrap();
     });
     dbc.with_txn(true, |txn| {
       let table = get_table(&txn, "test_schema", "table1").unwrap();
@@ -932,18 +943,18 @@ pub mod tests {
     // Create table with the same name.
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), false),
+        create_table(&txn, "test_schema", "table1", empty_schema(), false),
         Err(Error::TableAlreadyExists("TEST_SCHEMA".to_string(), "TABLE1".to_string()))
       );
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), true),
+        create_table(&txn, "test_schema", "table1", empty_schema(), true),
         Ok(())
       );
     });
 
     // Rollback - table should not be created.
     dbc.with_txn(false, |txn| {
-      create_table(&txn, "test_schema", "table2", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "test_schema", "table2", empty_schema(), false).unwrap();
       assert!(get_table(&txn, "test_schema", "table2").is_ok());
       txn.borrow_mut().rollback();
     });
@@ -958,7 +969,7 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "test_schema", "table", empty_schema(), false).unwrap();
     });
 
     dbc.with_txn(true, |txn| {
@@ -967,7 +978,7 @@ pub mod tests {
       assert_eq!(table.schema_id(), 3);
       assert_eq!(table.table_identifier(), "TABLE");
       assert_eq!(table.table_type(), TableType::TABLE);
-      assert_eq!(table.table_schema(), &Type::STRUCT(vec![]));
+      assert_eq!(table.table_schema(), &empty_schema());
     });
   }
 
@@ -978,14 +989,14 @@ pub mod tests {
     // Create different schemas and tables.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema1", false).unwrap();
-      create_table(&txn, "schema1", "table1", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "schema1", "table2", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "schema1", "table3", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema1", "table1", empty_schema(), false).unwrap();
+      create_table(&txn, "schema1", "table2", empty_schema(), false).unwrap();
+      create_table(&txn, "schema1", "table3", empty_schema(), false).unwrap();
 
       create_schema(&txn, "schema2", false).unwrap();
-      create_table(&txn, "schema2", "table4", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "schema2", "table5", Type::STRUCT(vec![]), false).unwrap();
-      create_table(&txn, "schema2", "table6", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema2", "table4", empty_schema(), false).unwrap();
+      create_table(&txn, "schema2", "table5", empty_schema(), false).unwrap();
+      create_table(&txn, "schema2", "table6", empty_schema(), false).unwrap();
     });
 
     // Verify that we only return tables for the selected schema.
@@ -1019,14 +1030,14 @@ pub mod tests {
 
     // Drop table in the same transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table1", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema", "table1", empty_schema(), false).unwrap();
       drop_table(&txn, "schema", "table1", false).unwrap();
       assert!(get_table(&txn, "schema", "table1").is_err());
     });
 
     // Drop table in a separate transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table2", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema", "table2", empty_schema(), false).unwrap();
     });
     dbc.with_txn(true, |txn| {
       drop_table(&txn, "schema", "table2", false).unwrap();
@@ -1044,7 +1055,7 @@ pub mod tests {
 
     // Rollback - table is not dropped.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table4", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema", "table4", empty_schema(), false).unwrap();
     });
     dbc.with_txn(false, |txn| {
       drop_table(&txn, "schema", "table4", false).unwrap();
@@ -1063,7 +1074,7 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema", false).unwrap();
-      create_table(&txn, "schema", "table", Type::STRUCT(vec![]), false).unwrap();
+      create_table(&txn, "schema", "table", empty_schema(), false).unwrap();
     });
 
     // Newly created table should not have a set.

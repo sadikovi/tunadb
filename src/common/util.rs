@@ -7,7 +7,7 @@ pub fn to_valid_identifier(name: &str) -> Res<String> {
   if name.len() == 0 {
     return Err(Error::InvalidIdentifier(format!("Empty identifier")));
   } else if name.len() > 128 {
-    return Err(Error::InvalidIdentifier(format!("Identifier is too long ({})", name.len())));
+    return Err(Error::InvalidIdentifier(format!("Identifier '{}' is too long ({})", name, name.len())));
   }
 
   let arr = name.as_bytes();
@@ -19,7 +19,7 @@ pub fn to_valid_identifier(name: &str) -> Res<String> {
       b >= b'a' && b <= b'z';
 
     if !is_valid {
-      return Err(Error::InvalidIdentifier(format!("Identifier {} contains illegal characters", name)));
+      return Err(Error::InvalidIdentifier(format!("Identifier '{}' contains illegal characters", name)));
     }
   }
 
@@ -28,7 +28,7 @@ pub fn to_valid_identifier(name: &str) -> Res<String> {
     arr[0] >= b'a' && arr[0] <= b'z';
 
   if !starts_with_letter {
-    return Err(Error::InvalidIdentifier(format!("Identifier {} must start with a letter", name)));
+    return Err(Error::InvalidIdentifier(format!("Identifier '{}' must start with a letter", name)));
   }
 
   Ok(name.to_uppercase())

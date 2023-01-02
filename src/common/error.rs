@@ -7,6 +7,7 @@ pub type Res<T> = Result<T, Error>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
   InvalidIdentifier(String /* msg */),
+  DuplicateFieldName(String /* field name */),
   SchemaAlreadyExists(String /* schema */),
   SchemaDoesNotExist(String /* schema */),
   SchemaIsNotEmpty(String /* schema */),
@@ -25,6 +26,7 @@ impl Error {
   pub fn msg(&self) -> &str {
     match self {
       Error::InvalidIdentifier(msg) => msg.as_ref(),
+      Error::DuplicateFieldName(field_name) => field_name.as_ref(),
       Error::SchemaAlreadyExists(schema) => schema.as_ref(),
       Error::SchemaDoesNotExist(schema) => schema.as_ref(),
       Error::SchemaIsNotEmpty(schema) => schema.as_ref(),

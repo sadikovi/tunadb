@@ -125,4 +125,5 @@ pub mod lru;
 pub mod row;
 pub mod serde;
 pub mod trees;
+pub mod types;
 pub mod util;
