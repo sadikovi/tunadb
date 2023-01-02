@@ -1,43 +1,10 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
+use crate::common::util::to_valid_identifier;
 use crate::exec::types::{Field, Type};
 use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
-
-// Returns a valid identifier that is used throughout the database.
-// The identifier conforms to [A-Za-z][A-Za-z0-9_] pattern.
-#[inline]
-fn to_valid_identifier(name: &str) -> Res<String> {
-  if name.len() == 0 {
-    return Err(Error::InvalidIdentifier(format!("Empty identifier")));
-  } else if name.len() > 128 {
-    return Err(Error::InvalidIdentifier(format!("Identifier is too long ({})", name.len())));
-  }
-
-  let arr = name.as_bytes();
-  for &b in arr {
-    let is_valid =
-      b >= b'0' && b <= b'9' ||
-      b >= b'A' && b <= b'Z' ||
-      b == b'_' ||
-      b >= b'a' && b <= b'z';
-
-    if !is_valid {
-      return Err(Error::InvalidIdentifier(format!("Identifier {} contains illegal characters", name)));
-    }
-  }
-
-  let starts_with_letter =
-    arr[0] >= b'A' && arr[0] <= b'Z' ||
-    arr[0] >= b'a' && arr[0] <= b'z';
-
-  if !starts_with_letter {
-    return Err(Error::InvalidIdentifier(format!("Identifier {} must start with a letter", name)));
-  }
-
-  Ok(name.to_uppercase())
-}
 
 // Returns a unique table key to store in the set.
 // This allows us to locate a table using "exists" and "get" API while still being able to rename
@@ -347,6 +314,17 @@ pub fn drop_table(txn: &TransactionRef, schema_name: &str, table_name: &str, opt
   drop_table_internal(&txn, &schema, table_identifier, optional)
 }
 
+// Catalog API: Returns table data.
+pub fn get_table_data(txn: &TransactionRef, table: &TableInfo) -> Option<Set> {
+  get_set(&txn, &u64_u8!(table.table_id))
+}
+
+// Catalog API: Creates a new table data set.
+// The method returns an error if the set already exists so use `get_table_data` to check first.
+pub fn create_table_data(txn: &TransactionRef, table: &TableInfo) -> Res<Set> {
+  create_set(&txn, &u64_u8!(table.table_id))
+}
+
 // Assert if the current schema is information schema.
 // We don't allow any modifications in the information schema.
 #[inline]
@@ -600,29 +578,6 @@ pub mod tests {
       init_catalog(&txn).unwrap();
     });
     dbc
-  }
-
-  #[test]
-  fn test_catalog_to_valid_identifier() {
-    // Invalid values.
-    assert!(to_valid_identifier("").is_err());
-    assert!(to_valid_identifier("_").is_err());
-    assert!(to_valid_identifier("01234").is_err());
-    assert!(to_valid_identifier("abc def").is_err());
-    assert!(to_valid_identifier("ABC DEF").is_err());
-    assert!(to_valid_identifier("_123").is_err());
-    assert!(to_valid_identifier("_abc").is_err());
-    assert!(to_valid_identifier("1abc").is_err());
-    assert!(to_valid_identifier(" abc").is_err());
-    assert!(to_valid_identifier(&"a".repeat(129)).is_err());
-
-    // Valid values.
-    assert_eq!(to_valid_identifier("summary"), Ok("SUMMARY".to_owned()));
-    assert_eq!(to_valid_identifier("s123456"), Ok("S123456".to_owned()));
-    assert_eq!(to_valid_identifier("s1_2_3_4"), Ok("S1_2_3_4".to_owned()));
-    assert_eq!(to_valid_identifier("aBcDeF_123"), Ok("ABCDEF_123".to_owned()));
-    assert_eq!(to_valid_identifier("s"), Ok("S".to_owned()));
-    assert!(to_valid_identifier(&"a".repeat(128)).is_ok());
   }
 
   #[test]
@@ -1098,6 +1053,42 @@ pub mod tests {
     });
     dbc.with_txn(true, |txn| {
       assert!(get_table(&txn, "schema", "table4").is_ok());
+    });
+  }
+
+  #[test]
+  fn test_catalog_table_data() {
+    let mut dbc = init_db();
+
+    // Setup.
+    dbc.with_txn(true, |txn| {
+      create_schema(&txn, "schema", false).unwrap();
+      create_table(&txn, "schema", "table", Type::STRUCT(vec![]), false).unwrap();
+    });
+
+    // Newly created table should not have a set.
+    dbc.with_txn(true, |txn| {
+      let info = get_table(&txn, "schema", "table").unwrap();
+      let set = get_table_data(&txn, &info);
+      assert!(set.is_none());
+    });
+
+    // Create a set for a table.
+    dbc.with_txn(true, |txn| {
+      let info = get_table(&txn, "schema", "table").unwrap();
+      let set = create_table_data(&txn, &info);
+      assert!(set.is_ok());
+
+      // Set exists in the transaction.
+      let mut set = get_table_data(&txn, &info).unwrap();
+      set.put(&[1], &[2]);
+    });
+
+    // Get the set for an existing table.
+    dbc.with_txn(true, |txn| {
+      let info = get_table(&txn, "schema", "table").unwrap();
+      let set = get_table_data(&txn, &info);
+      assert!(set.is_some());
     });
   }
 }
