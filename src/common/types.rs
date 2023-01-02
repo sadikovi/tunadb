@@ -27,6 +27,15 @@ impl Type {
       _ => false,
     }
   }
+
+  // Returns the number of fields in the type.
+  #[inline]
+  pub fn num_fields(&self) -> usize {
+    match self {
+      Type::STRUCT(ref fields) => fields.get().len(),
+      _ => 0,
+    }
+  }
 }
 
 impl SerDe for Type {
@@ -222,6 +231,33 @@ mod tests {
       ).unwrap(),
     ];
     test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields).unwrap()));
+  }
+
+  #[test]
+  fn test_types_is_struct() {
+    assert_eq!(Type::INT.is_struct(), false);
+    assert_eq!(Type::BIGINT.is_struct(), false);
+    assert_eq!(Type::TEXT.is_struct(), false);
+    assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).is_struct(), true);
+  }
+
+  #[test]
+  fn test_types_num_fields() {
+    assert_eq!(Type::INT.num_fields(), 0);
+    assert_eq!(Type::BIGINT.num_fields(), 0);
+    assert_eq!(Type::TEXT.num_fields(), 0);
+    assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).num_fields(), 0);
+    assert_eq!(
+      Type::STRUCT(
+        Fields::new(
+          vec![
+            Field::new("a", Type::INT, false).unwrap(),
+            Field::new("b", Type::TEXT, false).unwrap(),
+          ]
+        ).unwrap()
+      ).num_fields(),
+      2
+    );
   }
 
   #[test]
