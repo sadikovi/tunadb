@@ -73,7 +73,7 @@ impl SerDe for SchemaInfo {
 
   fn deserialise(reader: &mut Reader) -> Self {
     let schema_id = reader.read_u64();
-    let schema_identifier = reader.read_str().to_owned();
+    let schema_identifier = reader.read_str().to_string();
     Self { schema_id, schema_identifier }
   }
 }
@@ -101,7 +101,7 @@ impl SerDe for TableSerDeInfo {
   fn deserialise(reader: &mut Reader) -> Self {
     let table_id = reader.read_u64();
     let schema_id = reader.read_u64();
-    let table_identifier = reader.read_str().to_owned();
+    let table_identifier = reader.read_str().to_string();
     let table_type = TableType::deserialise(reader);
     let table_schema = Type::deserialise(reader);
     Self { table_id, schema_id, table_identifier, table_type, table_schema }
@@ -209,13 +209,13 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_set(&txn, SYSTEM_SCHEMAS)?;
   create_set(&txn, SYSTEM_TABLES)?;
 
-  create_schema_internal(&txn, INFORMATION_SCHEMA.to_owned(), false)?;
+  create_schema_internal(&txn, INFORMATION_SCHEMA.to_string(), false)?;
   let schema = get_schema(&txn, INFORMATION_SCHEMA)?;
 
   create_table_internal(
     &txn,
     &schema,
-    "SCHEMATA".to_owned(),
+    "SCHEMATA".to_string(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
       vec![
@@ -228,7 +228,7 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_table_internal(
     &txn,
     &schema,
-    "TABLES".to_owned(),
+    "TABLES".to_string(),
     TableType::SYSTEM_VIEW,
     Type::STRUCT(
       vec![
@@ -447,7 +447,7 @@ fn create_table_internal(
   let mut set = get_system_tables(&txn)?;
   if set.exists(&table_key) {
     if !optional {
-      Err(Error::TableAlreadyExists(schema.schema_identifier.to_owned(), table_identifier))
+      Err(Error::TableAlreadyExists(schema.schema_identifier.to_string(), table_identifier))
     } else {
       Ok(()) // the table already exists
     }
@@ -500,7 +500,7 @@ fn list_tables_internal(set: &mut Set, schema: &SchemaInfo) -> Res<TableInfoIter
   Ok(
     TableInfoIter {
       schema_id: schema.schema_id,
-      schema_identifier: Rc::new(schema.schema_identifier.to_owned()),
+      schema_identifier: Rc::new(schema.schema_identifier.to_string()),
       iter: iter
     }
   )
@@ -558,7 +558,7 @@ fn drop_table_internal(
     },
     None => {
       if !optional {
-        Err(Error::TableDoesNotExist(schema.schema_identifier.to_owned(), table_identifier))
+        Err(Error::TableDoesNotExist(schema.schema_identifier.to_string(), table_identifier))
       } else {
         Ok(())
       }
@@ -642,9 +642,9 @@ pub mod tests {
       table_type: TableType::TABLE,
       table_schema: Type::STRUCT(
         vec![
-          Field::new("c1".to_owned(), Type::INT, false),
-          Field::new("c2".to_owned(), Type::TEXT, false),
-          Field::new("c3".to_owned(), Type::STRUCT(vec![]), true),
+          Field::new("c1".to_string(), Type::INT, false),
+          Field::new("c2".to_string(), Type::TEXT, false),
+          Field::new("c3".to_string(), Type::STRUCT(vec![]), true),
         ]
       ),
     };
@@ -685,7 +685,7 @@ pub mod tests {
   #[test]
   fn test_catalog_information_schema_modification() {
     // The test verifies that we cannot create or drop a schema with INFORMATION_SCHEMA name.
-    let err = Err(Error::OperationIsNotAllowed("Cannot modify INFORMATION_SCHEMA".to_owned()));
+    let err = Err(Error::OperationIsNotAllowed("Cannot modify INFORMATION_SCHEMA".to_string()));
 
     let mut dbc = init_db();
 
@@ -719,14 +719,14 @@ pub mod tests {
       create_schema(&txn, "TEST", false).unwrap();
       assert_eq!(
         create_schema(&txn, "TEST", false),
-        Err(Error::SchemaAlreadyExists("TEST".to_owned()))
+        Err(Error::SchemaAlreadyExists("TEST".to_string()))
       );
     });
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
         create_schema(&txn, "TEST", false),
-        Err(Error::SchemaAlreadyExists("TEST".to_owned()))
+        Err(Error::SchemaAlreadyExists("TEST".to_string()))
       );
     });
   }
@@ -879,11 +879,11 @@ pub mod tests {
     dbc.with_txn(true, |txn| {
       assert_eq!(
         drop_schema(&txn, "test_schema", false, false),
-        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_owned()))
+        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_string()))
       );
       assert_eq!(
         drop_schema(&txn, "test_schema", false, true /* optional */),
-        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_owned()))
+        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_string()))
       );
     });
 
@@ -909,7 +909,7 @@ pub mod tests {
     dbc.with_txn(true, |txn| {
       assert_eq!(
         create_table(&txn, "test_schema", "table", Type::STRUCT(vec![]), false),
-        Err(Error::SchemaDoesNotExist("TEST_SCHEMA".to_owned()))
+        Err(Error::SchemaDoesNotExist("TEST_SCHEMA".to_string()))
       );
     });
   }
@@ -933,7 +933,7 @@ pub mod tests {
     dbc.with_txn(true, |txn| {
       assert_eq!(
         create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), false),
-        Err(Error::TableAlreadyExists("TEST_SCHEMA".to_owned(), "TABLE1".to_owned()))
+        Err(Error::TableAlreadyExists("TEST_SCHEMA".to_string(), "TABLE1".to_string()))
       );
       assert_eq!(
         create_table(&txn, "test_schema", "table1", Type::STRUCT(vec![]), true),
@@ -1037,7 +1037,7 @@ pub mod tests {
     dbc.with_txn(true, |txn| {
       assert_eq!(
         drop_table(&txn, "schema", "table3", false),
-        Err(Error::TableDoesNotExist("SCHEMA".to_owned(), "TABLE3".to_owned()))
+        Err(Error::TableDoesNotExist("SCHEMA".to_string(), "TABLE3".to_string()))
       );
       assert_eq!(drop_table(&txn, "schema", "table3", true), Ok(()));
     });

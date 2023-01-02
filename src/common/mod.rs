@@ -21,7 +21,7 @@ macro_rules! hex {
 
 macro_rules! internal_err {
   ($fmt:expr) =>
-    (crate::common::error::Error::InternalError($fmt.to_owned()));
+    (crate::common::error::Error::InternalError($fmt.to_string()));
   ($fmt:expr, $($args:expr),*) =>
     (crate::common::error::Error::InternalError(format!($fmt, $($args),*)));
 }
@@ -29,7 +29,7 @@ macro_rules! internal_err {
 
 macro_rules! already_exists_err {
   ($fmt:expr) =>
-    (crate::common::error::Error::InternalAlreadyExists($fmt.to_owned()));
+    (crate::common::error::Error::InternalAlreadyExists($fmt.to_string()));
   ($fmt:expr, $($args:expr),*) =>
     (crate::common::error::Error::InternalAlreadyExists(format!($fmt, $($args),*)));
 }

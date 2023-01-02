@@ -94,7 +94,7 @@ mod tests {
 
   impl TestNode {
     fn new(name: &str, children: Vec<TestNode>) -> Self {
-      Self { name: name.to_owned(), children }
+      Self { name: name.to_string(), children }
     }
   }
 

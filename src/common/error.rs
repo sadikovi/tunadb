@@ -48,7 +48,7 @@ impl From<String> for Error {
 // Creates an internal error with the provided message.
 impl From<&str> for Error {
   fn from(msg: &str) -> Self {
-    Error::InternalError(msg.to_owned())
+    Error::InternalError(msg.to_string())
   }
 }
 

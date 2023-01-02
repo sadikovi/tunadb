@@ -108,7 +108,7 @@ impl SerDe for Field {
       TYPE_STRUCT_FIELD,
       "Invalid type, expected {}, found {}", TYPE_STRUCT_FIELD, tpe
     );
-    let name = reader.read_str().to_owned();
+    let name = reader.read_str().to_string();
     let data_type = Type::deserialise(reader);
     let nullable = reader.read_bool();
     Self { name, data_type, nullable }
@@ -136,22 +136,22 @@ mod tests {
 
     // Struct type.
     let fields = vec![
-      Field::new("f1".to_owned(), Type::INT, false),
-      Field::new("f2".to_owned(), Type::TEXT, true),
-      Field::new("f3".to_owned(), Type::BIGINT, false),
+      Field::new("f1".to_string(), Type::INT, false),
+      Field::new("f2".to_string(), Type::TEXT, true),
+      Field::new("f3".to_string(), Type::BIGINT, false),
     ];
     test_types_convert_roundtrip(Type::STRUCT(fields));
 
     // Nested types.
     let fields = vec![
-      Field::new("f1".to_owned(), Type::STRUCT(Vec::new()), true),
+      Field::new("f1".to_string(), Type::STRUCT(Vec::new()), true),
       Field::new(
-        "f2".to_owned(),
+        "f2".to_string(),
         Type::STRUCT(
           vec![
-            Field::new("f21".to_owned(), Type::INT, false),
-            Field::new("f22".to_owned(), Type::TEXT, true),
-            Field::new("f23".to_owned(), Type::BIGINT, false),
+            Field::new("f21".to_string(), Type::INT, false),
+            Field::new("f22".to_string(), Type::TEXT, true),
+            Field::new("f23".to_string(), Type::BIGINT, false),
           ]
         ),
         true

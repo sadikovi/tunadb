@@ -65,7 +65,7 @@ fn parse_cmd(cmd: &str) -> Result<Cmd, String> {
     Some("OPEN") | Some("open") => {
       let key = advance(&mut iter)?;
       finish(&mut iter)?;
-      Cmd::Open(key.to_owned())
+      Cmd::Open(key.to_string())
     },
     Some("DEBUG") | Some("debug") => {
       match advance(&mut iter)? {
@@ -137,7 +137,7 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       });
     },
     Cmd::Open(path) => {
-      *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_owned())?;
+      *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_string())?;
       println!("Using database {}.", path);
     },
     Cmd::DebugDb => {

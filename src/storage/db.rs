@@ -11,7 +11,7 @@ use crate::storage::txn::{TransactionRef, TransactionManager};
 // Opens a database using the provided path or an in-memory database.
 pub fn open(path: Option<&str>) -> DbBuilder {
   DbBuilder {
-    path: path.map(|p| p.to_owned()),
+    path: path.map(|p| p.to_string()),
     page_size: DEFAULT_PAGE_SIZE,
     max_mem: DEFAULT_PAGE_CACHE_MEM,
   }

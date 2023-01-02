@@ -261,7 +261,7 @@ impl StorageManagerBuilder {
   // Creates options for disk-based storage manager.
   pub fn as_disk(mut self, path: &str) -> Self {
     self.opts.is_disk = true;
-    self.opts.disk_path = path.to_owned();
+    self.opts.disk_path = path.to_string();
     self
   }
 
@@ -409,7 +409,7 @@ impl StorageManager {
         let mut mngr = Self {
           desc: Descriptor::disk(opts.disk_path.as_ref()),
           lock: Some(lock),
-          version: DB_VERSION.to_owned(),
+          version: DB_VERSION.to_string(),
           counter: 0,
           flags: 0,
           page_size: opts.page_size,
@@ -425,7 +425,7 @@ impl StorageManager {
       let mut mngr = Self {
         desc: Descriptor::mem(opts.mem_capacity),
         lock: None, // not needed for in-memory descriptor
-        version: DB_VERSION.to_owned(),
+        version: DB_VERSION.to_string(),
         counter: 0,
         flags: 0,
         page_size: opts.page_size,
@@ -755,7 +755,7 @@ fn try_lock(path: &Path) -> Res<LockManager> {
     LockManager {
       // Lock path is confirmed to be valid as it is derived from the file path.
       // It is fine to have expect() here.
-      path: lock_path.to_str().expect("Invalid lock path").to_owned()
+      path: lock_path.to_str().expect("Invalid lock path").to_string()
     }
   )
 }
@@ -778,7 +778,7 @@ pub mod tests {
       tmp_dir.push(file_name);
       let path = tmp_dir.as_path();
       assert!(!path.exists(), "Random path {:?} exists", path);
-      Self { path: path.to_str().unwrap().to_owned() }
+      Self { path: path.to_str().unwrap().to_string() }
     }
 
     fn path(&self) -> &str {
@@ -862,7 +862,7 @@ pub mod tests {
       let builder = StorageManagerBuilder::new().as_disk(path).with_page_size(32);
       let opts = builder.opts;
       assert!(opts.is_disk);
-      assert_eq!(opts.disk_path, path.to_owned());
+      assert_eq!(opts.disk_path, path.to_string());
       assert_eq!(opts.page_size, 32);
     });
   }

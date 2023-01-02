@@ -1313,7 +1313,7 @@ pub fn debug(pid: u32, page: &[u8]) {
           }
         }
         let ptri = match internal_get_ptr(&page, i) {
-          INVALID_PAGE_ID => "INVALID".to_owned(),
+          INVALID_PAGE_ID => "INVALID".to_string(),
           other => format!("{}", other),
         };
         println!("  * ptr {} = {}", i, ptri);

@@ -53,11 +53,11 @@ pub mod tests {
     assert!(to_valid_identifier(&"a".repeat(129)).is_err());
 
     // Valid values.
-    assert_eq!(to_valid_identifier("summary"), Ok("SUMMARY".to_owned()));
-    assert_eq!(to_valid_identifier("s123456"), Ok("S123456".to_owned()));
-    assert_eq!(to_valid_identifier("s1_2_3_4"), Ok("S1_2_3_4".to_owned()));
-    assert_eq!(to_valid_identifier("aBcDeF_123"), Ok("ABCDEF_123".to_owned()));
-    assert_eq!(to_valid_identifier("s"), Ok("S".to_owned()));
+    assert_eq!(to_valid_identifier("summary"), Ok("SUMMARY".to_string()));
+    assert_eq!(to_valid_identifier("s123456"), Ok("S123456".to_string()));
+    assert_eq!(to_valid_identifier("s1_2_3_4"), Ok("S1_2_3_4".to_string()));
+    assert_eq!(to_valid_identifier("aBcDeF_123"), Ok("ABCDEF_123".to_string()));
+    assert_eq!(to_valid_identifier("s"), Ok("S".to_string()));
     assert!(to_valid_identifier(&"a".repeat(128)).is_ok());
   }
 }
