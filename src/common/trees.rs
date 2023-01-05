@@ -1,12 +1,12 @@
 // Generic `TreeNode` to provide traversal and transform.
 pub trait TreeNode<A> {
   // Returns a short and descriptive name of the tree node.
-  // Used when printing the tree.
-  fn name(&self) -> &str;
+  // This is only used when printing the tree for debugging or visualising the plan.
+  fn debug_name(&self) -> String;
 
   // Returns a reference to itself.
   // This is needed to downcast to the A reference.
-  fn get(&self) -> &A;
+  fn as_ref(&self) -> &A;
 
   // Returns a list of children for the node.
   // Can return an empty list if there are no children.
@@ -25,7 +25,7 @@ pub fn transform_down<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn
 
   let mut children = Vec::new();
   for child in node.children() {
-    let updated = transform_down(child.get(), rule);
+    let updated = transform_down(child.as_ref(), rule);
     children.push(updated);
   }
 
@@ -38,7 +38,7 @@ pub fn transform_down<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn
 pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&A) -> Option<A> {
   let mut children = Vec::new();
   for child in node.children() {
-    let updated = transform_up(child.get(), rule);
+    let updated = transform_up(child.as_ref(), rule);
     children.push(updated);
   }
 
@@ -47,10 +47,16 @@ pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&
 }
 
 /// Internal method to generate tree string.
-fn recur_gen_tree<A>(plan: &A, depth: usize, prefix: &str, is_last_child: bool, buf: &mut Vec<String>) where A: TreeNode<A> {
+fn recur_gen_tree<A>(
+  plan: &A,
+  depth: usize,
+  prefix: &str,
+  is_last_child: bool,
+  buf: &mut Vec<String>
+) where A: TreeNode<A> {
   let parent_prefix = if depth == 0 { "" } else if is_last_child { "+- " } else { "- " };
   // Generate prefix for current node.
-  let curr = format!("{}{}{}", prefix, parent_prefix, plan.name());
+  let curr = format!("{}{}{}", prefix, parent_prefix, plan.debug_name());
   buf.push(curr);
 
   // Add child levels.
@@ -99,11 +105,11 @@ mod tests {
   }
 
   impl TreeNode<TestNode> for TestNode {
-    fn name(&self) -> &str {
-      &self.name
+    fn debug_name(&self) -> String {
+      self.name.clone()
     }
 
-    fn get(&self) -> &TestNode {
+    fn as_ref(&self) -> &TestNode {
       self
     }
 
@@ -112,7 +118,7 @@ mod tests {
     }
 
     fn copy(&self, children: Vec<TestNode>) -> TestNode {
-      Self::new(self.name(), children)
+      Self::new(&self.debug_name(), children)
     }
   }
 
@@ -147,9 +153,9 @@ mod tests {
   #[test]
   fn test_trees_transform_up_modified() {
     let rule = |n: &TestNode| {
-      if n.name() == "A" {
+      if n.debug_name() == "A" {
         Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
-      } else if n.name() == "B" {
+      } else if n.debug_name() == "B" {
         Some(TestNode::new("Bp", vec![TestNode::new("C", vec![])]))
       } else {
         None
@@ -179,9 +185,9 @@ mod tests {
   #[test]
   fn test_trees_transform_down_modified() {
     let rule = |n: &TestNode| {
-      if n.name() == "A" {
+      if n.debug_name() == "A" {
         Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
-      } else if n.name() == "B" {
+      } else if n.debug_name() == "B" {
         Some(TestNode::new("Bp", vec![TestNode::new("Cp", vec![])]))
       } else {
         None
