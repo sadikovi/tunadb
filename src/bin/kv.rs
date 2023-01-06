@@ -137,7 +137,8 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       });
     },
     Cmd::Open(path) => {
-      *curr_db = db::open(Some(path)).try_build().map_err(|err| err.msg().to_string())?;
+      // Errors are returned in debug output.
+      *curr_db = db::open(Some(path)).try_build().map_err(|err| format!("{:?}", err))?;
       println!("Using database {}.", path);
     },
     Cmd::DebugDb => {

@@ -21,25 +21,6 @@ pub enum Error {
   InternalError(String /* msg */),
 }
 
-// TODO: remove this.
-impl Error {
-  pub fn msg(&self) -> &str {
-    match self {
-      Error::InvalidIdentifier(msg) => msg.as_ref(),
-      Error::DuplicateFieldName(field_name) => field_name.as_ref(),
-      Error::SchemaAlreadyExists(schema) => schema.as_ref(),
-      Error::SchemaDoesNotExist(schema) => schema.as_ref(),
-      Error::SchemaIsNotEmpty(schema) => schema.as_ref(),
-      Error::TableAlreadyExists(_schema, table) => table.as_ref(),
-      Error::TableDoesNotExist(_schema, table) => table.as_ref(),
-      Error::TableInvalidSchema(msg) => msg.as_ref(),
-      Error::OperationIsNotAllowed(msg) => msg.as_ref(),
-      Error::InternalAlreadyExists(msg) => msg.as_ref(),
-      Error::InternalError(msg) => msg.as_ref(),
-    }
-  }
-}
-
 // Creates an internal error with the provided message.
 impl From<String> for Error {
   fn from(msg: String) -> Self {
