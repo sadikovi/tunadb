@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
 use crate::common::util::to_valid_identifier;
@@ -58,6 +59,17 @@ impl SerDe for Type {
       TYPE_TEXT => Type::TEXT,
       TYPE_STRUCT => Type::STRUCT(Fields::deserialise(reader)),
       invalid_tpe => panic!("Unknown type: {}", invalid_tpe),
+    }
+  }
+}
+
+impl fmt::Display for Type {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Type::INT => write!(f, "INT"),
+      Type::BIGINT => write!(f, "BIGINT"),
+      Type::TEXT => write!(f, "TEXT"),
+      Type::STRUCT(ref fields) => write!(f, "STRUCT({})", fields),
     }
   }
 }
@@ -130,6 +142,19 @@ impl SerDe for Fields {
   }
 }
 
+impl fmt::Display for Fields {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "[")?;
+    for i in 0..self.fields.len() {
+      if i > 0 {
+        write!(f, ", ")?;
+      }
+      write!(f, "{}", &self.fields[i])?;
+    }
+    write!(f, "]")
+  }
+}
+
 // Field of a STRUCT.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
@@ -183,6 +208,16 @@ impl SerDe for Field {
     let data_type = Type::deserialise(reader);
     let nullable = reader.read_bool();
     Self { name, data_type, nullable }
+  }
+}
+
+impl fmt::Display for Field {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if self.nullable {
+      write!(f, "{} {} NULL", self.name, self.data_type)
+    } else {
+      write!(f, "{} {}", self.name, self.data_type)
+    }
   }
 }
 
@@ -294,5 +329,28 @@ mod tests {
     assert!(fields.get_field("f1").is_none());
     assert!(fields.get_field("f2").is_none());
     assert!(fields.get_field("F3").is_none());
+  }
+
+  #[test]
+  fn test_types_display() {
+    assert_eq!(format!("{}", Type::INT), "INT");
+    assert_eq!(format!("{}", Type::BIGINT), "BIGINT");
+    assert_eq!(format!("{}", Type::TEXT), "TEXT");
+    assert_eq!(format!("{}", Type::STRUCT(Fields::new(vec![]).unwrap())), "STRUCT([])");
+    assert_eq!(
+      format!(
+        "{}",
+        Type::STRUCT(
+          Fields::new(
+            vec![
+              Field::new("f1", Type::INT, true).unwrap(),
+              Field::new("f2", Type::TEXT, false).unwrap(),
+              Field::new("f3", Type::STRUCT(Fields::new(vec![]).unwrap()), true).unwrap(),
+            ]
+          ).unwrap()
+        )
+      ),
+      "STRUCT([F1 INT NULL, F2 TEXT, F3 STRUCT([]) NULL])"
+    );
   }
 }

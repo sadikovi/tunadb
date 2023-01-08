@@ -91,8 +91,7 @@ impl Attribute {
             &Type::INT => out.set_i32(idx, inp.get_i32(*ord)),
             &Type::BIGINT => out.set_i64(idx, inp.get_i64(*ord)),
             &Type::TEXT => out.set_str(idx, inp.get_str(*ord)),
-            // TODO: handle types.
-            _ => todo!(),
+            _ => todo!("Unsupported type {}", tpe),
           }
           Ok(())
         }
