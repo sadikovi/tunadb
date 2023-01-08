@@ -86,7 +86,7 @@ struct TableSerDeInfo {
   schema_id: u64, // globally unique id
   table_identifier: String, // unique within the schema
   table_type: TableType,
-  table_schema: Type,
+  table_fields: Fields,
 }
 
 impl SerDe for TableSerDeInfo {
@@ -95,7 +95,7 @@ impl SerDe for TableSerDeInfo {
     writer.write_u64(self.schema_id);
     writer.write_str(&self.table_identifier);
     self.table_type.serialise(writer);
-    self.table_schema.serialise(writer);
+    self.table_fields.serialise(writer);
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
@@ -103,8 +103,8 @@ impl SerDe for TableSerDeInfo {
     let schema_id = reader.read_u64();
     let table_identifier = reader.read_str().to_string();
     let table_type = TableType::deserialise(reader);
-    let table_schema = Type::deserialise(reader);
-    Self { table_id, schema_id, table_identifier, table_type, table_schema }
+    let table_fields = Fields::deserialise(reader);
+    Self { table_id, schema_id, table_identifier, table_type, table_fields }
   }
 }
 
@@ -116,7 +116,7 @@ pub struct TableInfo {
   table_id: u64,
   table_identifier: String,
   table_type: TableType,
-  table_schema: Type,
+  table_fields: Fields,
 }
 
 impl TableInfo {
@@ -128,7 +128,7 @@ impl TableInfo {
       table_id: table.table_id,
       table_identifier: table.table_identifier,
       table_type: table.table_type,
-      table_schema: table.table_schema,
+      table_fields: table.table_fields,
     }
   }
 
@@ -162,10 +162,10 @@ impl TableInfo {
     self.table_type
   }
 
-  // Returns the table schema.
+  // Returns the table fields/schema.
   #[inline]
-  pub fn table_schema(&self) -> &Type {
-    &self.table_schema
+  pub fn table_fields(&self) -> &Fields {
+    &self.table_fields
   }
 }
 
@@ -217,13 +217,11 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     &schema,
     "SCHEMATA".to_string(),
     TableType::SYSTEM_VIEW,
-    Type::STRUCT(
-      Fields::new(
-        vec![
-          Field::new("SCHEMA_NAME", Type::TEXT, false)?,
-        ]
-      )?
-    ),
+    Fields::new(
+      vec![
+        Field::new("SCHEMA_NAME", Type::TEXT, false)?,
+      ]
+    )?,
     false
   )?;
 
@@ -232,15 +230,13 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     &schema,
     "TABLES".to_string(),
     TableType::SYSTEM_VIEW,
-    Type::STRUCT(
-      Fields::new(
-        vec![
-          Field::new("TABLE_SCHEMA", Type::TEXT, false)?,
-          Field::new("TABLE_NAME", Type::TEXT, false)?,
-          Field::new("TABLE_TYPE", Type::TEXT, false)?,
-        ]
-      )?
-    ),
+    Fields::new(
+      vec![
+        Field::new("TABLE_SCHEMA", Type::TEXT, false)?,
+        Field::new("TABLE_NAME", Type::TEXT, false)?,
+        Field::new("TABLE_TYPE", Type::TEXT, false)?,
+      ]
+    )?,
     false
   )?;
 
@@ -284,13 +280,13 @@ pub fn create_table(
   txn: &TransactionRef,
   schema_name: &str,
   table_name: &str,
-  table_schema: Type,
+  table_fields: Fields,
   optional: bool
 ) -> Res<()> {
   let schema = get_schema(&txn, schema_name)?;
   assert_information_schema(&schema.schema_identifier)?;
   let table_identifier = to_valid_identifier(table_name)?;
-  create_table_internal(&txn, &schema, table_identifier, TableType::TABLE, table_schema, optional)
+  create_table_internal(&txn, &schema, table_identifier, TableType::TABLE, table_fields, optional)
 }
 
 // Catalog API: Returns the table description for "schema.table".
@@ -443,7 +439,7 @@ fn create_table_internal(
   schema: &SchemaInfo,
   table_identifier: String,
   table_type: TableType,
-  table_schema: Type,
+  table_fields: Fields,
   optional: bool
 ) -> Res<()> {
   let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
@@ -456,16 +452,12 @@ fn create_table_internal(
       Ok(()) // the table already exists
     }
   } else {
-    if !table_schema.is_struct() {
-      return Err(Error::TableInvalidSchema(format!("Invalid table schema: {:?}", table_schema)));
-    }
-
     let table = TableSerDeInfo {
       table_id: next_object_id(&txn),
       schema_id: schema.schema_id,
       table_identifier: table_identifier,
       table_type: table_type,
-      table_schema: table_schema,
+      table_fields: table_fields,
     };
     // Serialise to store in the set.
     let mut writer = Writer::new();
@@ -585,8 +577,8 @@ pub mod tests {
   }
 
   // Returns an empty schema for tests.
-  fn empty_schema() -> Type {
-    Type::STRUCT(Fields::new(vec![]).unwrap())
+  fn empty_fields() -> Fields {
+    Fields::new(vec![]).unwrap()
   }
 
   #[test]
@@ -640,7 +632,7 @@ pub mod tests {
       schema_id: 0,
       table_identifier: String::from(""),
       table_type: TableType::SYSTEM_VIEW,
-      table_schema: empty_schema(),
+      table_fields: empty_fields(),
     };
     assert_eq!(serde(&table), table);
 
@@ -649,15 +641,13 @@ pub mod tests {
       schema_id: 234,
       table_identifier: String::from("TEST"),
       table_type: TableType::TABLE,
-      table_schema: Type::STRUCT(
-        Fields::new(
-          vec![
-            Field::new("c1", Type::INT, false).unwrap(),
-            Field::new("c2", Type::TEXT, false).unwrap(),
-            Field::new("c3", empty_schema(), true).unwrap(),
-          ]
-        ).unwrap()
-      ),
+      table_fields: Fields::new(
+        vec![
+          Field::new("c1", Type::INT, false).unwrap(),
+          Field::new("c2", Type::TEXT, false).unwrap(),
+          Field::new("c3", Type::STRUCT(empty_fields()), true).unwrap(),
+        ]
+      ).unwrap(),
     };
     assert_eq!(serde(&table), table);
   }
@@ -712,11 +702,11 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", empty_schema(), false),
+        create_table(&txn, INFORMATION_SCHEMA, "test", empty_fields(), false),
         err
       );
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", empty_schema(), true),
+        create_table(&txn, INFORMATION_SCHEMA, "test", empty_fields(), true),
         err
       );
     });
@@ -881,9 +871,9 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", empty_schema(), false).unwrap();
-      create_table(&txn, "test_schema", "table2", empty_schema(), false).unwrap();
-      create_table(&txn, "test_schema", "table3", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table1", empty_fields(), false).unwrap();
+      create_table(&txn, "test_schema", "table2", empty_fields(), false).unwrap();
+      create_table(&txn, "test_schema", "table3", empty_fields(), false).unwrap();
     });
 
     // Drop schema with tables is not allowed.
@@ -919,7 +909,7 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table", empty_schema(), false),
+        create_table(&txn, "test_schema", "table", empty_fields(), false),
         Err(Error::SchemaDoesNotExist("TEST_SCHEMA".to_string()))
       );
     });
@@ -932,7 +922,7 @@ pub mod tests {
     // Create a new table.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table1", empty_fields(), false).unwrap();
     });
     dbc.with_txn(true, |txn| {
       let table = get_table(&txn, "test_schema", "table1").unwrap();
@@ -943,18 +933,18 @@ pub mod tests {
     // Create table with the same name.
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", empty_schema(), false),
+        create_table(&txn, "test_schema", "table1", empty_fields(), false),
         Err(Error::TableAlreadyExists("TEST_SCHEMA".to_string(), "TABLE1".to_string()))
       );
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", empty_schema(), true),
+        create_table(&txn, "test_schema", "table1", empty_fields(), true),
         Ok(())
       );
     });
 
     // Rollback - table should not be created.
     dbc.with_txn(false, |txn| {
-      create_table(&txn, "test_schema", "table2", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table2", empty_fields(), false).unwrap();
       assert!(get_table(&txn, "test_schema", "table2").is_ok());
       txn.borrow_mut().rollback();
     });
@@ -969,7 +959,7 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table", empty_schema(), false).unwrap();
+      create_table(&txn, "test_schema", "table", empty_fields(), false).unwrap();
     });
 
     dbc.with_txn(true, |txn| {
@@ -978,7 +968,7 @@ pub mod tests {
       assert_eq!(table.schema_id(), 3);
       assert_eq!(table.table_identifier(), "TABLE");
       assert_eq!(table.table_type(), TableType::TABLE);
-      assert_eq!(table.table_schema(), &empty_schema());
+      assert_eq!(table.table_fields(), &empty_fields());
     });
   }
 
@@ -989,14 +979,14 @@ pub mod tests {
     // Create different schemas and tables.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema1", false).unwrap();
-      create_table(&txn, "schema1", "table1", empty_schema(), false).unwrap();
-      create_table(&txn, "schema1", "table2", empty_schema(), false).unwrap();
-      create_table(&txn, "schema1", "table3", empty_schema(), false).unwrap();
+      create_table(&txn, "schema1", "table1", empty_fields(), false).unwrap();
+      create_table(&txn, "schema1", "table2", empty_fields(), false).unwrap();
+      create_table(&txn, "schema1", "table3", empty_fields(), false).unwrap();
 
       create_schema(&txn, "schema2", false).unwrap();
-      create_table(&txn, "schema2", "table4", empty_schema(), false).unwrap();
-      create_table(&txn, "schema2", "table5", empty_schema(), false).unwrap();
-      create_table(&txn, "schema2", "table6", empty_schema(), false).unwrap();
+      create_table(&txn, "schema2", "table4", empty_fields(), false).unwrap();
+      create_table(&txn, "schema2", "table5", empty_fields(), false).unwrap();
+      create_table(&txn, "schema2", "table6", empty_fields(), false).unwrap();
     });
 
     // Verify that we only return tables for the selected schema.
@@ -1030,14 +1020,14 @@ pub mod tests {
 
     // Drop table in the same transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table1", empty_schema(), false).unwrap();
+      create_table(&txn, "schema", "table1", empty_fields(), false).unwrap();
       drop_table(&txn, "schema", "table1", false).unwrap();
       assert!(get_table(&txn, "schema", "table1").is_err());
     });
 
     // Drop table in a separate transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table2", empty_schema(), false).unwrap();
+      create_table(&txn, "schema", "table2", empty_fields(), false).unwrap();
     });
     dbc.with_txn(true, |txn| {
       drop_table(&txn, "schema", "table2", false).unwrap();
@@ -1055,7 +1045,7 @@ pub mod tests {
 
     // Rollback - table is not dropped.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table4", empty_schema(), false).unwrap();
+      create_table(&txn, "schema", "table4", empty_fields(), false).unwrap();
     });
     dbc.with_txn(false, |txn| {
       drop_table(&txn, "schema", "table4", false).unwrap();
@@ -1074,7 +1064,7 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema", false).unwrap();
-      create_table(&txn, "schema", "table", empty_schema(), false).unwrap();
+      create_table(&txn, "schema", "table", empty_fields(), false).unwrap();
     });
 
     // Newly created table should not have a set.
