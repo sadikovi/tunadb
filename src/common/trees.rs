@@ -1,8 +1,12 @@
+use std::fmt;
+
 // Generic `TreeNode` to provide traversal and transform.
 pub trait TreeNode<A> {
-  // Returns a short and descriptive name of the tree node.
-  // This is only used when printing the tree for debugging or visualising the plan.
-  fn debug_name(&self) -> String;
+  // Defines how the node is displayed in the tree.
+  // The following constraints apply:
+  // - use `write!` instead of `writeln!`, each node must occupy only one line, no `\n`.
+  // - the name should preferrably be short but descriptive.
+  fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
   // Returns a reference to itself.
   // This is needed to downcast to the A reference.
@@ -32,7 +36,7 @@ pub fn transform_down<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn
   node.copy(children)
 }
 
-// Return a copy of this node where the `rule` has been recursively applied first to all
+// Returns a copy of this node where the `rule` has been recursively applied first to all
 // of its children and then itself (post-order). When the `rule` does not apply to a given
 // node, it is left unchanged.
 pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&A) -> Option<A> {
@@ -46,46 +50,56 @@ pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&
   rule(&node).unwrap_or(node)
 }
 
-/// Internal method to generate tree string.
+struct TreeDisplay<'a, A: TreeNode<A>> {
+  plan: &'a A
+}
+
+impl<'a, A: TreeNode<A>> fmt::Display for TreeDisplay<'a, A> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    recur_gen_tree(self.plan, &mut Vec::new(), f)
+  }
+}
+
+// Internal method to generate tree string.
+#[inline]
 fn recur_gen_tree<A>(
   plan: &A,
-  depth: usize,
-  prefix: &str,
-  is_last_child: bool,
-  buf: &mut Vec<String>
-) where A: TreeNode<A> {
-  let parent_prefix = if depth == 0 { "" } else if is_last_child { "+- " } else { "- " };
-  // Generate prefix for current node.
-  let curr = format!("{}{}{}", prefix, parent_prefix, plan.debug_name());
-  buf.push(curr);
+  buf: &mut Vec<bool>,
+  f: &mut fmt::Formatter<'_>
+) -> fmt::Result where A: TreeNode<A> {
+  plan.display(f)?;
+  writeln!(f)?;
 
   // Add child levels.
   let children = plan.children();
   let len = children.len();
 
+  let pos = buf.len();
+  buf.push(true);
   for i in 0..len {
-    let is_last_child = i == len - 1;
-    let prefix = format!(
-      "{}{}{}",
-      prefix,
-      " ".repeat(parent_prefix.len()),
-      if is_last_child { "" } else { ":" }
-    );
-    recur_gen_tree(&children[i], depth + 1, &prefix, is_last_child, buf);
+    buf[pos] = i < len - 1;
+    for j in 0..buf.len() {
+      if buf[j] && j != pos {
+        write!(f, ":  ")?;
+      } else if buf[j] && j == pos {
+        write!(f, ":- ")?;
+      } else if !buf[j] && j == pos {
+        write!(f, "+- ")?;
+      } else {
+        write!(f, "   ")?;
+      }
+    }
+    recur_gen_tree(&children[i], buf, f)?;
   }
-}
+  buf.pop();
 
-// Collects tree output into the provided buffer.
-// Each line represents a node in the tree.
-pub fn tree_output<A>(plan: &A, buffer: &mut Vec<String>) where A: TreeNode<A> {
-  recur_gen_tree(plan, 0, "", false, buffer);
+  Ok(())
 }
 
 // Returns a string of the tree output.
 pub fn tree_string<A>(plan: &A) -> String where A: TreeNode<A> {
-  let mut buffer = Vec::new();
-  tree_output(plan, &mut buffer);
-  buffer.join("\n")
+  let tree = TreeDisplay { plan };
+  tree.to_string()
 }
 
 #[cfg(test)]
@@ -105,8 +119,8 @@ mod tests {
   }
 
   impl TreeNode<TestNode> for TestNode {
-    fn debug_name(&self) -> String {
-      self.name.clone()
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.name)
     }
 
     fn as_ref(&self) -> &TestNode {
@@ -118,7 +132,7 @@ mod tests {
     }
 
     fn copy(&self, children: Vec<TestNode>) -> TestNode {
-      Self::new(&self.debug_name(), children)
+      Self::new(&self.name, children)
     }
   }
 
@@ -153,9 +167,9 @@ mod tests {
   #[test]
   fn test_trees_transform_up_modified() {
     let rule = |n: &TestNode| {
-      if n.debug_name() == "A" {
+      if n.name == "A" {
         Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
-      } else if n.debug_name() == "B" {
+      } else if n.name == "B" {
         Some(TestNode::new("Bp", vec![TestNode::new("C", vec![])]))
       } else {
         None
@@ -185,9 +199,9 @@ mod tests {
   #[test]
   fn test_trees_transform_down_modified() {
     let rule = |n: &TestNode| {
-      if n.debug_name() == "A" {
+      if n.name == "A" {
         Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
-      } else if n.debug_name() == "B" {
+      } else if n.name == "B" {
         Some(TestNode::new("Bp", vec![TestNode::new("Cp", vec![])]))
       } else {
         None
@@ -218,7 +232,7 @@ mod tests {
   #[test]
   fn test_trees_output() {
     let node = TestNode::new("A", vec![]);
-    assert_eq!(&tree_string(&node), "A");
+    assert_eq!(&tree_string(&node), "A\n");
 
     let node = TestNode::new(
       "A",
@@ -232,7 +246,8 @@ mod tests {
       vec![
         "A",
         ":- B",
-        "+- C"
+        "+- C",
+        ""
       ].join("\n")
     );
 
@@ -252,7 +267,8 @@ mod tests {
       vec![
         "A",
         "+- B",
-        "   +- C"
+        "   +- C",
+        ""
       ].join("\n")
     );
 
@@ -283,7 +299,69 @@ mod tests {
         ":  :- C",
         ":  +- D",
         "+- E",
-        "   +- F"
+        "   +- F",
+        ""
+      ].join("\n")
+    );
+
+    let node = TestNode::new(
+      "A",
+      vec![
+        TestNode::new(
+          "B",
+          vec![
+            TestNode::new("C", vec![
+              TestNode::new("N1", vec![
+                TestNode::new("N11", vec![]),
+                TestNode::new("N12", vec![]),
+              ]),
+              TestNode::new("N2", vec![]),
+            ]),
+            TestNode::new("D", vec![
+              TestNode::new("N1", vec![]),
+              TestNode::new("N2", vec![]),
+              TestNode::new("N3", vec![]),
+              TestNode::new("N4", vec![]),
+              TestNode::new("N5", vec![]),
+            ]),
+          ]
+        ),
+        TestNode::new(
+          "E",
+          vec![
+            TestNode::new("F", vec![
+              TestNode::new("G", vec![
+                TestNode::new("H", vec![]),
+              ]),
+            ]),
+            TestNode::new("Z", vec![]),
+          ]
+        ),
+      ]
+    );
+
+    assert_eq!(
+      tree_string(&node),
+      vec![
+        "A",
+        ":- B",
+        ":  :- C",
+        ":  :  :- N1",
+        ":  :  :  :- N11",
+        ":  :  :  +- N12",
+        ":  :  +- N2",
+        ":  +- D",
+        ":     :- N1",
+        ":     :- N2",
+        ":     :- N3",
+        ":     :- N4",
+        ":     +- N5",
+        "+- E",
+        "   :- F",
+        "   :  +- G",
+        "   :     +- H",
+        "   +- Z",
+        ""
       ].join("\n")
     );
   }
