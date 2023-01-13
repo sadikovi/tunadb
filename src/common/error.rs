@@ -6,6 +6,7 @@ pub type Res<T> = Result<T, Error>;
 // List of errors available in the project.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
+  // SQL errors.
   InvalidIdentifier(String /* msg */),
   DuplicateFieldName(String /* field name */),
   SchemaAlreadyExists(String /* schema */),
@@ -15,6 +16,9 @@ pub enum Error {
   TableDoesNotExist(String /* schema */, String /* table */),
   TableInvalidSchema(String /* msg */),
   OperationIsNotAllowed(String /* msg */),
+
+  // Internal errors.
+
   // Internal error for an object that already exists.
   InternalAlreadyExists(String /* msg */),
   // One of the IO, Lock, or UTF8 errors, not user-facing.

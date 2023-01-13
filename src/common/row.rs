@@ -585,11 +585,22 @@ mod tests {
 
   #[test]
   fn test_row_buffer_to_vec() {
-    let mut row = Row::new(10);
-    row.set_str(5, "123");
+    let mut row = Row::new(5);
+    row.set_i32(0, 123);
+    row.set_str(3, "123");
     let expected = row.to_vec();
 
-    let row = Row::from_buf(10, expected.clone());
-    assert_eq!(row.to_vec(), expected);
+    let row = Row::from_buf(5, expected);
+    assert_eq!(
+      row.to_vec(),
+      vec![
+        123, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        3, 0, 0, 0, 41, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        22, 49, 50, 51, 1
+      ],
+    );
   }
 }
