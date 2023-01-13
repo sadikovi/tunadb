@@ -1,3 +1,4 @@
+use std::fmt;
 use std::rc::Rc;
 use crate::common::error::Res;
 use crate::common::row::Row;
@@ -102,11 +103,14 @@ impl Attribute {
 
 impl TreeNode<Attribute> for Attribute {
   #[inline]
-  fn debug_name(&self) -> String {
+  fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Attribute::Alias { name, ref child } => format!("({}) as {}", child[0].debug_name(), name),
-      Attribute::LiteralInt(v) => format!("{}", v),
-      Attribute::Reference { ord, name, .. } => format!("{}[{}]", name, ord),
+      Attribute::Alias { name, ref child } => {
+        child[0].display(f)?;
+        write!(f, " as {}", name)
+      },
+      Attribute::LiteralInt(v) => write!(f, "{}", v),
+      Attribute::Reference { ord, name, .. } => write!(f, "{}[{}]", name, ord),
     }
   }
 
@@ -147,6 +151,7 @@ impl TreeNode<Attribute> for Attribute {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::trees::tree_string;
 
   #[test]
   fn test_attr_create_alias() {
@@ -250,5 +255,32 @@ mod tests {
     let field = Field::new("col", Type::INT, false).unwrap();
     let attr = reference(&field, 0).unwrap();
     attr.eval(&in_row, &mut out_row, 0, true).unwrap();
+  }
+
+  #[test]
+  fn test_attr_display() {
+    let field = Field::new("col", Type::INT, true).unwrap();
+    let attr = reference(&field, 0).unwrap();
+    assert_eq!(&tree_string(&attr), "COL[0]\n");
+
+    let attr = alias(attr, "name").unwrap();
+    assert_eq!(
+      tree_string(&attr),
+      vec![
+        "COL[0] as NAME",
+        "+- COL[0]",
+        ""
+      ].join("\n")
+    );
+
+    let attr = alias(lit_int(12).unwrap(), "a").unwrap();
+    assert_eq!(
+      tree_string(&attr),
+      vec![
+        "12 as A",
+        "+- 12",
+        ""
+      ].join("\n")
+    );
   }
 }
