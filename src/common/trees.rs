@@ -17,6 +17,8 @@ pub trait TreeNode<A> {
   fn children(&self) -> &[A];
 
   // Copies the node with the new set of children.
+  // This method must be implemented in a way so it is cheap to make a copy, e.g.
+  // by using Rc or some other ways of shared ownership.
   fn copy(&self, children: Vec<A>) -> A;
 }
 
