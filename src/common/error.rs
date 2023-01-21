@@ -7,15 +7,15 @@ pub type Res<T> = Result<T, Error>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
   // SQL errors.
-  InvalidIdentifier(String /* msg */),
   DuplicateFieldName(String /* field name */),
+  InvalidIdentifier(String /* msg */),
+  OperationIsNotAllowed(String /* msg */),
   SchemaAlreadyExists(String /* schema */),
   SchemaDoesNotExist(String /* schema */),
   SchemaIsNotEmpty(String /* schema */),
   TableAlreadyExists(String /* schema */, String /* table */),
   TableDoesNotExist(String /* schema */, String /* table */),
   TableInvalidSchema(String /* msg */),
-  OperationIsNotAllowed(String /* msg */),
 
   // Internal errors.
 

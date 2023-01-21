@@ -303,6 +303,7 @@ pub fn drop_set(txn: &TransactionRef, mut set: Set) {
 }
 
 // Returns the next object id (monotonically increasing u64 value).
+#[inline]
 pub fn next_object_id(txn: &TransactionRef) -> u64 {
   txn.borrow_mut().mngr.borrow_mut().get_mngr_mut().next_id()
 }
