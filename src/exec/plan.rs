@@ -49,6 +49,10 @@ pub enum Plan {
     project: Rc<Vec<usize>>,
     query: Vec<Plan>
   },
+  Limit {
+    limit: usize,
+    child: Vec<Plan>,
+  },
   Project {
     output: Rc<Vec<Attribute>>,
     child: Vec<Plan>,
@@ -64,6 +68,7 @@ impl Plan {
   pub fn output(&self) -> &[Attribute] {
     match self {
       Plan::Insert { output, .. } => output,
+      Plan::Limit { child, .. } => child[0].output(),
       Plan::Project { output, .. } => output,
       Plan::TableScan { output, .. } => output,
     }
@@ -76,6 +81,8 @@ impl Plan {
         let child = &query[0];
         let output = child.output();
         let fields = info.table_fields().get();
+
+        // TODO: Revisit the error messages and convert them.
 
         // Validation.
         if project.len() == 0 {
@@ -179,7 +186,12 @@ impl Plan {
         row.set_i64(0, num_rows as i64);
         Ok(PlanIter::from_vec(vec![row]))
       },
+      Plan::Limit { limit, child } => {
+        Ok(PlanIter::limit(*limit, child[0].execute(&txn)?))
+      },
       Plan::Project { .. } => {
+        // select a, b, c from (select a, b from table)
+        // Check if the outputs can be extracted from the child's output.
         unimplemented!()
       },
       Plan::TableScan { ref info, .. } => {
@@ -201,6 +213,7 @@ impl TreeNode<Plan> for Plan {
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Plan::Insert { .. } => write!(f, "Insert"),
+      Plan::Limit { .. } => write!(f, "Limit"),
       Plan::Project { .. } => write!(f, "Project"),
       Plan::TableScan { .. } => write!(f, "TableScan"),
     }
@@ -215,6 +228,7 @@ impl TreeNode<Plan> for Plan {
   fn children(&self) -> &[Plan] {
     match self {
       Plan::Insert { query, .. } => query,
+      Plan::Limit { child, .. } => child,
       Plan::Project { child, .. } => child,
       Plan::TableScan { .. } => &[],
     }
@@ -232,6 +246,10 @@ impl TreeNode<Plan> for Plan {
           project: project.clone(),
           query: children
         }
+      },
+      Plan::Limit { limit, .. } => {
+        assert_eq!(children.len(), 1, "Limit: {:?}", children);
+        Plan::Limit { limit: *limit, child: children }
       },
       Plan::Project { output, .. } => {
         // TODO: improve assertion message.
@@ -254,19 +272,28 @@ impl TreeNode<Plan> for Plan {
 pub enum PlanIter {
   EmptyIter,
   FromVecIter { rows: Vec<Row> },
+  LimitIter { limit: usize, parent: Box<PlanIter> },
   TableScanIter { num_fields: usize, iter: BTreeIter },
 }
 
 impl PlanIter {
   // Returns an empty iterator.
+  #[inline]
   fn empty() -> Self {
     Self::EmptyIter
   }
 
   // Returns an iterator from the vector of rows.
+  #[inline]
   fn from_vec(mut rows: Vec<Row>) -> Self {
     rows.reverse();
     Self::FromVecIter { rows: rows }
+  }
+
+  // Returns an iterator that is limited to `limit` rows from the `parent`.
+  #[inline]
+  fn limit(limit: usize, plan: PlanIter) -> Self {
+    Self::LimitIter { limit: limit, parent: Box::new(plan) }
   }
 }
 
@@ -277,6 +304,14 @@ impl Iterator for PlanIter {
     match self {
       PlanIter::EmptyIter => None,
       PlanIter::FromVecIter { rows } => rows.pop(),
+      PlanIter::LimitIter { ref mut limit, parent } => {
+        if *limit > 0 {
+          *limit -= 1;
+          parent.next()
+        } else {
+          None
+        }
+      },
       PlanIter::TableScanIter { num_fields, iter } => {
         match iter.next() {
           Some((_key, data)) => Some(Row::from_buf(*num_fields, data)),
@@ -312,5 +347,35 @@ pub mod tests {
     assert_eq!(iter.next().unwrap().num_fields(), 1);
     assert_eq!(iter.next().unwrap().num_fields(), 2);
     assert_eq!(iter.next().unwrap().num_fields(), 3);
+  }
+
+  #[test]
+  fn test_plan_iter_limit() {
+    // Limit is greater than the length of the iterator.
+    let iter = PlanIter::from_vec(
+      vec![
+        Row::new(1),
+        Row::new(1),
+        Row::new(1),
+      ]
+    );
+    let mut limit_iter = PlanIter::limit(1, iter);
+    assert!(limit_iter.next().is_some());
+    assert!(limit_iter.next().is_none());
+
+    // Limit is smaller than the length of the iterator.
+    let iter = PlanIter::from_vec(vec![Row::new(1)]);
+    let mut limit_iter = PlanIter::limit(10, iter);
+    assert!(limit_iter.next().is_some());
+    for _ in 0..10 {
+      assert!(limit_iter.next().is_none());
+    }
+
+    // Limit on an empty iterator.
+    let iter = PlanIter::from_vec(Vec::new());
+    let mut limit_iter = PlanIter::limit(5, iter);
+    for _ in 0..5 {
+      assert!(limit_iter.next().is_none());
+    }
   }
 }
