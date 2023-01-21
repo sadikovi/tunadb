@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::common::error::Res;
 use crate::common::row::Row;
 use crate::common::trees::TreeNode;
-use crate::common::types::{Field, Type};
+use crate::common::types::{Field, Fields, Type};
 use crate::common::util::to_valid_identifier;
 
 // Creates a new alias for the provided attribute.
@@ -27,6 +27,16 @@ pub fn reference(field: &Field, ord: usize) -> Res<Attribute> {
       nullable: field.nullable()
     }
   )
+}
+
+// Creates a vector of attributes from the table schema.
+pub fn from_fields(fields: &Fields) -> Res<Vec<Attribute>> {
+  let fields = fields.get();
+  let mut attributes = Vec::with_capacity(fields.len());
+  for i in 0..fields.len() {
+    attributes.push(reference(&fields[i], i)?);
+  }
+  Ok(attributes)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +195,29 @@ mod tests {
     assert_eq!(attr.name(), "COL");
     assert_eq!(attr.data_type(), field.data_type());
     assert_eq!(attr.nullable(), field.nullable());
+  }
+
+  #[test]
+  fn test_attr_create_reference_from_fields() {
+    let fields = Fields::new(
+      vec![
+        Field::new("c1", Type::INT, true).unwrap(),
+        Field::new("c2", Type::BIGINT, false).unwrap(),
+        Field::new("c3", Type::TEXT, true).unwrap(),
+      ]
+    ).unwrap();
+
+    let attr = from_fields(&fields).unwrap();
+    assert_eq!(attr.len(), 3);
+    assert_eq!(attr[0].name(), "C1");
+    assert_eq!(attr[0].data_type(), &Type::INT);
+    assert_eq!(attr[0].nullable(), true);
+    assert_eq!(attr[1].name(), "C2");
+    assert_eq!(attr[1].data_type(), &Type::BIGINT);
+    assert_eq!(attr[1].nullable(), false);
+    assert_eq!(attr[2].name(), "C3");
+    assert_eq!(attr[2].data_type(), &Type::TEXT);
+    assert_eq!(attr[2].nullable(), true);
   }
 
   #[test]
