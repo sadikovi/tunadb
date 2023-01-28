@@ -12,8 +12,8 @@ pub enum TokenType {
   IDENTIFIER, NUMBER, STRING,
 
   // Keywords.
-  AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, FROM, GROUP, IN, IS, LIKE, LIMIT, NULL, OR,
-  ORDER, SELECT, THEN, WHEN, WHERE, WITH,
+  AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, IS, LIKE, LIMIT, NULL,
+  OR, ORDER, SELECT, THEN, WHEN, WHERE, WITH,
 
   // Others.
   ERROR,
@@ -165,6 +165,8 @@ impl<'a> Scanner<'a> {
       TokenType::ELSE
     } else if self.match_keyword(b"END") {
       TokenType::END
+    } else if self.match_keyword(b"EXISTS") {
+      TokenType::EXISTS
     } else if self.match_keyword(b"FROM") {
       TokenType::FROM
     } else if self.match_keyword(b"GROUP") {
@@ -393,27 +395,30 @@ pub mod tests {
     assert_eq!(res, expected);
   }
 
-  // #[test]
-  // fn test_parser_tpcds() {
-  //   for i in 1..100 {
-  //     println!("\nQuery {}\n", i);
-  //     let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/query{}.sql", i));
-  //     let tokens = collect_tokens(&input);
-  //     for token in tokens {
-  //       if token.tpe == TokenType::IDENTIFIER {
-  //         println!("Line {}, {:?}: {}", token.line, token.token_type(), token.value(&input));
-  //       }
-  //     }
-  //   }
-  //   //
-  //   // for i in &[12, 20, 44, 47, 53, 57, 63, 89, 98] {
-  //   //   println!("\nQuery {}\n", i);
-  //   //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/modified/query{}.sql", i));
-  //   //   check(&input);
-  //   // }
-  //
-  //   assert!(false, "OK");
-  // }
+  #[test]
+  fn test_parser_tpcds() {
+    // for i in 1..100 {
+    //   println!("\nQuery {}\n", i);
+    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/query{}.sql", i));
+    //   let tokens = collect_tokens(&input);
+    //   for token in tokens {
+    //     if token.tpe == TokenType::IDENTIFIER {
+    //       println!("Line {}, {:?}: {}", token.line, token.token_type(), token.value(&input));
+    //     }
+    //   }
+    // }
+
+    // for i in &[12, 20, 44, 47, 53, 57, 63, 89, 98] {
+    //   println!("\nQuery {}\n", i);
+    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/modified/query{}.sql", i));
+    //   check(&input);
+    // }
+
+    let input = load_query("/Users/ivansadikov/developer/tunadb/queries/ivan2.sql");
+    assert_sql(&input, vec![]);
+
+    assert!(false, "OK");
+  }
 
   #[test]
   fn test_parser_comments() {
