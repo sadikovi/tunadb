@@ -12,8 +12,8 @@ pub enum TokenType {
   IDENTIFIER, NUMBER, STRING,
 
   // Keywords.
-  AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, IS, LIKE, LIMIT, NULL,
-  OR, ORDER, SELECT, THEN, WHEN, WHERE, WITH,
+  ALL, AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, IS, LIKE, LIMIT,
+  NULL, OR, ORDER, SELECT, THEN, UNION, WHEN, WHERE, WITH,
 
   // Others.
   ERROR,
@@ -48,6 +48,11 @@ fn is_digit(c: u8) -> bool {
   c >= b'0' && c <= b'9'
 }
 
+// Scanner to produce tokens from the input string. Implements the Iterator interface to iterate
+// over tokens.
+//
+// Input string can contain more than one statement separated by a semicolon.
+// The end of string is indicated by next() method returning None.
 pub struct Scanner<'a> {
   input: &'a [u8],
   start: usize,
@@ -56,6 +61,7 @@ pub struct Scanner<'a> {
 }
 
 impl<'a> Scanner<'a> {
+  // Creates a new scanner by wrapping the input string.
   pub fn new(input: &'a [u8]) -> Self {
     Self { input, start: 0, end: 0, line: 0 }
   }
@@ -149,7 +155,9 @@ impl<'a> Scanner<'a> {
   #[inline]
   fn identifier_type(&self) -> TokenType {
     // We have already consumed the identifier, we just need to match the string.
-    if self.match_keyword(b"AND") {
+    if self.match_keyword(b"ALL") {
+      TokenType::ALL
+    } else if self.match_keyword(b"AND") {
       TokenType::AND
     } else if self.match_keyword(b"AS") {
       TokenType::AS
@@ -189,6 +197,8 @@ impl<'a> Scanner<'a> {
       TokenType::SELECT
     } else if self.match_keyword(b"THEN") {
       TokenType::THEN
+    } else if self.match_keyword(b"UNION") {
+      TokenType::UNION
     } else if self.match_keyword(b"WHEN") {
       TokenType::WHEN
     } else if self.match_keyword(b"WHERE") {
@@ -365,17 +375,8 @@ impl<'a> Iterator for Scanner<'a> {
 #[cfg(test)]
 pub mod tests {
   use super::*;
-  use std::fs::File;
-  use std::io::Read;
 
-  // Loads a query from the provided file path.
-  fn load_query(path: &str) -> String {
-    let mut file = File::open(path).unwrap();
-    let mut input = String::new();
-    file.read_to_string(&mut input).unwrap();
-    input
-  }
-
+  // Parses the input string and returns the list of tokens.
   fn collect_tokens(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut scanner = Scanner::new(&input.as_bytes());
@@ -385,43 +386,18 @@ pub mod tests {
     tokens
   }
 
+  // Asserts that the list of tokens matches the expected output.
   fn assert_sql(input: &str, expected: Vec<(TokenType, &str)>) {
     let tokens = collect_tokens(input);
     let mut res = Vec::new();
     for token in tokens {
-      println!("Line {}, {:?}: {}", token.line, token.token_type(), token.value(&input));
       res.push((token.tpe, token.value(&input)));
     }
     assert_eq!(res, expected);
   }
 
   #[test]
-  fn test_parser_tpcds() {
-    // for i in 1..100 {
-    //   println!("\nQuery {}\n", i);
-    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/query{}.sql", i));
-    //   let tokens = collect_tokens(&input);
-    //   for token in tokens {
-    //     if token.tpe == TokenType::IDENTIFIER {
-    //       println!("Line {}, {:?}: {}", token.line, token.token_type(), token.value(&input));
-    //     }
-    //   }
-    // }
-
-    // for i in &[12, 20, 44, 47, 53, 57, 63, 89, 98] {
-    //   println!("\nQuery {}\n", i);
-    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/modified/query{}.sql", i));
-    //   check(&input);
-    // }
-
-    let input = load_query("/Users/ivansadikov/developer/tunadb/queries/ivan2.sql");
-    assert_sql(&input, vec![]);
-
-    assert!(false, "OK");
-  }
-
-  #[test]
-  fn test_parser_comments() {
+  fn test_scanner_comments() {
     assert_sql(
       "--comment 1 + 2",
       vec![]
@@ -437,7 +413,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_strings() {
+  fn test_scanner_strings() {
     // Positive cases.
     assert_sql(r"''", vec![(TokenType::STRING, r"''")]);
     assert_sql(r"'abc'", vec![(TokenType::STRING, r"'abc'")]);
@@ -449,7 +425,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_numbers() {
+  fn test_scanner_numbers() {
     assert_sql("123", vec![(TokenType::NUMBER, "123")]);
     assert_sql("1.23", vec![(TokenType::NUMBER, "1.23")]);
     assert_sql("-123", vec![(TokenType::MINUS, "-"), (TokenType::NUMBER, "123")]);
@@ -514,7 +490,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_special_chars() {
+  fn test_scanner_special_chars() {
     assert_sql(">", vec![(TokenType::GREATER_THAN, ">")]);
     assert_sql("<", vec![(TokenType::LESS_THAN, "<")]);
     assert_sql(">=", vec![(TokenType::GREATER_THAN_EQUALS, ">=")]);
@@ -529,7 +505,26 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_sql1() {
+  fn test_scanner_identifiers() {
+    assert_sql("abc", vec![(TokenType::IDENTIFIER, "abc")]);
+    assert_sql("a123", vec![(TokenType::IDENTIFIER, "a123")]);
+    assert_sql("a1_a2", vec![(TokenType::IDENTIFIER, "a1_a2")]);
+    assert_sql("_a123", vec![(TokenType::ERROR, "_"), (TokenType::IDENTIFIER, "a123")]);
+    assert_sql(
+      "a-b",
+      vec![
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::MINUS, "-"),
+        (TokenType::IDENTIFIER, "b")
+      ]
+    );
+    assert_sql("`a b c`", vec![(TokenType::IDENTIFIER, "`a b c`")]);
+    assert_sql(r"`a b\` c`", vec![(TokenType::IDENTIFIER, r"`a b\` c`")]);
+    assert_sql(r"`a b\` c", vec![(TokenType::ERROR, r"`a b\` c")]);
+  }
+
+  #[test]
+  fn test_scanner_sql1() {
     assert_sql(
       r"
         -- comment
@@ -547,7 +542,7 @@ pub mod tests {
 
 
   #[test]
-  fn test_parser_sql2() {
+  fn test_scanner_sql2() {
     assert_sql(
       r"select a as `a b c\` d e` from table",
       vec![
@@ -562,7 +557,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_sql3() {
+  fn test_scanner_sql3() {
     assert_sql(
       r"select 3.3e3, -1.2;",
       vec![
@@ -577,7 +572,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_sql4() {
+  fn test_scanner_sql4() {
     assert_sql(
       r"
 
@@ -612,7 +607,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_sql5() {
+  fn test_scanner_sql5() {
     assert_sql(
       r"select a from table where a >= 1 and b <= 2;",
       vec![
@@ -634,7 +629,7 @@ pub mod tests {
   }
 
   #[test]
-  fn test_parser_sql6() {
+  fn test_scanner_sql6() {
     assert_sql(
       r"select * from table where a is null or b is null group by a order by a",
       vec![
