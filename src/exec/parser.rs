@@ -1,26 +1,22 @@
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenType {
-  COMMA,
-  DOT,
-  EQUALS,
+  // 1 character tokens.
+  COMMA, DOT, EQUALS, GREATER_THAN, LESS_THAN, MINUS, PAREN_LEFT, PAREN_RIGHT, PLUS, SEMICOLON,
+  SLASH, STAR, VERTICAL_SINGLE,
+
+  // 2+ character tokens.
+  GREATER_THAN_EQUALS, LESS_THAN_EQUALS, VERTICAL_DOUBLE,
+
+  // Literals.
+  IDENTIFIER, NUMBER, STRING,
+
+  // Keywords.
+  AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, FROM, GROUP, IN, IS, LIKE, LIMIT, NULL, OR,
+  ORDER, SELECT, THEN, WHEN, WHERE, WITH,
+
+  // Others.
   ERROR,
-  GREATER_THAN,
-  GREATER_THAN_EQUALS,
-  IDENTIFIER,
-  LESS_THAN,
-  LESS_THAN_EQUALS,
-  MINUS,
-  NUMBER,
-  PAREN_LEFT,
-  PAREN_RIGHT,
-  PLUS,
-  SEMICOLON,
-  SLASH,
-  STAR,
-  STRING,
-  VERTICAL_DOUBLE,
-  VERTICAL_SINGLE,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,11 +142,68 @@ impl<'a> Scanner<'a> {
   }
 
   #[inline]
+  fn match_keyword(&self, expected: &[u8]) -> bool {
+    expected.eq_ignore_ascii_case(&self.input[self.start..self.end])
+  }
+
+  #[inline]
+  fn identifier_type(&self) -> TokenType {
+    // We have already consumed the identifier, we just need to match the string.
+    if self.match_keyword(b"AND") {
+      TokenType::AND
+    } else if self.match_keyword(b"AS") {
+      TokenType::AS
+    } else if self.match_keyword(b"BETWEEN") {
+      TokenType::BETWEEN
+    } else if self.match_keyword(b"BY") {
+      TokenType::BY
+    } else if self.match_keyword(b"CASE") {
+      TokenType::CASE
+    } else if self.match_keyword(b"DISTINCT") {
+      TokenType::DISTINCT
+    } else if self.match_keyword(b"ELSE") {
+      TokenType::ELSE
+    } else if self.match_keyword(b"END") {
+      TokenType::END
+    } else if self.match_keyword(b"FROM") {
+      TokenType::FROM
+    } else if self.match_keyword(b"GROUP") {
+      TokenType::GROUP
+    } else if self.match_keyword(b"IN") {
+      TokenType::IN
+    } else if self.match_keyword(b"IS") {
+      TokenType::IS
+    } else if self.match_keyword(b"LIKE") {
+      TokenType::LIKE
+    } else if self.match_keyword(b"LIMIT") {
+      TokenType::LIMIT
+    } else if self.match_keyword(b"NULL") {
+      TokenType::NULL
+    } else if self.match_keyword(b"OR") {
+      TokenType::OR
+    } else if self.match_keyword(b"ORDER") {
+      TokenType::ORDER
+    } else if self.match_keyword(b"SELECT") {
+      TokenType::SELECT
+    } else if self.match_keyword(b"THEN") {
+      TokenType::THEN
+    } else if self.match_keyword(b"WHEN") {
+      TokenType::WHEN
+    } else if self.match_keyword(b"WHERE") {
+      TokenType::WHERE
+    } else if self.match_keyword(b"WITH") {
+      TokenType::WITH
+    } else {
+      TokenType::IDENTIFIER
+    }
+  }
+
+  #[inline]
   fn identifier(&mut self) -> Token {
     while !self.done() && (is_alpha(self.peek()) || is_digit(self.peek()) || self.peek() == b'_') {
       self.advance();
     }
-    self.make_token(TokenType::IDENTIFIER)
+    self.make_token(self.identifier_type())
   }
 
   #[inline]
@@ -340,24 +393,27 @@ pub mod tests {
     assert_eq!(res, expected);
   }
 
-  #[test]
-  fn test_parser() {
-    // for i in 1..100 {
-    //   println!("\nQuery {}\n", i);
-    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/query{}.sql", i));
-    //   check(&input);
-    // }
-    //
-    // for i in &[12, 20, 44, 47, 53, 57, 63, 89, 98] {
-    //   println!("\nQuery {}\n", i);
-    //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/modified/query{}.sql", i));
-    //   check(&input);
-    // }
-
-    let input = load_query("queries/ivan2.sql");
-    // let input = load_query("/Users/ivansadikov/developer/tpcds/query16.sql");
-    assert_sql(&input, vec![]);
-  }
+  // #[test]
+  // fn test_parser_tpcds() {
+  //   for i in 1..100 {
+  //     println!("\nQuery {}\n", i);
+  //     let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/query{}.sql", i));
+  //     let tokens = collect_tokens(&input);
+  //     for token in tokens {
+  //       if token.tpe == TokenType::IDENTIFIER {
+  //         println!("Line {}, {:?}: {}", token.line, token.token_type(), token.value(&input));
+  //       }
+  //     }
+  //   }
+  //   //
+  //   // for i in &[12, 20, 44, 47, 53, 57, 63, 89, 98] {
+  //   //   println!("\nQuery {}\n", i);
+  //   //   let input = load_query(&format!("/Users/ivansadikov/developer/tpcds/modified/query{}.sql", i));
+  //   //   check(&input);
+  //   // }
+  //
+  //   assert!(false, "OK");
+  // }
 
   #[test]
   fn test_parser_comments() {
@@ -475,9 +531,9 @@ pub mod tests {
         select a where a >
       ",
       vec![
-        (TokenType::IDENTIFIER, "select"),
+        (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
-        (TokenType::IDENTIFIER, "where"),
+        (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::GREATER_THAN, ">"),
       ]
@@ -490,11 +546,11 @@ pub mod tests {
     assert_sql(
       r"select a as `a b c\` d e` from table",
       vec![
-        (TokenType::IDENTIFIER, "select"),
+        (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
-        (TokenType::IDENTIFIER, "as"),
+        (TokenType::AS, "as"),
         (TokenType::IDENTIFIER, r"`a b c\` d e`"),
-        (TokenType::IDENTIFIER, "from"),
+        (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "table"),
       ]
     );
@@ -505,7 +561,7 @@ pub mod tests {
     assert_sql(
       r"select 3.3e3, -1.2;",
       vec![
-        (TokenType::IDENTIFIER, "select"),
+        (TokenType::SELECT, "select"),
         (TokenType::NUMBER, "3.3e3"),
         (TokenType::COMMA, ","),
         (TokenType::MINUS, "-"),
@@ -531,11 +587,11 @@ pub mod tests {
         '
       ",
       vec![
-        (TokenType::IDENTIFIER, "select"),
+        (TokenType::SELECT, "select"),
         (TokenType::NUMBER, "1"),
-        (TokenType::IDENTIFIER, "from"),
+        (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "table"),
-        (TokenType::IDENTIFIER, "where"),
+        (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "t"),
         (TokenType::EQUALS, "="),
         (TokenType::STRING, r"'line1
@@ -555,19 +611,46 @@ pub mod tests {
     assert_sql(
       r"select a from table where a >= 1 and b <= 2;",
       vec![
-        (TokenType::IDENTIFIER, "select"),
+        (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
-        (TokenType::IDENTIFIER, "from"),
+        (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "table"),
-        (TokenType::IDENTIFIER, "where"),
+        (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::GREATER_THAN_EQUALS, ">="),
         (TokenType::NUMBER, "1"),
-        (TokenType::IDENTIFIER, "and"),
+        (TokenType::AND, "and"),
         (TokenType::IDENTIFIER, "b"),
         (TokenType::LESS_THAN_EQUALS, "<="),
         (TokenType::NUMBER, "2"),
         (TokenType::SEMICOLON, ";"),
+      ]
+    )
+  }
+
+  #[test]
+  fn test_parser_sql6() {
+    assert_sql(
+      r"select * from table where a is null or b is null group by a order by a",
+      vec![
+        (TokenType::SELECT, "select"),
+        (TokenType::STAR, "*"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "table"),
+        (TokenType::WHERE, "where"),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::IS, "is"),
+        (TokenType::NULL, "null"),
+        (TokenType::OR, "or"),
+        (TokenType::IDENTIFIER, "b"),
+        (TokenType::IS, "is"),
+        (TokenType::NULL, "null"),
+        (TokenType::GROUP, "group"),
+        (TokenType::BY, "by"),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::ORDER, "order"),
+        (TokenType::BY, "by"),
+        (TokenType::IDENTIFIER, "a"),
       ]
     )
   }
