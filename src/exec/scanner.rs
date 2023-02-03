@@ -218,10 +218,11 @@ impl<'a> Scanner<'a> {
     self.make_token(self.identifier_type())
   }
 
+  // Extracts the escaped identifier that is wrapped with double quotes (") and can contain any
+  // characters.
+  // A double quote can be escaped by placing another one in front of it, e.g. "".
   #[inline]
   fn escaped_identifier(&mut self) -> Token {
-    // Escaped identifier is wrapped with backticks (`) and can contain any characters other than
-    // backticks.
     while !self.done() {
       match self.peek() {
         b'\n' => {
@@ -229,13 +230,14 @@ impl<'a> Scanner<'a> {
           self.line += 1;
           self.advance();
         },
-        b'\\' => {
-          // This is an escaped backtick, consume both.
-          self.advance();
-          self.consume(b'`');
-        },
-        b'`' => {
-          break;
+        b'"' => {
+          match self.peek_next() {
+            Some(b'"') => {
+              self.advance();
+              self.consume(b'"');
+            },
+            _ => break,
+          }
         },
         _ => {
           self.advance();
@@ -246,7 +248,7 @@ impl<'a> Scanner<'a> {
     if self.done() {
       self.error_token("Unterminated identifier")
     } else {
-      // Move over the closing backtick.
+      // Move over the closing double quote.
       self.advance();
       self.make_token(TokenType::IDENTIFIER)
     }
@@ -293,6 +295,8 @@ impl<'a> Scanner<'a> {
     self.make_token(TokenType::NUMBER)
   }
 
+  // Extracts string is wrapped with single quotes (').
+  // A single quote can be escaped by placing another one in front of it, e.g. ''.
   #[inline]
   fn string(&mut self) -> Token {
     while !self.done() {
@@ -302,13 +306,14 @@ impl<'a> Scanner<'a> {
           self.line += 1;
           self.advance();
         },
-        b'\\' => {
-          // This is an escaped single quote, consume both the quote and the backslash.
-          self.advance();
-          self.consume(b'\'');
-        },
         b'\'' => {
-          break;
+          match self.peek_next() {
+            Some(b'\'') => {
+              self.advance();
+              self.consume(b'\'');
+            },
+            _ => break,
+          }
         },
         _ => {
           self.advance();
@@ -342,7 +347,6 @@ impl<'a> Iterator for Scanner<'a> {
       match self.advance() {
         c if is_alpha(c) => return Some(self.identifier()),
         c if is_digit(c) => return Some(self.number()),
-        b'`' => return Some(self.escaped_identifier()),
         b'.' => return Some(self.make_token(TokenType::DOT)),
         b',' => return Some(self.make_token(TokenType::COMMA)),
         b';' => return Some(self.make_token(TokenType::SEMICOLON)),
@@ -366,6 +370,7 @@ impl<'a> Iterator for Scanner<'a> {
           false => return Some(self.make_token(TokenType::VERTICAL_SINGLE)),
         },
         b'\'' => return Some(self.string()),
+        b'"' => return Some(self.escaped_identifier()),
         _ => return Some(self.error_token("Illegal character")),
       }
     }
@@ -417,11 +422,16 @@ pub mod tests {
     // Positive cases.
     assert_sql(r"''", vec![(TokenType::STRING, r"''")]);
     assert_sql(r"'abc'", vec![(TokenType::STRING, r"'abc'")]);
-    assert_sql(r"'abc\'abc'", vec![(TokenType::STRING, r"'abc\'abc'")]);
-    assert_sql(r"'abc\'abc\n\''", vec![(TokenType::STRING, r"'abc\'abc\n\''")]);
+    assert_sql(r"'abc''abc'", vec![(TokenType::STRING, r"'abc''abc'")]);
+    assert_sql(r"'abc\'", vec![(TokenType::STRING, r"'abc\'")]);
+    assert_sql(r"'abc\\\abc'", vec![(TokenType::STRING, r"'abc\\\abc'")]);
+    assert_sql(r"'abc\abc\n\'", vec![(TokenType::STRING, r"'abc\abc\n\'")]);
+    assert_sql(r"''''", vec![(TokenType::STRING, r"''''")]);
+    assert_sql(r"' '' '' '", vec![(TokenType::STRING, r"' '' '' '")]);
 
     // Negative cases.
     assert_sql(r"'abc", vec![(TokenType::ERROR, r"'abc")]);
+    assert_sql(r"'''", vec![(TokenType::ERROR, r"'''")]);
   }
 
   #[test]
@@ -518,9 +528,15 @@ pub mod tests {
         (TokenType::IDENTIFIER, "b")
       ]
     );
-    assert_sql("`a b c`", vec![(TokenType::IDENTIFIER, "`a b c`")]);
-    assert_sql(r"`a b\` c`", vec![(TokenType::IDENTIFIER, r"`a b\` c`")]);
-    assert_sql(r"`a b\` c", vec![(TokenType::ERROR, r"`a b\` c")]);
+
+    // Escaped identifiers
+    assert_sql("\"abc\"", vec![(TokenType::IDENTIFIER, "\"abc\"")]);
+    assert_sql("\"a b c\"", vec![(TokenType::IDENTIFIER, "\"a b c\"")]);
+    assert_sql("\"a ' b\"", vec![(TokenType::IDENTIFIER, "\"a ' b\"")]);
+    assert_sql("\"\"", vec![(TokenType::IDENTIFIER, "\"\"")]);
+    assert_sql("\" \"\" \"", vec![(TokenType::IDENTIFIER, "\" \"\" \"")]);
+
+    assert_sql("\"\"\"", vec![(TokenType::ERROR, "\"\"\"")]);
   }
 
   #[test]
@@ -544,12 +560,12 @@ pub mod tests {
   #[test]
   fn test_scanner_sql2() {
     assert_sql(
-      r"select a as `a b c\` d e` from table",
+      "select a as \"a b c\"\" d e\" from table",
       vec![
         (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::AS, "as"),
-        (TokenType::IDENTIFIER, r"`a b c\` d e`"),
+        (TokenType::IDENTIFIER, "\"a b c\"\" d e\""),
         (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "table"),
       ]
@@ -579,11 +595,11 @@ pub mod tests {
         -- multiline strings
         select 1 from table where t = 'line1
           line2
-        line3\'
+        line3''
             line4\
         line5
         line6
-        line7\'line8
+        line7''line8
         '
       ",
       vec![
@@ -596,11 +612,11 @@ pub mod tests {
         (TokenType::EQUALS, "="),
         (TokenType::STRING, r"'line1
           line2
-        line3\'
+        line3''
             line4\
         line5
         line6
-        line7\'line8
+        line7''line8
         '"),
       ]
     )
