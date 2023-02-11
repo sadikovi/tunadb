@@ -17,6 +17,7 @@ pub enum TokenType {
 
   // Others.
   ERROR,
+  EOF
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -389,12 +390,13 @@ impl<'a> Scanner<'a> {
       self.make_token(TokenType::STRING)
     }
   }
-}
 
-impl<'a> Iterator for Scanner<'a> {
-  type Item = Token;
 
-  fn next(&mut self) -> Option<Self::Item> {
+  // Returns the next parsed token.
+  //
+  // The end of stream is indicated by EOF token.
+  // Once EOF is reached, the same EOF token will be returned.
+  pub fn next_token(&mut self) -> Token {
     loop {
       self.skip_whitespace();
 
@@ -403,37 +405,37 @@ impl<'a> Iterator for Scanner<'a> {
       self.line_pos_start = self.line_pos_end;
 
       if self.done() {
-        return None;
+        return self.make_token(TokenType::EOF);
       }
 
       match self.advance() {
-        c if is_alpha(c) => return Some(self.identifier()),
-        c if is_digit(c) => return Some(self.number()),
-        b'.' => return Some(self.make_token(TokenType::DOT)),
-        b',' => return Some(self.make_token(TokenType::COMMA)),
-        b';' => return Some(self.make_token(TokenType::SEMICOLON)),
-        b'(' => return Some(self.make_token(TokenType::PAREN_LEFT)),
-        b')' => return Some(self.make_token(TokenType::PAREN_RIGHT)),
-        b'=' => return Some(self.make_token(TokenType::EQUALS)),
-        b'*' => return Some(self.make_token(TokenType::STAR)),
-        b'+' => return Some(self.make_token(TokenType::PLUS)),
-        b'-' => return Some(self.make_token(TokenType::MINUS)),
-        b'/' => return Some(self.make_token(TokenType::SLASH)),
+        c if is_alpha(c) => return self.identifier(),
+        c if is_digit(c) => return self.number(),
+        b'.' => return self.make_token(TokenType::DOT),
+        b',' => return self.make_token(TokenType::COMMA),
+        b';' => return self.make_token(TokenType::SEMICOLON),
+        b'(' => return self.make_token(TokenType::PAREN_LEFT),
+        b')' => return self.make_token(TokenType::PAREN_RIGHT),
+        b'=' => return self.make_token(TokenType::EQUALS),
+        b'*' => return self.make_token(TokenType::STAR),
+        b'+' => return self.make_token(TokenType::PLUS),
+        b'-' => return self.make_token(TokenType::MINUS),
+        b'/' => return self.make_token(TokenType::SLASH),
         b'>' => match self.consume(b'=') {
-          true => return Some(self.make_token(TokenType::GREATER_THAN_EQUALS)),
-          false => return Some(self.make_token(TokenType::GREATER_THAN)),
+          true => return self.make_token(TokenType::GREATER_THAN_EQUALS),
+          false => return self.make_token(TokenType::GREATER_THAN),
         },
         b'<' => match self.consume(b'=') {
-          true => return Some(self.make_token(TokenType::LESS_THAN_EQUALS)),
-          false => return Some(self.make_token(TokenType::LESS_THAN)),
+          true => return self.make_token(TokenType::LESS_THAN_EQUALS),
+          false => return self.make_token(TokenType::LESS_THAN),
         },
         b'|' => match self.consume(b'|') {
-          true => return Some(self.make_token(TokenType::VERTICAL_DOUBLE)),
-          false => return Some(self.make_token(TokenType::VERTICAL_SINGLE)),
+          true => return self.make_token(TokenType::VERTICAL_DOUBLE),
+          false => return self.make_token(TokenType::VERTICAL_SINGLE),
         },
-        b'\'' => return Some(self.string()),
-        b'"' => return Some(self.escaped_identifier()),
-        _ => return Some(self.error_token("Illegal character")),
+        b'\'' => return self.string(),
+        b'"' => return self.escaped_identifier(),
+        _ => return self.error_token("Illegal character"),
       }
     }
   }
@@ -447,7 +449,11 @@ pub mod tests {
   fn collect_tokens(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut scanner = Scanner::new(&input.as_bytes());
-    while let Some(token) = scanner.next() {
+    loop {
+      let token = scanner.next_token();
+      if token.token_type() == TokenType::EOF {
+        break;
+      }
       tokens.push(token);
     }
     tokens
@@ -552,6 +558,29 @@ from
     assert_eq!(token.line_num(), 29);
     assert_eq!(token.line_pos(), 685);
     assert_eq!(&query[token.line_pos()..token.pos() + token.len], "       l_linestatus;");
+  }
+
+  #[test]
+  fn test_scanner_end_of_file() {
+    let input = ";";
+    let mut scanner = Scanner::new(&input.as_bytes());
+
+    // Skip semicolon, we just assert the correct token type.
+    let token = scanner.next_token();
+    assert_eq!(token.token_type(), TokenType::SEMICOLON);
+
+    let token = scanner.next_token();
+    assert_eq!(token.token_type(), TokenType::EOF);
+    assert_eq!(token.pos(), 1);
+    assert_eq!(token.line_num(), 0);
+    assert_eq!(token.value(input), "");
+
+    // Once EOF has been reached, assert that we return the same token again.
+    let token = scanner.next_token();
+    assert_eq!(token.token_type(), TokenType::EOF);
+    assert_eq!(token.pos(), 1);
+    assert_eq!(token.line_num(), 0);
+    assert_eq!(token.value(input), "");
   }
 
   #[test]
