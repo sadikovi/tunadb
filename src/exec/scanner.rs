@@ -24,25 +24,64 @@ pub struct Token {
   tpe: TokenType,
   pos: usize,
   len: usize,
-  line: usize,
-  err_msg: Option<String>, // available for TokenType::ERROR
+  line_num: usize,
+  line_pos: usize,
+  err_msg: Option<String>, // only available for TokenType::ERROR
 }
 
 impl Token {
+  // Returns the token type.
+  #[inline]
   pub fn token_type(&self) -> TokenType {
     self.tpe
   }
 
+  // Returns the absolute token starting position from the beginning of the input, 0-based.
+  // To calculate the relative position, use `line_pos()` method.
+  #[inline]
+  pub fn pos(&self) -> usize {
+    self.pos
+  }
+
+  // Returns the length of the token value.
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.len
+  }
+
+  // Returns the line on which the token occurs, 0-based.
+  #[inline]
+  pub fn line_num(&self) -> usize {
+    self.line_num
+  }
+
+  // Returns the absolute position at the beginning of the current line.
+  #[inline]
+  pub fn line_pos(&self) -> usize {
+    self.line_pos
+  }
+
+  // Returns the string value of the token from the input.
+  #[inline]
   pub fn value<'a, 'b>(&'a self, input: &'b str) -> &'b str {
     &input[self.pos..self.pos + self.len]
   }
+
+  // Returns an optional error message.
+  // This is only available for tokens with type ERROR.
+  #[inline]
+  pub fn error_message(&self) -> Option<&str> {
+    self.err_msg.as_ref().map(|x| x.as_ref())
+  }
 }
 
+// Returns true if the byte is an ASCII character from "A" to "Z" or from "a" to "z".
 #[inline]
 fn is_alpha(c: u8) -> bool {
   c >= b'A' && c <= b'Z' || c >= b'a' && c <= b'z'
 }
 
+// Returns true if the byte is a digit from 0 to 9.
 #[inline]
 fn is_digit(c: u8) -> bool {
   c >= b'0' && c <= b'9'
@@ -57,13 +96,24 @@ pub struct Scanner<'a> {
   input: &'a [u8],
   start: usize,
   end: usize,
-  line: usize,
+  line_start: usize,
+  line_end: usize,
+  line_pos_start: usize, // position that needs to be reported to the user
+  line_pos_end: usize, // position at the beginning of the current line
 }
 
 impl<'a> Scanner<'a> {
   // Creates a new scanner by wrapping the input string.
   pub fn new(input: &'a [u8]) -> Self {
-    Self { input, start: 0, end: 0, line: 0 }
+    Self {
+      input,
+      start: 0,
+      end: 0,
+      line_start: 0,
+      line_end: 0,
+      line_pos_start: 0,
+      line_pos_end: 0
+    }
   }
 
   #[inline]
@@ -112,7 +162,8 @@ impl<'a> Scanner<'a> {
         },
         // Skip new lines.
         b'\n' => {
-          self.line += 1;
+          self.line_end += 1;
+          self.line_pos_end = self.end + 1; // skip the new line character
           self.advance();
         },
         // Skip single line comments.
@@ -134,7 +185,14 @@ impl<'a> Scanner<'a> {
 
   #[inline]
   fn _new_token(&self, tpe: TokenType, msg: Option<String>) -> Token {
-    Token { tpe, pos: self.start, len: self.end - self.start, line: self.line, err_msg: msg }
+    Token {
+      tpe,
+      pos: self.start,
+      len: self.end - self.start,
+      line_num: self.line_start,
+      line_pos: self.line_pos_start,
+      err_msg: msg
+    }
   }
 
   #[inline]
@@ -227,7 +285,8 @@ impl<'a> Scanner<'a> {
       match self.peek() {
         b'\n' => {
           // Increment the scanner line if the identifier spans multiple lines.
-          self.line += 1;
+          self.line_end += 1;
+          self.line_pos_end = self.end + 1; // skip the new line character
           self.advance();
         },
         b'"' => {
@@ -303,7 +362,8 @@ impl<'a> Scanner<'a> {
       match self.peek() {
         b'\n' => {
           // Increment the scanner line if the string spans multiple lines.
-          self.line += 1;
+          self.line_end += 1;
+          self.line_pos_end = self.end + 1; // skip the new line character
           self.advance();
         },
         b'\'' => {
@@ -339,6 +399,8 @@ impl<'a> Iterator for Scanner<'a> {
       self.skip_whitespace();
 
       self.start = self.end;
+      self.line_start = self.line_end;
+      self.line_pos_start = self.line_pos_end;
 
       if self.done() {
         return None;
@@ -399,6 +461,97 @@ pub mod tests {
       res.push((token.tpe, token.value(&input)));
     }
     assert_eq!(res, expected);
+  }
+
+  #[test]
+  fn test_scanner_multiline() {
+    let query = "
+select
+       l_returnflag,
+       l_linestatus,
+       sum(l_quantity) as sum_qty,
+       sum(l_extendedprice) as sum_base_price,
+
+
+       sum(l_extendedprice * (1-l_discount)) as sum_disc_price,
+       sum(l_extendedprice * (1-l_discount) * (1+l_tax)) as sum_charge,
+       avg(l_quantity) as avg_qty,
+       avg(l_extendedprice) as avg_price,
+       avg(l_discount) as avg_disc,
+       count(*) as count_order
+-- comment with new lines \\n \n \n
+from
+       lineitem
+  where
+       l_shipdate <= dateadd(day, -90, to_date('1998-12-01'))
+       and l_linestatus =
+       'status1
+        status2'
+    group by
+       l_returnflag,
+       l_linestatus
+    order by
+       l_returnflag,
+       l_linestatus;
+    ";
+
+    let tokens = collect_tokens(query);
+    // Check that there are no errors during parsing.
+    for token in &tokens {
+      assert_ne!(token.tpe, TokenType::ERROR);
+    }
+
+    // SELECT token.
+    let token = &tokens[0];
+    assert_eq!(token.token_type(), TokenType::SELECT);
+    assert_eq!(token.line_num(), 1);
+    assert_eq!(token.line_pos(), 1);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "select");
+
+    // FROM token.
+    let token = &tokens[78];
+    assert_eq!(token.token_type(), TokenType::FROM);
+    assert_eq!(token.line_num(), 17);
+    assert_eq!(token.line_pos(), 447);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "from");
+
+    // WHERE token.
+    let token = &tokens[80];
+    assert_eq!(token.token_type(), TokenType::WHERE);
+    assert_eq!(token.line_num(), 19);
+    assert_eq!(token.line_pos(), 468);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  where");
+
+    // Multiline string.
+    let token = &tokens[98];
+    assert_eq!(token.token_type(), TokenType::STRING);
+    assert_eq!(token.line_num(), 22);
+    assert_eq!(token.line_pos(), 564);
+    assert_eq!(
+      &query[token.line_pos()..token.pos() + token.len],
+      "       'status1\n        status2'"
+    );
+
+    // GROUP token.
+    let token = &tokens[99];
+    assert_eq!(token.token_type(), TokenType::GROUP);
+    assert_eq!(token.line_num(), 24);
+    assert_eq!(token.line_pos(), 597);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "    group");
+
+    // BY token.
+    let token = &tokens[100];
+    assert_eq!(token.token_type(), TokenType::BY);
+    assert_eq!(token.line_num(), 24);
+    assert_eq!(token.line_pos(), 597);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "    group by");
+
+    // SEMICOLON token.
+    let token = &tokens[109];
+    assert_eq!(token.token_type(), TokenType::SEMICOLON);
+    assert_eq!(token.line_num(), 29);
+    assert_eq!(token.line_pos(), 685);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "       l_linestatus;");
   }
 
   #[test]

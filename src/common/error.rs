@@ -6,7 +6,10 @@ pub type Res<T> = Result<T, Error>;
 // List of errors available in the project.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
-  // SQL errors.
+  // SQL parser errors.
+  SQLParseError(String /* error message */),
+
+  // SQL catalog errors.
   DuplicateFieldName(String /* field name */),
   InvalidIdentifier(String /* msg */),
   OperationIsNotAllowed(String /* msg */),
