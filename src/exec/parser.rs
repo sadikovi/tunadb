@@ -5,29 +5,30 @@ use crate::exec::scanner::{Scanner, Token, TokenType};
 pub enum ParsedPlan {
   Filter(Expression /* filter expression */, Box<ParsedPlan> /* child */),
   Limit(usize /* limit */, Box<ParsedPlan> /* child */),
-  Project(Vec<String> /* expressions */, Box<ParsedPlan>),
+  Project(Vec<Expression> /* expressions */, Box<ParsedPlan>),
   TableScan(Option<String> /* schema */, String /* table name */),
   Empty, // indicates an empty relation, e.g. "select 1;"
 }
 
 #[derive(Debug)]
 pub enum Expression {
+  Add(Box<Expression>, Box<Expression>),
   And(Box<Expression>, Box<Expression>),
-  Or(Box<Expression>, Box<Expression>),
+  Divide(Box<Expression>, Box<Expression>),
   Equals(Box<Expression>, Box<Expression>),
   GreaterThan(Box<Expression>, Box<Expression>),
   GreaterThanEquals(Box<Expression>, Box<Expression>),
+  Identifier(String /* identifier value */),
   LessThan(Box<Expression>, Box<Expression>),
   LessThanEquals(Box<Expression>, Box<Expression>),
+  LiteralNumber(String /* numeric value */),
+  LiteralString(String /* string value */),
   Multiply(Box<Expression>, Box<Expression>),
-  Divide(Box<Expression>, Box<Expression>),
-  Add(Box<Expression>, Box<Expression>),
+  Or(Box<Expression>, Box<Expression>),
+  Star,
   Subtract(Box<Expression>, Box<Expression>),
   UnaryPlus(Box<Expression>),
   UnaryMinus(Box<Expression>),
-  Identifier(String /* identifier value */),
-  LiteralNumber(String /* numeric value */),
-  LiteralString(String /* string value */),
 }
 
 pub struct Parser<'a> {
@@ -187,10 +188,10 @@ impl<'a> Parser<'a> {
     let mut expr = self.unary()?;
 
     loop {
-      if self.matches(TokenType::SLASH)? {
+      if self.matches(TokenType::STAR)? {
         let right = self.unary()?;
         expr = Expression::Multiply(Box::new(expr), Box::new(right));
-      } else if self.matches(TokenType::STAR)? {
+      } else if self.matches(TokenType::SLASH)? {
         let right = self.unary()?;
         expr = Expression::Divide(Box::new(expr), Box::new(right));
       } else {
@@ -277,54 +278,25 @@ impl<'a> Parser<'a> {
     self.logical_or()
   }
 
+  //============
+  // Statements
+  //============
+
   #[inline]
-  fn expression_list(&mut self) -> Res<Vec<String>> {
-    // Expression can be "*" or "identifier".
-    // a
-    // a, b
-    // a, b, *
+  fn expression_list(&mut self) -> Res<Vec<Expression>> {
     let mut expressions = Vec::new();
 
-    let mut is_first_expression = true;
-    let mut context_token = self.current.clone();
-
     loop {
-      if self.check(TokenType::IDENTIFIER) {
-        expressions.push(self.current_value().to_string());
-      } else if self.check(TokenType::STAR) {
-        expressions.push(self.current_value().to_string());
-      } else if is_first_expression {
-        // We could not find any valid expressions to start the list.
-        return Err(
-          self.error_at(
-            &self.current,
-            &format!(
-              "Expected an expression list but found '{}'",
-              self.current_value()
-            )
-          )
-        );
+      if self.check(TokenType::STAR) {
+        self.advance()?;
+        expressions.push(Expression::Star);
       } else {
-        // We have already parsed "," which must be followed by a valid expression.
-        return Err(
-          self.error_at(
-            &context_token,
-            &format!(
-              "Expected a valid expression after `,` but found '{}'",
-              self.current_value()
-            )
-          )
-        )
+        expressions.push(self.expression()?);
       }
 
-      self.advance()?;
-
-      is_first_expression = false;
-      context_token = self.current.clone();
-
-      // If the following token is ",", then try to infer the token after, otherwise finish
-      // the expression list and exit the loop.
-      if !self.matches(TokenType::COMMA)? {
+      if self.check(TokenType::COMMA) {
+        self.advance()?;
+      } else {
         break;
       }
     }
@@ -474,10 +446,10 @@ pub mod tests {
 
   #[test]
   fn test_parser_debug() {
-    // let query = "select a, b, c, *
-    //   from table
-    //   where a > 1 and b = 'abc' or b = 'def'
-    //   limit 123";
+    let query = "select a + 1, (b - c) * 2, c, *
+      from table
+      where a > 1 and b = 'abc' or b = 'def'
+      limit 123";
 
     // let query = "select a, b, c, *
     //   from table
@@ -489,12 +461,12 @@ pub mod tests {
     //   where ((b) = ('def') or (a > 1)) and b = 'abc'
     //   limit 123";
 
-    let query = "select a, b, c, *
-      from table
-      where - -2
-      limit 123";
+    // let query = "select a, b, c, *
+    //   from table
+    //   where a > b + 1 or a = b + 2
+    //   limit 123";
 
-    // let query = "select a, b, c,";
+    // let query = "select a + 1, b * 2 - 4 limit 100";
 
     // let query = "select";
 
