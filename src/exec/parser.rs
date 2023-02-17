@@ -35,7 +35,6 @@ pub struct Parser<'a> {
   sql: &'a str,
   scanner: Scanner<'a>,
   current: Token,
-  plans: Vec<ParsedPlan>,
 }
 
 impl<'a> Parser<'a> {
@@ -55,7 +54,7 @@ impl<'a> Parser<'a> {
   // It is typically used after `check()` method, knowing that the token is valid.
   // Panics if the current token is None.
   #[inline]
-  fn current_value(&self) -> &str {
+  fn token_value(&self) -> &str {
     self.current.value(self.sql)
   }
 
@@ -139,18 +138,18 @@ impl<'a> Parser<'a> {
   fn primary(&mut self) -> Res<Expression> {
     // Identifier.
     if self.check(TokenType::IDENTIFIER) {
-      let value = self.current_value().to_string();
+      let value = self.token_value().to_string();
       self.advance()?;
       return Ok(Expression::Identifier(value));
     }
 
     // Literals.
     if self.check(TokenType::NUMBER) {
-      let value = self.current_value().to_string();
+      let value = self.token_value().to_string();
       self.advance()?;
       return Ok(Expression::LiteralNumber(value));
     } else if self.check(TokenType::STRING) {
-      let value = self.current_value().to_string();
+      let value = self.token_value().to_string();
       self.advance()?;
       return Ok(Expression::LiteralString(value));
     }
@@ -166,7 +165,7 @@ impl<'a> Parser<'a> {
         &self.current,
         &format!(
           "Expected expression but found '{}'",
-          &self.current_value()
+          &self.token_value()
         )
       )
     )
@@ -310,7 +309,7 @@ impl<'a> Parser<'a> {
     //   [schema].[table]
     //   [table] (implies the currently selected schema)
     if self.check(TokenType::IDENTIFIER) {
-      let identifier1 = self.current_value().to_string();
+      let identifier1 = self.token_value().to_string();
       self.advance()?;
 
       if self.check(TokenType::DOT) {
@@ -319,15 +318,10 @@ impl<'a> Parser<'a> {
         self.advance()?;
         // We expect table name after ".".
         if self.check(TokenType::IDENTIFIER) {
-          let identifier2 = self.current_value().to_string();
+          let identifier2 = self.token_value().to_string();
           Ok(ParsedPlan::TableScan(Some(identifier1), identifier2))
         } else {
-          Err(
-            self.error_at(
-              &context_token,
-              "Expected a table name after the schema name but no table name was provided"
-            )
-          )
+          Err(self.error_at(&context_token, "Expected a table name after the schema name"))
         }
       } else {
         // We have [table] with the current schema.
@@ -338,8 +332,8 @@ impl<'a> Parser<'a> {
         self.error_at(
           &self.current,
           &format!(
-            "Expected a table name or schema.table qualifier after FROM but found '{}'",
-            self.current_value()
+            "Expected a table name or `schema`.`table` qualifier after FROM but found '{}'",
+            self.token_value()
           )
         )
       )
@@ -356,7 +350,7 @@ impl<'a> Parser<'a> {
   fn limit_statement(&mut self, plan: ParsedPlan) -> Res<ParsedPlan> {
     // LIMIT <number>.
     if self.check(TokenType::NUMBER) {
-      match self.current_value().parse() {
+      match self.token_value().parse() {
         Ok(value) => {
           // Advance and return the limit plan.
           self.advance()?;
@@ -364,12 +358,12 @@ impl<'a> Parser<'a> {
         },
         Err(_) => {
           // We failed to parse the value into a limit.
-          return Err(
+          Err(
             self.error_at(
               &self.current,
               &format!(
                 "Expected LIMIT value to be a valid number but found '{}'",
-                self.current_value()
+                self.token_value()
               )
             )
           )
@@ -381,7 +375,7 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn select_statement(&mut self) -> Res<()> {
+  fn select_statement(&mut self) -> Res<ParsedPlan> {
     let mut plan = ParsedPlan::Empty;
 
     // Parse the list of columns for projection.
@@ -401,20 +395,30 @@ impl<'a> Parser<'a> {
       plan = self.limit_statement(plan)?;
     }
 
-    println!("Plan: {:?}", plan);
-
-    Ok(())
+    Ok(plan)
   }
 
   #[inline]
-  fn statement(&mut self) -> Res<()> {
+  fn statement(&mut self) -> Res<ParsedPlan> {
+    // Each statement can have an optional `;` at the end.
+    // We need to capture any errors when the statement is followed by some other token.
     if self.matches(TokenType::SELECT)? {
-      self.select_statement()
+      let stmt = self.select_statement()?;
+      if !self.matches(TokenType::SEMICOLON)? && !self.done() {
+        Err(
+          self.error_at(
+            &self.current,
+            &format!("Expected the end of the statement but found '{}'", self.token_value())
+          )
+        )
+      } else {
+        Ok(stmt)
+      }
     } else {
       Err(
         self.error_at(
           &self.current,
-          &format!("Unsupported token {}", self.current_value())
+          &format!("Unsupported token {}", self.token_value())
         )
       )
     }
@@ -430,14 +434,15 @@ pub fn parse(sql: &str) -> Res<Vec<ParsedPlan>> {
     sql: sql,
     scanner: scanner,
     current: token,
-    plans: Vec::new()
   };
 
+  let mut plans = Vec::new();
+
   while !parser.done() {
-    parser.statement()?;
+    plans.push(parser.statement()?);
   }
 
-  Ok(parser.plans)
+  Ok(plans)
 }
 
 #[cfg(test)]
@@ -446,15 +451,21 @@ pub mod tests {
 
   #[test]
   fn test_parser_debug() {
-    let query = "select a + 1, (b - c) * 2, c, *
-      from table
-      where a > 1 and b = 'abc' or b = 'def'
-      limit 123";
+    // let query = "select (a + 1), (b - c) * 2, c, *, concat('a', 'b')
+    //   from table
+    //   where a > 1 and b = 'abc' or b = 'def'
+    //   limit 123";
 
     // let query = "select a, b, c, *
     //   from table
     //   where b = 'def' or a > 1 and b = 'abc'
     //   limit 123";
+
+    // let query = "select -1, +2, 3.4, '5.6;'; select 'abc'";
+
+    let query = "
+    select sum(l_discount) as revenue from test;
+    ";
 
     // let query = "select a, b, c, *
     //   from table
