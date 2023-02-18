@@ -2,10 +2,10 @@ use crate::common::error::{Error, Res};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
 #[derive(Debug, PartialEq)]
-pub enum ParsedPlan {
-  Filter(Expression /* filter expression */, Box<ParsedPlan> /* child */),
-  Limit(usize /* limit */, Box<ParsedPlan> /* child */),
-  Project(Vec<Expression> /* expressions */, Box<ParsedPlan>),
+pub enum Plan {
+  Filter(Expression /* filter expression */, Box<Plan> /* child */),
+  Limit(usize /* limit */, Box<Plan> /* child */),
+  Project(Vec<Expression> /* expressions */, Box<Plan>),
   TableScan(Option<String> /* schema */, String /* table name */),
   Empty, // indicates an empty relation, e.g. "select 1;"
 }
@@ -323,7 +323,7 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn from_statement(&mut self) -> Res<ParsedPlan> {
+  fn from_statement(&mut self) -> Res<Plan> {
     // We expect:
     //   [schema].[table]
     //   [table] (implies the currently selected schema)
@@ -339,13 +339,13 @@ impl<'a> Parser<'a> {
         if self.check(TokenType::IDENTIFIER) {
           let identifier2 = self.token_value().to_string();
           self.advance()?;
-          Ok(ParsedPlan::TableScan(Some(identifier1), identifier2))
+          Ok(Plan::TableScan(Some(identifier1), identifier2))
         } else {
           Err(self.error_at(&context_token, "Expected a table name after the schema name"))
         }
       } else {
         // We have [table] with the current schema.
-        Ok(ParsedPlan::TableScan(None, identifier1.to_string()))
+        Ok(Plan::TableScan(None, identifier1.to_string()))
       }
     } else {
       Err(
@@ -361,20 +361,20 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn where_statement(&mut self, plan: ParsedPlan) -> Res<ParsedPlan> {
+  fn where_statement(&mut self, plan: Plan) -> Res<Plan> {
     let expression = self.expression()?;
-    Ok(ParsedPlan::Filter(expression, Box::new(plan)))
+    Ok(Plan::Filter(expression, Box::new(plan)))
   }
 
   #[inline]
-  fn limit_statement(&mut self, plan: ParsedPlan) -> Res<ParsedPlan> {
+  fn limit_statement(&mut self, plan: Plan) -> Res<Plan> {
     // LIMIT <number>.
     if self.check(TokenType::NUMBER) {
       match self.token_value().parse() {
         Ok(value) => {
           // Advance and return the limit plan.
           self.advance()?;
-          Ok(ParsedPlan::Limit(value, Box::new(plan)))
+          Ok(Plan::Limit(value, Box::new(plan)))
         },
         Err(_) => {
           // We failed to parse the value into a limit.
@@ -395,8 +395,8 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn select_statement(&mut self) -> Res<ParsedPlan> {
-    let mut plan = ParsedPlan::Empty;
+  fn select_statement(&mut self) -> Res<Plan> {
+    let mut plan = Plan::Empty;
 
     // Parse the list of columns for projection.
     let expressions = self.expression_list()?;
@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
       plan = self.from_statement()?;
     }
 
-    plan = ParsedPlan::Project(expressions, Box::new(plan));
+    plan = Plan::Project(expressions, Box::new(plan));
 
     if self.matches(TokenType::WHERE)? {
       plan = self.where_statement(plan)?;
@@ -419,7 +419,7 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn statement(&mut self) -> Res<ParsedPlan> {
+  fn statement(&mut self) -> Res<Plan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture any errors when the statement is followed by some other token.
     if self.matches(TokenType::SELECT)? {
@@ -440,8 +440,8 @@ impl<'a> Parser<'a> {
   }
 }
 
-// Returns ParsedPlan instance from the sql string.
-pub fn parse(sql: &str) -> Res<Vec<ParsedPlan>> {
+// Returns Plan instance from the sql string.
+pub fn parse(sql: &str) -> Res<Vec<Plan>> {
   let mut scanner = Scanner::new(sql.as_bytes());
   let token = scanner.next_token();
 
@@ -465,7 +465,7 @@ pub fn parse(sql: &str) -> Res<Vec<ParsedPlan>> {
 //========================
 
 pub mod dsl {
-  use crate::exec::parser::{Expression, ParsedPlan};
+  use super::{Expression, Plan};
 
   pub fn identifier(name: &str) -> Expression {
     Expression::Identifier(name.to_string())
@@ -535,24 +535,24 @@ pub mod dsl {
     Expression::Or(Box::new(left), Box::new(right))
   }
 
-  pub fn filter(expression: Expression, child: ParsedPlan) -> ParsedPlan {
-    ParsedPlan::Filter(expression, Box::new(child))
+  pub fn filter(expression: Expression, child: Plan) -> Plan {
+    Plan::Filter(expression, Box::new(child))
   }
 
-  pub fn project(expressions: Vec<Expression>, child: ParsedPlan) -> ParsedPlan {
-    ParsedPlan::Project(expressions, Box::new(child))
+  pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
+    Plan::Project(expressions, Box::new(child))
   }
 
-  pub fn empty() -> ParsedPlan {
-    ParsedPlan::Empty
+  pub fn empty() -> Plan {
+    Plan::Empty
   }
 
-  pub fn from(schema: Option<&str>, table: &str) -> ParsedPlan {
-    ParsedPlan::TableScan(schema.map(|x| x.to_string()), table.to_string())
+  pub fn from(schema: Option<&str>, table: &str) -> Plan {
+    Plan::TableScan(schema.map(|x| x.to_string()), table.to_string())
   }
 
-  pub fn limit(value: usize, child: ParsedPlan) -> ParsedPlan {
-    ParsedPlan::Limit(value, Box::new(child))
+  pub fn limit(value: usize, child: Plan) -> Plan {
+    Plan::Limit(value, Box::new(child))
   }
 }
 
@@ -562,7 +562,7 @@ pub mod tests {
   use super::dsl::*;
 
   // Helper method to check the query plan.
-  fn assert_plan(query: &str, plan: ParsedPlan) {
+  fn assert_plan(query: &str, plan: Plan) {
     match parse(query) {
       Ok(mut v) => {
         assert_eq!(v.pop().unwrap(), plan);
@@ -574,53 +574,6 @@ pub mod tests {
         panic!("Unexpected error during query parsing: \n{:?}", err);
       },
     }
-  }
-
-  #[test]
-  fn test_parser_debug() {
-    // let query = "select (a + 1), (b - c) * 2, c, *, concat('a', 'b')
-    //   from table
-    //   where a > 1 and b = 'abc' or b = 'def'
-    //   limit 123";
-
-    // let query = "select a, b, c, *
-    //   from table
-    //   where b = 'def' or a > 1 and b = 'abc'
-    //   limit 123";
-
-    // let query = "select -1, +2, 3.4, '5.6;'; select 'abc'";
-
-    // let query = "
-    // select l_discount as revenue, l_discount revenue from test;
-    // ";
-
-    // let query = "select a, b, c, *
-    //   from table
-    //   where ((b) = ('def') or (a > 1)) and b = 'abc'
-    //   limit 123";
-
-    let query = "select a as c1, b c2, c as c3, *
-      from table
-      where a > b + 1 or a = b + 2
-      limit 123";
-
-    // let query = "select a + 1, b * 2 - 4 limit 100";
-
-    // let query = "select";
-
-    println!("Query: {}", query);
-
-    let res = match parse(query) {
-      Ok(v) => v,
-      Err(Error::SQLParseError(ref msg)) => {
-        println!("{}", msg);
-        panic!();
-      },
-      err => err.unwrap(),
-    };
-
-    println!("Result: {:?}", res);
-    assert!(false, "OK");
   }
 
   #[test]
