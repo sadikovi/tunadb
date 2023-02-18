@@ -1,7 +1,7 @@
 use crate::common::error::{Error, Res};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ParsedPlan {
   Filter(Expression /* filter expression */, Box<ParsedPlan> /* child */),
   Limit(usize /* limit */, Box<ParsedPlan> /* child */),
@@ -10,7 +10,7 @@ pub enum ParsedPlan {
   Empty, // indicates an empty relation, e.g. "select 1;"
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expression {
   Add(Box<Expression>, Box<Expression>),
   Alias(Box<Expression>, String /* alias name */),
@@ -25,6 +25,7 @@ pub enum Expression {
   LiteralNumber(String /* numeric value */),
   LiteralString(String /* string value */),
   Multiply(Box<Expression>, Box<Expression>),
+  Null,
   Or(Box<Expression>, Box<Expression>),
   Star,
   Subtract(Box<Expression>, Box<Expression>),
@@ -153,6 +154,9 @@ impl<'a> Parser<'a> {
       let value = self.token_value().to_string();
       self.advance()?;
       return Ok(Expression::LiteralString(value));
+    } else if self.check(TokenType::NULL) {
+      self.advance()?;
+      return Ok(Expression::Null);
     }
 
     if self.matches(TokenType::PAREN_LEFT)? {
@@ -334,6 +338,7 @@ impl<'a> Parser<'a> {
         // We expect table name after ".".
         if self.check(TokenType::IDENTIFIER) {
           let identifier2 = self.token_value().to_string();
+          self.advance()?;
           Ok(ParsedPlan::TableScan(Some(identifier1), identifier2))
         } else {
           Err(self.error_at(&context_token, "Expected a table name after the schema name"))
@@ -455,9 +460,121 @@ pub fn parse(sql: &str) -> Res<Vec<ParsedPlan>> {
   Ok(plans)
 }
 
+//========================
+// Plan and Expression DSL
+//========================
+
+pub mod dsl {
+  use crate::exec::parser::{Expression, ParsedPlan};
+
+  pub fn identifier(name: &str) -> Expression {
+    Expression::Identifier(name.to_string())
+  }
+
+  pub fn number(value: &str) -> Expression {
+    Expression::LiteralNumber(value.to_string())
+  }
+
+  pub fn string(value: &str) -> Expression {
+    Expression::LiteralString(format!("'{}'", value))
+  }
+
+  pub fn null() -> Expression {
+    Expression::Null
+  }
+
+  pub fn star() -> Expression {
+    Expression::Star
+  }
+
+  pub fn alias(child: Expression, name: &str) -> Expression {
+    Expression::Alias(Box::new(child), name.to_string())
+  }
+
+  pub fn add(left: Expression, right: Expression) -> Expression {
+    Expression::Add(Box::new(left), Box::new(right))
+  }
+
+  pub fn subtract(left: Expression, right: Expression) -> Expression {
+    Expression::Subtract(Box::new(left), Box::new(right))
+  }
+
+  pub fn multiply(left: Expression, right: Expression) -> Expression {
+    Expression::Multiply(Box::new(left), Box::new(right))
+  }
+
+  pub fn divide(left: Expression, right: Expression) -> Expression {
+    Expression::Divide(Box::new(left), Box::new(right))
+  }
+
+  pub fn _plus(child: Expression) -> Expression {
+    Expression::UnaryPlus(Box::new(child))
+  }
+
+  pub fn _minus(child: Expression) -> Expression {
+    Expression::UnaryMinus(Box::new(child))
+  }
+
+  pub fn equals(left: Expression, right: Expression) -> Expression {
+    Expression::Equals(Box::new(left), Box::new(right))
+  }
+
+  pub fn less_than(left: Expression, right: Expression) -> Expression {
+    Expression::LessThan(Box::new(left), Box::new(right))
+  }
+
+  pub fn greater_than(left: Expression, right: Expression) -> Expression {
+    Expression::GreaterThan(Box::new(left), Box::new(right))
+  }
+
+  pub fn and(left: Expression, right: Expression) -> Expression {
+    Expression::And(Box::new(left), Box::new(right))
+  }
+
+  pub fn or(left: Expression, right: Expression) -> Expression {
+    Expression::Or(Box::new(left), Box::new(right))
+  }
+
+  pub fn filter(expression: Expression, child: ParsedPlan) -> ParsedPlan {
+    ParsedPlan::Filter(expression, Box::new(child))
+  }
+
+  pub fn project(expressions: Vec<Expression>, child: ParsedPlan) -> ParsedPlan {
+    ParsedPlan::Project(expressions, Box::new(child))
+  }
+
+  pub fn empty() -> ParsedPlan {
+    ParsedPlan::Empty
+  }
+
+  pub fn from(schema: Option<&str>, table: &str) -> ParsedPlan {
+    ParsedPlan::TableScan(schema.map(|x| x.to_string()), table.to_string())
+  }
+
+  pub fn limit(value: usize, child: ParsedPlan) -> ParsedPlan {
+    ParsedPlan::Limit(value, Box::new(child))
+  }
+}
+
 #[cfg(test)]
 pub mod tests {
   use super::*;
+  use super::dsl::*;
+
+  // Helper method to check the query plan.
+  fn assert_plan(query: &str, plan: ParsedPlan) {
+    match parse(query) {
+      Ok(mut v) => {
+        assert_eq!(v.pop().unwrap(), plan);
+      },
+      Err(Error::SQLParseError(ref msg)) => {
+        panic!("SQLParseError: Failed to parse the query: \n{}", msg);
+      },
+      Err(err) => {
+        panic!("Unexpected error during query parsing: \n{:?}", err);
+      },
+    }
+  }
 
   #[test]
   fn test_parser_debug() {
@@ -483,7 +600,7 @@ pub mod tests {
     //   limit 123";
 
     let query = "select a as c1, b c2, c as c3, *
-      from table t
+      from table
       where a > b + 1 or a = b + 2
       limit 123";
 
@@ -504,5 +621,186 @@ pub mod tests {
 
     println!("Result: {:?}", res);
     assert!(false, "OK");
+  }
+
+  #[test]
+  fn test_parser_literals() {
+    assert_plan(
+      "select 1, 1.2, -3.4, +5.6, '7.8', (9), null;",
+      project(
+        vec![
+          number("1"),
+          number("1.2"),
+          _minus(number("3.4")),
+          _plus(number("5.6")),
+          string("7.8"),
+          number("9"),
+          null(),
+        ],
+        empty()
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_expressions() {
+    assert_plan(
+      "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5);",
+      project(
+        vec![
+          add(number("1"), number("2")),
+          multiply(
+            divide(
+              subtract(
+                number("2"),
+                number("1")
+              ),
+              number("3")
+            ),
+            number("5")
+          ),
+          divide(
+            subtract(
+              number("2"),
+              number("1")
+            ),
+            multiply(
+              number("3"),
+              number("5")
+            )
+          ),
+        ],
+        empty()
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_alias() {
+    assert_plan(
+      "select a as col1, b col2, c as col3;",
+      project(
+        vec![
+          alias(identifier("a"), "col1"),
+          alias(identifier("b"), "col2"),
+          alias(identifier("c"), "col3"),
+        ],
+        empty()
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_from() {
+    assert_plan(
+      "select * from test",
+      project(
+        vec![
+          star(),
+        ],
+        from(None, "test")
+      )
+    );
+
+    assert_plan(
+      "select * from schema.test",
+      project(
+        vec![
+          star(),
+        ],
+        from(Some("schema"), "test")
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_where() {
+    assert_plan(
+      "select * from test where a",
+      filter(
+        identifier("a"), // boolean column
+        project(vec![star()], from(None, "test"))
+      )
+    );
+
+    assert_plan(
+      "select * from test where 1 = 2 and a > b or c < d",
+      filter(
+        or(
+          and(
+            equals(
+              number("1"),
+              number("2")
+            ),
+            greater_than(
+              identifier("a"),
+              identifier("b")
+            )
+          ),
+          less_than(
+            identifier("c"),
+            identifier("d")
+          )
+        ),
+        project(vec![star()], from(None, "test"))
+      )
+    );
+
+    assert_plan(
+      "select * from test where 1 = 2 and (a > b or c < d)",
+      filter(
+        and(
+          equals(
+            number("1"),
+            number("2")
+          ),
+          or(
+            greater_than(
+              identifier("a"),
+              identifier("b")
+            ),
+            less_than(
+              identifier("c"),
+              identifier("d")
+            )
+          )
+        ),
+        project(vec![star()], from(None, "test"))
+      )
+    );
+
+    assert_plan(
+      "select * from test where ((b) = ('def') or (a > 1)) and b = 'abc'",
+      filter(
+        and(
+          or(
+            equals(
+              identifier("b"),
+              string("def")
+            ),
+            greater_than(
+              identifier("a"),
+              number("1")
+            )
+          ),
+          equals(
+            identifier("b"),
+            string("abc")
+          )
+        ),
+        project(vec![star()], from(None, "test"))
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_limit() {
+    assert_plan(
+      "select * from test limit 123",
+      limit(
+        123,
+        project(vec![star()], from(None, "test"))
+      )
+    );
   }
 }
