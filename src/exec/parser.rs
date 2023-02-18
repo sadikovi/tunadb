@@ -13,6 +13,7 @@ pub enum ParsedPlan {
 #[derive(Debug)]
 pub enum Expression {
   Add(Box<Expression>, Box<Expression>),
+  Alias(Box<Expression>, String /* alias name */),
   And(Box<Expression>, Box<Expression>),
   Divide(Box<Expression>, Box<Expression>),
   Equals(Box<Expression>, Box<Expression>),
@@ -290,7 +291,21 @@ impl<'a> Parser<'a> {
         self.advance()?;
         expressions.push(Expression::Star);
       } else {
-        expressions.push(self.expression()?);
+        let mut expr = self.expression()?;
+
+        // Parse optional alias:
+        //   Expression [alias]
+        //   Expression [AS alias]
+        if self.check(TokenType::AS) {
+          self.advance()?;
+        }
+        if self.check(TokenType::IDENTIFIER) {
+          let value = self.token_value().to_string();
+          self.advance()?;
+          expr = Expression::Alias(Box::new(expr), value);
+        }
+
+        expressions.push(expr);
       }
 
       if self.check(TokenType::COMMA) {
@@ -405,12 +420,7 @@ impl<'a> Parser<'a> {
     if self.matches(TokenType::SELECT)? {
       let stmt = self.select_statement()?;
       if !self.matches(TokenType::SEMICOLON)? && !self.done() {
-        Err(
-          self.error_at(
-            &self.current,
-            &format!("Expected the end of the statement but found '{}'", self.token_value())
-          )
-        )
+        Err(self.error_at(&self.current, &format!("Unexpected token '{}'", self.token_value())))
       } else {
         Ok(stmt)
       }
@@ -463,19 +473,19 @@ pub mod tests {
 
     // let query = "select -1, +2, 3.4, '5.6;'; select 'abc'";
 
-    let query = "
-    select sum(l_discount) as revenue from test;
-    ";
+    // let query = "
+    // select l_discount as revenue, l_discount revenue from test;
+    // ";
 
     // let query = "select a, b, c, *
     //   from table
     //   where ((b) = ('def') or (a > 1)) and b = 'abc'
     //   limit 123";
 
-    // let query = "select a, b, c, *
-    //   from table
-    //   where a > b + 1 or a = b + 2
-    //   limit 123";
+    let query = "select a as c1, b c2, c as c3, *
+      from table t
+      where a > b + 1 or a = b + 2
+      limit 123";
 
     // let query = "select a + 1, b * 2 - 4 limit 100";
 
