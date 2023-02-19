@@ -26,14 +26,12 @@ macro_rules! internal_err {
     (crate::common::error::Error::InternalError(format!($fmt, $($args),*)));
 }
 
-
 macro_rules! already_exists_err {
   ($fmt:expr) =>
     (crate::common::error::Error::InternalAlreadyExists($fmt.to_string()));
   ($fmt:expr, $($args:expr),*) =>
     (crate::common::error::Error::InternalAlreadyExists(format!($fmt, $($args),*)));
 }
-
 
 macro_rules! res {
   ($e:expr) => ($e.unwrap());
@@ -46,7 +44,6 @@ macro_rules! res {
 //=============
 
 // Converts byte slice into u32 (little endian).
-
 macro_rules! u8_u32 {
   ($buf:expr) => {
     u32::from_le_bytes([$buf[0], $buf[1], $buf[2], $buf[3]])
@@ -54,7 +51,6 @@ macro_rules! u8_u32 {
 }
 
 // Converts u32 to byte array (little endian).
-
 macro_rules! u32_u8 {
   ($num:expr) => {{
     let arr: [u8; 4] = $num.to_le_bytes();
@@ -63,7 +59,6 @@ macro_rules! u32_u8 {
 }
 
 // Converts byte slice into u64 (little endian).
-
 macro_rules! u8_u64 {
   ($buf:expr) => {
     u64::from_le_bytes([$buf[0], $buf[1], $buf[2], $buf[3], $buf[4], $buf[5], $buf[6], $buf[7]])
@@ -71,7 +66,6 @@ macro_rules! u8_u64 {
 }
 
 // Converts u64 to byte array (little endian).
-
 macro_rules! u64_u8 {
   ($num:expr) => {{
     let arr: [u8; 8] = $num.to_le_bytes();
@@ -80,7 +74,6 @@ macro_rules! u64_u8 {
 }
 
 // Converts byte slice into f64 (little endian).
-
 macro_rules! u8_f64 {
   ($buf:expr) => {
     f64::from_le_bytes([$buf[0], $buf[1], $buf[2], $buf[3], $buf[4], $buf[5], $buf[6], $buf[7]])
@@ -88,7 +81,6 @@ macro_rules! u8_f64 {
 }
 
 // Converts f64 to byte array (little endian).
-
 macro_rules! f64_u8 {
   ($num:expr) => {{
     let arr: [u8; 8] = $num.to_le_bytes();
@@ -97,7 +89,6 @@ macro_rules! f64_u8 {
 }
 
 // Writes u32 into a slice.
-
 macro_rules! write_u32 {
   ($slice:expr, $num:expr) => {{
     res!(($slice).write(&u32_u8!($num)));
@@ -105,7 +96,6 @@ macro_rules! write_u32 {
 }
 
 // Writes u64 into a slice.
-
 macro_rules! write_u64 {
   ($slice:expr, $num:expr) => {{
     res!(($slice).write(&u64_u8!($num)));
@@ -113,7 +103,6 @@ macro_rules! write_u64 {
 }
 
 // Writes byte array into a slice.
-
 macro_rules! write_bytes {
   ($slice:expr, $data:expr) => {{
     res!(($slice).write($data));
