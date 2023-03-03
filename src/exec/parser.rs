@@ -1,37 +1,7 @@
+use std::rc::Rc;
 use crate::common::error::{Error, Res};
+use crate::exec::plan::{Expression, Plan};
 use crate::exec::scanner::{Scanner, Token, TokenType};
-
-#[derive(Debug, PartialEq)]
-pub enum Plan {
-  Filter(Expression /* filter expression */, Box<Plan> /* child */),
-  Limit(usize /* limit */, Box<Plan> /* child */),
-  Project(Vec<Expression> /* expressions */, Box<Plan>),
-  TableScan(Option<String> /* schema */, String /* table name */),
-  Empty, // indicates an empty relation, e.g. "select 1;"
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Expression {
-  Add(Box<Expression>, Box<Expression>),
-  Alias(Box<Expression>, String /* alias name */),
-  And(Box<Expression>, Box<Expression>),
-  Divide(Box<Expression>, Box<Expression>),
-  Equals(Box<Expression>, Box<Expression>),
-  GreaterThan(Box<Expression>, Box<Expression>),
-  GreaterThanEquals(Box<Expression>, Box<Expression>),
-  Identifier(String /* identifier value */),
-  LessThan(Box<Expression>, Box<Expression>),
-  LessThanEquals(Box<Expression>, Box<Expression>),
-  LiteralNumber(String /* numeric value */),
-  LiteralString(String /* string value */),
-  Multiply(Box<Expression>, Box<Expression>),
-  Null,
-  Or(Box<Expression>, Box<Expression>),
-  Star,
-  Subtract(Box<Expression>, Box<Expression>),
-  UnaryPlus(Box<Expression>),
-  UnaryMinus(Box<Expression>),
-}
 
 pub struct Parser<'a> {
   sql: &'a str,
@@ -142,18 +112,18 @@ impl<'a> Parser<'a> {
     if self.check(TokenType::IDENTIFIER) {
       let value = self.token_value().to_string();
       self.advance()?;
-      return Ok(Expression::Identifier(value));
+      return Ok(Expression::Identifier(Rc::new(value)));
     }
 
     // Literals.
     if self.check(TokenType::NUMBER) {
       let value = self.token_value().to_string();
       self.advance()?;
-      return Ok(Expression::LiteralNumber(value));
+      return Ok(Expression::LiteralNumber(Rc::new(value)));
     } else if self.check(TokenType::STRING) {
       let value = self.token_value().to_string();
       self.advance()?;
-      return Ok(Expression::LiteralString(value));
+      return Ok(Expression::LiteralString(Rc::new(value)));
     } else if self.check(TokenType::NULL) {
       self.advance()?;
       return Ok(Expression::Null);
@@ -179,9 +149,9 @@ impl<'a> Parser<'a> {
   #[inline]
   fn unary(&mut self) -> Res<Expression> {
     if self.matches(TokenType::MINUS)? {
-      Ok(Expression::UnaryMinus(Box::new(self.primary()?)))
+      Ok(Expression::UnaryMinus(Rc::new(self.primary()?)))
     } else if self.matches(TokenType::PLUS)? {
-      Ok(Expression::UnaryPlus(Box::new(self.primary()?)))
+      Ok(Expression::UnaryPlus(Rc::new(self.primary()?)))
     } else {
       self.primary()
     }
@@ -194,10 +164,10 @@ impl<'a> Parser<'a> {
     loop {
       if self.matches(TokenType::STAR)? {
         let right = self.unary()?;
-        expr = Expression::Multiply(Box::new(expr), Box::new(right));
+        expr = Expression::Multiply(Rc::new(expr), Rc::new(right));
       } else if self.matches(TokenType::SLASH)? {
         let right = self.unary()?;
-        expr = Expression::Divide(Box::new(expr), Box::new(right));
+        expr = Expression::Divide(Rc::new(expr), Rc::new(right));
       } else {
         break;
       }
@@ -213,10 +183,10 @@ impl<'a> Parser<'a> {
     loop {
       if self.matches(TokenType::PLUS)? {
         let right = self.multiplication()?;
-        expr = Expression::Add(Box::new(expr), Box::new(right));
+        expr = Expression::Add(Rc::new(expr), Rc::new(right));
       } else if self.matches(TokenType::MINUS)? {
         let right = self.multiplication()?;
-        expr = Expression::Subtract(Box::new(expr), Box::new(right));
+        expr = Expression::Subtract(Rc::new(expr), Rc::new(right));
       } else {
         break;
       }
@@ -232,19 +202,19 @@ impl<'a> Parser<'a> {
     // Parse the right-hand side of the expression.
     if self.matches(TokenType::EQUALS)? {
       let right = self.addition()?;
-      Ok(Expression::Equals(Box::new(left), Box::new(right)))
+      Ok(Expression::Equals(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::GREATER_THAN)? {
       let right = self.addition()?;
-      Ok(Expression::GreaterThan(Box::new(left), Box::new(right)))
+      Ok(Expression::GreaterThan(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::GREATER_THAN_EQUALS)? {
       let right = self.addition()?;
-      Ok(Expression::GreaterThanEquals(Box::new(left), Box::new(right)))
+      Ok(Expression::GreaterThanEquals(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::LESS_THAN)? {
       let right = self.addition()?;
-      Ok(Expression::LessThan(Box::new(left), Box::new(right)))
+      Ok(Expression::LessThan(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::LESS_THAN_EQUALS)? {
       let right = self.addition()?;
-      Ok(Expression::LessThanEquals(Box::new(left), Box::new(right)))
+      Ok(Expression::LessThanEquals(Rc::new(left), Rc::new(right)))
     } else {
       // Technically, a single left-hand side can be a boolean expression already, e.g. boolean
       // literal or a column evaluated to a boolean, so absence of the comparison operator does
@@ -259,7 +229,7 @@ impl<'a> Parser<'a> {
 
     while self.matches(TokenType::AND)? {
       let right = self.comparison()?;
-      expr = Expression::And(Box::new(expr), Box::new(right));
+      expr = Expression::And(Rc::new(expr), Rc::new(right));
     }
 
     Ok(expr)
@@ -271,7 +241,7 @@ impl<'a> Parser<'a> {
 
     while self.matches(TokenType::OR)? {
       let right = self.logical_and()?;
-      expr = Expression::Or(Box::new(expr), Box::new(right));
+      expr = Expression::Or(Rc::new(expr), Rc::new(right));
     }
 
     Ok(expr)
@@ -306,7 +276,7 @@ impl<'a> Parser<'a> {
         if self.check(TokenType::IDENTIFIER) {
           let value = self.token_value().to_string();
           self.advance()?;
-          expr = Expression::Alias(Box::new(expr), value);
+          expr = Expression::Alias(Rc::new(expr), Rc::new(value));
         }
 
         expressions.push(expr);
@@ -339,13 +309,13 @@ impl<'a> Parser<'a> {
         if self.check(TokenType::IDENTIFIER) {
           let identifier2 = self.token_value().to_string();
           self.advance()?;
-          Ok(Plan::TableScan(Some(identifier1), identifier2))
+          Ok(Plan::TableScan(Some(Rc::new(identifier1)), Rc::new(identifier2)))
         } else {
           Err(self.error_at(&context_token, "Expected a table name after the schema name"))
         }
       } else {
         // We have [table] with the current schema.
-        Ok(Plan::TableScan(None, identifier1.to_string()))
+        Ok(Plan::TableScan(None, Rc::new(identifier1.to_string())))
       }
     } else {
       Err(
@@ -363,7 +333,7 @@ impl<'a> Parser<'a> {
   #[inline]
   fn where_statement(&mut self, plan: Plan) -> Res<Plan> {
     let expression = self.expression()?;
-    Ok(Plan::Filter(expression, Box::new(plan)))
+    Ok(Plan::Filter(Rc::new(expression), Rc::new(plan)))
   }
 
   #[inline]
@@ -374,7 +344,7 @@ impl<'a> Parser<'a> {
         Ok(value) => {
           // Advance and return the limit plan.
           self.advance()?;
-          Ok(Plan::Limit(value, Box::new(plan)))
+          Ok(Plan::Limit(value, Rc::new(plan)))
         },
         Err(_) => {
           // We failed to parse the value into a limit.
@@ -405,7 +375,7 @@ impl<'a> Parser<'a> {
       plan = self.from_statement()?;
     }
 
-    plan = Plan::Project(expressions, Box::new(plan));
+    plan = Plan::Project(expressions, Rc::new(plan));
 
     if self.matches(TokenType::WHERE)? {
       plan = self.where_statement(plan)?;
@@ -465,18 +435,19 @@ pub fn parse(sql: &str) -> Res<Vec<Plan>> {
 //========================
 
 pub mod dsl {
+  use std::rc::Rc;
   use super::{Expression, Plan};
 
   pub fn identifier(name: &str) -> Expression {
-    Expression::Identifier(name.to_string())
+    Expression::Identifier(Rc::new(name.to_string()))
   }
 
   pub fn number(value: &str) -> Expression {
-    Expression::LiteralNumber(value.to_string())
+    Expression::LiteralNumber(Rc::new(value.to_string()))
   }
 
   pub fn string(value: &str) -> Expression {
-    Expression::LiteralString(format!("'{}'", value))
+    Expression::LiteralString(Rc::new(format!("'{}'", value)))
   }
 
   pub fn null() -> Expression {
@@ -488,59 +459,59 @@ pub mod dsl {
   }
 
   pub fn alias(child: Expression, name: &str) -> Expression {
-    Expression::Alias(Box::new(child), name.to_string())
+    Expression::Alias(Rc::new(child), Rc::new(name.to_string()))
   }
 
   pub fn add(left: Expression, right: Expression) -> Expression {
-    Expression::Add(Box::new(left), Box::new(right))
+    Expression::Add(Rc::new(left), Rc::new(right))
   }
 
   pub fn subtract(left: Expression, right: Expression) -> Expression {
-    Expression::Subtract(Box::new(left), Box::new(right))
+    Expression::Subtract(Rc::new(left), Rc::new(right))
   }
 
   pub fn multiply(left: Expression, right: Expression) -> Expression {
-    Expression::Multiply(Box::new(left), Box::new(right))
+    Expression::Multiply(Rc::new(left), Rc::new(right))
   }
 
   pub fn divide(left: Expression, right: Expression) -> Expression {
-    Expression::Divide(Box::new(left), Box::new(right))
+    Expression::Divide(Rc::new(left), Rc::new(right))
   }
 
   pub fn _plus(child: Expression) -> Expression {
-    Expression::UnaryPlus(Box::new(child))
+    Expression::UnaryPlus(Rc::new(child))
   }
 
   pub fn _minus(child: Expression) -> Expression {
-    Expression::UnaryMinus(Box::new(child))
+    Expression::UnaryMinus(Rc::new(child))
   }
 
   pub fn equals(left: Expression, right: Expression) -> Expression {
-    Expression::Equals(Box::new(left), Box::new(right))
+    Expression::Equals(Rc::new(left), Rc::new(right))
   }
 
   pub fn less_than(left: Expression, right: Expression) -> Expression {
-    Expression::LessThan(Box::new(left), Box::new(right))
+    Expression::LessThan(Rc::new(left), Rc::new(right))
   }
 
   pub fn greater_than(left: Expression, right: Expression) -> Expression {
-    Expression::GreaterThan(Box::new(left), Box::new(right))
+    Expression::GreaterThan(Rc::new(left), Rc::new(right))
   }
 
   pub fn and(left: Expression, right: Expression) -> Expression {
-    Expression::And(Box::new(left), Box::new(right))
+    Expression::And(Rc::new(left), Rc::new(right))
   }
 
   pub fn or(left: Expression, right: Expression) -> Expression {
-    Expression::Or(Box::new(left), Box::new(right))
+    Expression::Or(Rc::new(left), Rc::new(right))
   }
 
   pub fn filter(expression: Expression, child: Plan) -> Plan {
-    Plan::Filter(expression, Box::new(child))
+    Plan::Filter(Rc::new(expression), Rc::new(child))
   }
 
   pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
-    Plan::Project(expressions, Box::new(child))
+    Plan::Project(expressions, Rc::new(child))
   }
 
   pub fn empty() -> Plan {
@@ -548,11 +519,11 @@ pub mod dsl {
   }
 
   pub fn from(schema: Option<&str>, table: &str) -> Plan {
-    Plan::TableScan(schema.map(|x| x.to_string()), table.to_string())
+    Plan::TableScan(schema.map(|x| Rc::new(x.to_string())), Rc::new(table.to_string()))
   }
 
   pub fn limit(value: usize, child: Plan) -> Plan {
-    Plan::Limit(value, Box::new(child))
+    Plan::Limit(value, Rc::new(child))
   }
 }
 

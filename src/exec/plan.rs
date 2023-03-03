@@ -1,221 +1,25 @@
 use std::fmt;
 use std::rc::Rc;
-use crate::common::error::Res;
-use crate::common::row::Row;
 use crate::common::trees::TreeNode;
-use crate::common::types::{Field, Type};
-use crate::exec::attr::{Attribute, reference, from_fields};
-use crate::exec::catalog;
-use crate::storage::btree::BTreeIter;
-use crate::storage::txn::{TransactionRef, next_object_id};
 
-pub fn insert(info: Rc<catalog::TableInfo>, project: Rc<Vec<usize>>, query: Plan) -> Res<Plan> {
-  Ok(
-    Plan::Insert {
-      output: Rc::new(
-        vec![reference(&Field::new("NUM_INSERTED", Type::BIGINT, false)?, 0)?]
-      ),
-      info: info,
-      project: project,
-      query: vec![query],
-    }
-  )
-}
-
-pub fn project(output: Rc<Vec<Attribute>>, child: Plan) -> Res<Plan> {
-  Ok(Plan::Project { output, child: vec![child] })
-}
-
-pub fn table_scan(info: Rc<catalog::TableInfo>) -> Res<Plan> {
-  Ok(
-    Plan::TableScan {
-      output: Rc::new(from_fields(info.table_fields())?),
-      info: info,
-    }
-  )
-}
-
-// Physical plan.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Plan {
-  // TODO: Add assertion on the length of the project vector
-  // project.len() == 0 || fields.len() == project.len()
-  // TODO: Add assertion on the query having non-zero attributes.
-  Insert {
-    output: Rc<Vec<Attribute>>, // attributes for insert, not the query
-    info: Rc<catalog::TableInfo>,
-    // Projection map: vector that contains field positions to insert into.
-    // If the vector is empty, then no projection is provided.
-    project: Rc<Vec<usize>>,
-    query: Vec<Plan>
-  },
-  Limit {
-    limit: usize,
-    child: Vec<Plan>,
-  },
-  Project {
-    output: Rc<Vec<Attribute>>,
-    child: Vec<Plan>,
-  },
-  TableScan {
-    output: Rc<Vec<Attribute>>, // derived from the table info
-    info: Rc<catalog::TableInfo>
-  },
-}
-
-impl Plan {
-  #[inline]
-  pub fn output(&self) -> &[Attribute] {
-    match self {
-      Plan::Insert { output, .. } => output,
-      Plan::Limit { child, .. } => child[0].output(),
-      Plan::Project { output, .. } => output,
-      Plan::TableScan { output, .. } => output,
-    }
-  }
-
-  #[inline]
-  pub fn execute(&self, txn: &TransactionRef) -> Res<PlanIter> {
-    match self {
-      Plan::Insert { info, project, query, .. } => {
-        let child = &query[0];
-        let output = child.output();
-        let fields = info.table_fields().get();
-
-        // TODO: Revisit the error messages and convert them.
-
-        // Validation.
-        if project.len() == 0 {
-          // Projection vector is empty, we need to check all of the fields in the table.
-          if output.len() > fields.len() {
-            return Err(internal_err!("Insert has more expressions than target columns"))
-          } else {
-            // For the output fields, check if data type matches.
-            for i in 0..output.len() {
-              if &output[i].data_type() != &fields[i].data_type() {
-                return Err(internal_err!("Data type mismatch"));
-              }
-            }
-            // For the remaining fields, check if we can insert nulls.
-            for i in output.len()..fields.len() {
-              if !fields[i].nullable() {
-                return Err(internal_err!("Non-null constraint violation"));
-              }
-            }
-          }
-        } else {
-          // Projection vector exists, we only need to check projection fields.
-          if output.len() > project.len() {
-            return Err(internal_err!("Insert has more expressions than target columns"))
-          } else if output.len() < project.len() {
-            return Err(internal_err!("Insert has more target columns than expressions"))
-          } else {
-            let mut null_check_vector = vec![false; fields.len()];
-            for i in 0..output.len() {
-              let ord = project[i];
-              null_check_vector[ord] = true;
-              if &output[i].data_type() != &fields[ord].data_type() {
-                return Err(internal_err!("Data type mismatch"));
-              }
-            }
-            // Verify that the remaining columns are nullable.
-            for i in 0..fields.len() {
-              if !null_check_vector[i] && !fields[i].nullable() {
-                return Err(internal_err!("Non-null constraint violation"));
-              }
-            }
-          }
-        }
-
-        // Whether or not we can directly write a row without allocating a new one.
-        let zero_copy =
-          // Output must match the schema.
-          project.len() == 0 && output.len() == fields.len() ||
-          // Output must match the projection and projection must insert in the order of schema.
-          project.len() == output.len() && project.iter().enumerate().filter(|(i, p)| i != *p).count() == 0;
-
-        // At this point, the input data is valid and matches the table schema.
-        let mut set = match catalog::get_table_data(&txn, info) {
-          Some(set) => set,
-          None => catalog::create_table_data(&txn, info)?,
-        };
-
-        let mut num_rows = 0;
-        let mut iter = child.execute(&txn)?;
-
-        if zero_copy {
-          while let Some(row) = iter.next() {
-            // TODO: Improve nullability check.
-            for i in 0..fields.len() {
-              if row.is_null(i) && !fields[i].nullable() {
-                return Err(internal_err!("Non-null constraint violation"));
-              }
-            }
-            let row_id = next_object_id(&txn);
-            set.put(&u64_u8!(row_id), &row.to_vec());
-            num_rows += 1;
-          }
-        } else if project.len() == 0 {
-          // TODO: Check if we can combine the last two if branches (with project and without).
-          while let Some(row) = iter.next() {
-            let mut out_row = Row::new(fields.len());
-            for i in 0..output.len() {
-              let attr = &output[i];
-              attr.eval(&row, &mut out_row, i, fields[i].nullable())?;
-            }
-            let row_id = next_object_id(&txn);
-            set.put(&u64_u8!(row_id), &out_row.to_vec());
-            num_rows += 1;
-          }
-        } else {
-          while let Some(row) = iter.next() {
-            let mut out_row = Row::new(fields.len());
-            for i in 0..output.len() {
-              let ord = project[i];
-              let attr = &output[i];
-              attr.eval(&row, &mut out_row, ord, fields[ord].nullable())?;
-            }
-            let row_id = next_object_id(&txn);
-            set.put(&u64_u8!(row_id), &out_row.to_vec());
-            num_rows += 1;
-          }
-        }
-
-        // Construct the output of the command.
-        let mut row = Row::new(1);
-        row.set_i64(0, num_rows as i64);
-        Ok(PlanIter::from_vec(vec![row]))
-      },
-      Plan::Limit { limit, child } => {
-        Ok(PlanIter::limit(*limit, child[0].execute(&txn)?))
-      },
-      Plan::Project { .. } => {
-        // select a, b, c from (select a, b from table)
-        // Check if the outputs can be extracted from the child's output.
-        unimplemented!()
-      },
-      Plan::TableScan { ref info, .. } => {
-        match catalog::get_table_data(&txn, info) {
-          Some(mut set) => {
-            let num_fields = info.table_fields().len();
-            let iter = set.list(None, None);
-            Ok(PlanIter::TableScanIter { num_fields, iter })
-          },
-          None => Ok(PlanIter::empty()),
-        }
-      },
-    }
-  }
+  Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
+  Limit(usize /* limit */, Rc<Plan> /* child */),
+  Project(Vec<Expression> /* expressions */, Rc<Plan>),
+  TableScan(Option<Rc<String>> /* schema */, Rc<String> /* table name */),
+  Empty, // indicates an empty relation, e.g. "select 1;"
 }
 
 impl TreeNode<Plan> for Plan {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Plan::Insert { .. } => write!(f, "Insert"),
-      Plan::Limit { .. } => write!(f, "Limit"),
-      Plan::Project { .. } => write!(f, "Project"),
-      Plan::TableScan { .. } => write!(f, "TableScan"),
+      Plan::Filter(_, _) => write!(f, "Filter"),
+      Plan::Limit(_, _) => write!(f, "Limit"),
+      Plan::Project(_, _) => write!(f, "Project"),
+      Plan::TableScan(_, _) => write!(f, "TableScan"),
+      Plan::Empty => write!(f, "Empty"),
     }
   }
 
@@ -225,157 +29,185 @@ impl TreeNode<Plan> for Plan {
   }
 
   #[inline]
-  fn children(&self) -> &[Plan] {
+  fn children(&self) -> Vec<&Plan> {
     match self {
-      Plan::Insert { query, .. } => query,
-      Plan::Limit { child, .. } => child,
-      Plan::Project { child, .. } => child,
-      Plan::TableScan { .. } => &[],
+      Plan::Filter(_, ref child) => vec![child],
+      Plan::Limit(_, ref child) => vec![child],
+      Plan::Project(_, ref child) => vec![child],
+      Plan::TableScan(_, _) => Vec::new(),
+      Plan::Empty => Vec::new(),
     }
   }
 
   #[inline]
   fn copy(&self, children: Vec<Plan>) -> Plan {
     match self {
-      Plan::Insert { output, info, project, .. } => {
-        // TODO: improve assertion message.
-        assert_eq!(children.len(), 1, "Insert: {:?}", children);
-        Plan::Insert {
-          output: output.clone(),
-          info: info.clone(),
-          project: project.clone(),
-          query: children
-        }
-      },
-      Plan::Limit { limit, .. } => {
-        assert_eq!(children.len(), 1, "Limit: {:?}", children);
-        Plan::Limit { limit: *limit, child: children }
-      },
-      Plan::Project { output, .. } => {
-        // TODO: improve assertion message.
-        assert_eq!(children.len(), 1, "Project: {:?}", children);
-        Plan::Project {
-          output: output.clone(),
-          child: children
-        }
-      },
-      Plan::TableScan { output, info } => {
-        Plan::TableScan {
-          output: output.clone(),
-          info: info.clone()
-        }
-      },
+      Plan::Filter(ref expression, ref child) => unimplemented!(),
+      Plan::Limit(limit, ref child) => unimplemented!(),
+      Plan::Project(expressions, ref child) => unimplemented!(),
+      Plan::TableScan(ref schema, ref name) => unimplemented!(),
+      Plan::Empty => unimplemented!(),
     }
   }
 }
 
-pub enum PlanIter {
-  EmptyIter,
-  FromVecIter { rows: Vec<Row> },
-  LimitIter { limit: usize, parent: Box<PlanIter> },
-  TableScanIter { num_fields: usize, iter: BTreeIter },
+#[derive(Debug, PartialEq)]
+pub enum Expression {
+  Add(Rc<Expression>, Rc<Expression>),
+  Alias(Rc<Expression>, Rc<String> /* alias name */),
+  And(Rc<Expression>, Rc<Expression>),
+  Divide(Rc<Expression>, Rc<Expression>),
+  Equals(Rc<Expression>, Rc<Expression>),
+  GreaterThan(Rc<Expression>, Rc<Expression>),
+  GreaterThanEquals(Rc<Expression>, Rc<Expression>),
+  Identifier(Rc<String> /* identifier value */),
+  LessThan(Rc<Expression>, Rc<Expression>),
+  LessThanEquals(Rc<Expression>, Rc<Expression>),
+  LiteralNumber(Rc<String> /* numeric value */),
+  LiteralString(Rc<String> /* string value */),
+  Multiply(Rc<Expression>, Rc<Expression>),
+  Null,
+  Or(Rc<Expression>, Rc<Expression>),
+  Star,
+  Subtract(Rc<Expression>, Rc<Expression>),
+  UnaryPlus(Rc<Expression>),
+  UnaryMinus(Rc<Expression>),
 }
 
-impl PlanIter {
-  // Returns an empty iterator.
-  #[inline]
-  fn empty() -> Self {
-    Self::EmptyIter
-  }
-
-  // Returns an iterator from the vector of rows.
-  #[inline]
-  fn from_vec(mut rows: Vec<Row>) -> Self {
-    rows.reverse();
-    Self::FromVecIter { rows: rows }
-  }
-
-  // Returns an iterator that is limited to `limit` rows from the `parent`.
-  #[inline]
-  fn limit(limit: usize, plan: PlanIter) -> Self {
-    Self::LimitIter { limit: limit, parent: Box::new(plan) }
-  }
+macro_rules! copy_binary {
+  ($tpe:expr, $name:expr, $children:expr) => {{
+    assert_eq!(
+      $children.len(),
+      2,
+      "Expected 2 child nodes for {} binary expression but found {}",
+      $name,
+      $children.len()
+    );
+    let right = $children.pop().unwrap();
+    let left = $children.pop().unwrap();
+    $tpe(Rc::new(left), Rc::new(right))
+  }}
 }
 
-impl Iterator for PlanIter {
-  type Item = Row;
+macro_rules! copy_unary {
+  ($tpe:expr, $name:expr, $children:expr) => {{
+    assert_eq!(
+      $children.len(),
+      1,
+      "Expected 1 child node for {} unary expression but found {}",
+      $name,
+      $children.len()
+    );
+    let child = $children.pop().unwrap();
+    $tpe(Rc::new(child))
+  }}
+}
 
-  fn next(&mut self) -> Option<Self::Item> {
+macro_rules! display_binary {
+  ($f:expr, $left:expr, $op:expr, $right:expr) => {{
+    $left.display($f)?;
+    write!($f, " {} ", $op)?;
+    $right.display($f)
+  }}
+}
+
+macro_rules! display_unary {
+  ($f:expr, $op:expr, $child:expr) => {{
+    write!($f, "{}", $op)?;
+    $child.display($f)
+  }}
+}
+
+impl TreeNode<Expression> for Expression {
+  #[inline]
+  fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      PlanIter::EmptyIter => None,
-      PlanIter::FromVecIter { rows } => rows.pop(),
-      PlanIter::LimitIter { ref mut limit, parent } => {
-        if *limit > 0 {
-          *limit -= 1;
-          parent.next()
-        } else {
-          None
-        }
+      Expression::Add(ref left, ref right) => display_binary!(f, left, "+", right),
+      Expression::Alias(ref child, ref name) => {
+        child.display(f)?;
+        write!(f, "as {}", name)
       },
-      PlanIter::TableScanIter { num_fields, iter } => {
-        match iter.next() {
-          Some((_key, data)) => Some(Row::from_buf(*num_fields, data)),
-          None => None,
-        }
-      },
+      Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
+      Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
+      Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
+      Expression::GreaterThan(ref left, ref right) => display_binary!(f, left, ">", right),
+      Expression::GreaterThanEquals(ref left, ref right) => display_binary!(f, left, ">=", right),
+      Expression::Identifier(value) => write!(f, "${}", value),
+      Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
+      Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
+      Expression::LiteralNumber(value) => write!(f, "{}", value),
+      Expression::LiteralString(value) => write!(f, "{}", value),
+      Expression::Multiply(ref left, ref right) => display_binary!(f, left, "x", right),
+      Expression::Null => write!(f, "null"),
+      Expression::Or(ref left, ref right) => display_binary!(f, left, "or", right),
+      Expression::Star => write!(f, "*"),
+      Expression::Subtract(ref left, ref right) => display_binary!(f, left, "-", right),
+      Expression::UnaryPlus(ref child) => display_unary!(f, "+", child),
+      Expression::UnaryMinus(ref child) => display_unary!(f, "-", child),
     }
   }
-}
 
-#[cfg(test)]
-pub mod tests {
-  use super::*;
-
-  #[test]
-  fn test_plan_iter_empty() {
-    let mut iter = PlanIter::empty();
-    assert!(iter.next().is_none());
+  #[inline]
+  fn as_ref(&self) -> &Expression {
+    self
   }
 
-  #[test]
-  fn test_plan_iter_from_vec() {
-    let mut iter = PlanIter::from_vec(vec![Row::new(1)]);
-    assert_eq!(iter.next().unwrap().num_fields(), 1);
-
-    let mut iter = PlanIter::from_vec(
-      vec![
-        Row::new(1),
-        Row::new(2),
-        Row::new(3),
-      ]
-    );
-    assert_eq!(iter.next().unwrap().num_fields(), 1);
-    assert_eq!(iter.next().unwrap().num_fields(), 2);
-    assert_eq!(iter.next().unwrap().num_fields(), 3);
-  }
-
-  #[test]
-  fn test_plan_iter_limit() {
-    // Limit is greater than the length of the iterator.
-    let iter = PlanIter::from_vec(
-      vec![
-        Row::new(1),
-        Row::new(1),
-        Row::new(1),
-      ]
-    );
-    let mut limit_iter = PlanIter::limit(1, iter);
-    assert!(limit_iter.next().is_some());
-    assert!(limit_iter.next().is_none());
-
-    // Limit is smaller than the length of the iterator.
-    let iter = PlanIter::from_vec(vec![Row::new(1)]);
-    let mut limit_iter = PlanIter::limit(10, iter);
-    assert!(limit_iter.next().is_some());
-    for _ in 0..10 {
-      assert!(limit_iter.next().is_none());
+  #[inline]
+  fn children(&self) -> Vec<&Expression> {
+    match self {
+      Expression::Add(ref left, ref right) => vec![left, right],
+      Expression::Alias(ref child, _) => vec![child],
+      Expression::And(ref left, ref right) => vec![left, right],
+      Expression::Divide(ref left, ref right) => vec![left, right],
+      Expression::Equals(ref left, ref right) => vec![left, right],
+      Expression::GreaterThan(ref left, ref right) => vec![left, right],
+      Expression::GreaterThanEquals(ref left, ref right) => vec![left, right],
+      Expression::Identifier(_) => Vec::new(),
+      Expression::LessThan(ref left, ref right) => vec![left, right],
+      Expression::LessThanEquals(ref left, ref right) => vec![left, right],
+      Expression::LiteralNumber(_) => Vec::new(),
+      Expression::LiteralString(_) => Vec::new(),
+      Expression::Multiply(ref left, ref right) => vec![left, right],
+      Expression::Null => Vec::new(),
+      Expression::Or(ref left, ref right) => vec![left, right],
+      Expression::Star => Vec::new(),
+      Expression::Subtract(ref left, ref right) => vec![left, right],
+      Expression::UnaryPlus(ref child) => vec![child],
+      Expression::UnaryMinus(ref child) => vec![child],
     }
+  }
 
-    // Limit on an empty iterator.
-    let iter = PlanIter::from_vec(Vec::new());
-    let mut limit_iter = PlanIter::limit(5, iter);
-    for _ in 0..5 {
-      assert!(limit_iter.next().is_none());
+  #[inline]
+  fn copy(&self, mut children: Vec<Expression>) -> Expression {
+    match self {
+      Expression::Add(_, _) => copy_binary!(Expression::Add, "Add", children),
+      Expression::Alias(_, ref name) => {
+        assert_eq!(
+          children.len(),
+          1,
+          "Expected 1 child for Alias expression but found {}",
+          children.len()
+        );
+        let child = children.pop().unwrap();
+        Expression::Alias(Rc::new(child), name.clone())
+      },
+      Expression::And(_, _) => copy_binary!(Expression::And, "And", children),
+      Expression::Divide(_, _) => copy_binary!(Expression::Divide, "Divide", children),
+      Expression::Equals(_, _) => copy_binary!(Expression::Equals, "Equals", children),
+      Expression::GreaterThan(_, _) => copy_binary!(Expression::GreaterThan, "GreaterThan", children),
+      Expression::GreaterThanEquals(_, _) => copy_binary!(Expression::GreaterThanEquals, "GreaterThanEquals", children),
+      Expression::Identifier(value) => Expression::Identifier(value.clone()),
+      Expression::LessThan(_, _) => copy_binary!(Expression::LessThan, "LessThan", children),
+      Expression::LessThanEquals(_, _) => copy_binary!(Expression::LessThanEquals, "LessThanEquals", children),
+      Expression::LiteralNumber(value) => Expression::LiteralNumber(value.clone()),
+      Expression::LiteralString(value) => Expression::LiteralString(value.clone()),
+      Expression::Multiply(_, _) => copy_binary!(Expression::Multiply, "Multiply", children),
+      Expression::Null => Expression::Null,
+      Expression::Or(_, _) => copy_binary!(Expression::Or, "Or", children),
+      Expression::Star => Expression::Star,
+      Expression::Subtract(_, _) => copy_binary!(Expression::Subtract, "Subtract", children),
+      Expression::UnaryPlus(_) => copy_unary!(Expression::UnaryPlus, "UnaryPlus", children),
+      Expression::UnaryMinus(_) => copy_unary!(Expression::UnaryMinus, "UnaryMinus", children),
     }
   }
 }
