@@ -52,13 +52,26 @@ pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&
   rule(&node).unwrap_or(node)
 }
 
-struct TreeDisplay<'a, A: TreeNode<A>> {
+// Expanded plan tree display.
+struct PlanTreeDisplay<'a, A: TreeNode<A>> {
   plan: &'a A
 }
 
-impl<'a, A: TreeNode<A>> fmt::Display for TreeDisplay<'a, A> {
+impl<'a, A: TreeNode<A>> fmt::Display for PlanTreeDisplay<'a, A> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     recur_gen_tree(self.plan, &mut Vec::new(), f)
+  }
+}
+
+// Simple single-line display of the plan node.
+struct PlanSimpleDisplay<'a, A: TreeNode<A>> {
+  plan: &'a A
+}
+
+impl<'a, A: TreeNode<A>> fmt::Display for PlanSimpleDisplay<'a, A> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.plan.display(f)?;
+    writeln!(f)
   }
 }
 
@@ -99,7 +112,13 @@ fn recur_gen_tree<A>(
 }
 
 // Returns a string of the tree output.
-pub fn tree_string<A>(plan: &A) -> String where A: TreeNode<A> {
-  let tree = TreeDisplay { plan };
-  tree.to_string()
+pub fn tree_output<A>(plan: &A) -> String where A: TreeNode<A> {
+  let output = PlanTreeDisplay { plan };
+  output.to_string()
+}
+
+// Returns a string of the tree output.
+pub fn plan_output<A>(plan: &A) -> String where A: TreeNode<A> {
+  let output = PlanSimpleDisplay { plan };
+  output.to_string()
 }

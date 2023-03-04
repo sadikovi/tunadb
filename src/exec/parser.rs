@@ -375,7 +375,7 @@ impl<'a> Parser<'a> {
       plan = self.from_statement()?;
     }
 
-    plan = Plan::Project(expressions, Rc::new(plan));
+    plan = Plan::Project(Rc::new(expressions), Rc::new(plan));
 
     if self.matches(TokenType::WHERE)? {
       plan = self.where_statement(plan)?;
@@ -430,107 +430,10 @@ pub fn parse(sql: &str) -> Res<Vec<Plan>> {
   Ok(plans)
 }
 
-//========================
-// Plan and Expression DSL
-//========================
-
-pub mod dsl {
-  use std::rc::Rc;
-  use super::{Expression, Plan};
-
-  pub fn identifier(name: &str) -> Expression {
-    Expression::Identifier(Rc::new(name.to_string()))
-  }
-
-  pub fn number(value: &str) -> Expression {
-    Expression::LiteralNumber(Rc::new(value.to_string()))
-  }
-
-  pub fn string(value: &str) -> Expression {
-    Expression::LiteralString(Rc::new(format!("'{}'", value)))
-  }
-
-  pub fn null() -> Expression {
-    Expression::Null
-  }
-
-  pub fn star() -> Expression {
-    Expression::Star
-  }
-
-  pub fn alias(child: Expression, name: &str) -> Expression {
-    Expression::Alias(Rc::new(child), Rc::new(name.to_string()))
-  }
-
-  pub fn add(left: Expression, right: Expression) -> Expression {
-    Expression::Add(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn subtract(left: Expression, right: Expression) -> Expression {
-    Expression::Subtract(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn multiply(left: Expression, right: Expression) -> Expression {
-    Expression::Multiply(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn divide(left: Expression, right: Expression) -> Expression {
-    Expression::Divide(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn _plus(child: Expression) -> Expression {
-    Expression::UnaryPlus(Rc::new(child))
-  }
-
-  pub fn _minus(child: Expression) -> Expression {
-    Expression::UnaryMinus(Rc::new(child))
-  }
-
-  pub fn equals(left: Expression, right: Expression) -> Expression {
-    Expression::Equals(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn less_than(left: Expression, right: Expression) -> Expression {
-    Expression::LessThan(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn greater_than(left: Expression, right: Expression) -> Expression {
-    Expression::GreaterThan(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn and(left: Expression, right: Expression) -> Expression {
-    Expression::And(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn or(left: Expression, right: Expression) -> Expression {
-    Expression::Or(Rc::new(left), Rc::new(right))
-  }
-
-  pub fn filter(expression: Expression, child: Plan) -> Plan {
-    Plan::Filter(Rc::new(expression), Rc::new(child))
-  }
-
-  pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
-    Plan::Project(expressions, Rc::new(child))
-  }
-
-  pub fn empty() -> Plan {
-    Plan::Empty
-  }
-
-  pub fn from(schema: Option<&str>, table: &str) -> Plan {
-    Plan::TableScan(schema.map(|x| Rc::new(x.to_string())), Rc::new(table.to_string()))
-  }
-
-  pub fn limit(value: usize, child: Plan) -> Plan {
-    Plan::Limit(value, Rc::new(child))
-  }
-}
-
 #[cfg(test)]
 pub mod tests {
   use super::*;
-  use super::dsl::*;
+  use crate::exec::plan::dsl::*;
 
   // Helper method to check the query plan.
   fn assert_plan(query: &str, plan: Plan) {

@@ -2,11 +2,60 @@ use std::fmt;
 use std::rc::Rc;
 use crate::common::trees::TreeNode;
 
+// Returns the unary child from `children` while asserting the `children` length.
+macro_rules! get_unary {
+  ($name:expr, $children:expr) => {{
+    assert_eq!(
+      $children.len(),
+      1,
+      "Expected 1 child node for unary expression '{}' but found {}",
+      $name,
+      $children.len()
+    );
+    $children.pop().unwrap()
+  }}
+}
+
+// Returns left and right nodes from `children` while asserting the `children` length.
+macro_rules! get_binary {
+  ($name:expr, $children:expr) => {{
+    assert_eq!(
+      $children.len(),
+      2,
+      "Expected 2 child nodes for binary expression '{}' but found {}",
+      $name,
+      $children.len()
+    );
+    let right = $children.pop().unwrap();
+    let left = $children.pop().unwrap();
+    (left, right)
+  }}
+}
+
+macro_rules! display_unary {
+  ($f:expr, $op:expr, $child:expr) => {{
+    write!($f, "{}", $op)?;
+    $child.display($f)
+  }}
+}
+
+macro_rules! display_binary {
+  ($f:expr, $left:expr, $op:expr, $right:expr) => {{
+    write!($f, "(")?;
+    $left.display($f)?;
+    write!($f, ")")?;
+    write!($f, " {} ", $op)?;
+    write!($f, "(")?;
+    $right.display($f)?;
+    write!($f, ")")
+  }}
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Plan {
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
-  Project(Vec<Expression> /* expressions */, Rc<Plan>),
+  Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
   TableScan(Option<Rc<String>> /* schema */, Rc<String> /* table name */),
   Empty, // indicates an empty relation, e.g. "select 1;"
 }
@@ -40,13 +89,24 @@ impl TreeNode<Plan> for Plan {
   }
 
   #[inline]
-  fn copy(&self, children: Vec<Plan>) -> Plan {
+  fn copy(&self, mut children: Vec<Plan>) -> Plan {
     match self {
-      Plan::Filter(ref expression, ref child) => unimplemented!(),
-      Plan::Limit(limit, ref child) => unimplemented!(),
-      Plan::Project(expressions, ref child) => unimplemented!(),
-      Plan::TableScan(ref schema, ref name) => unimplemented!(),
-      Plan::Empty => unimplemented!(),
+      Plan::Filter(ref expression, _) => {
+        let child = get_unary!("Filter", children);
+        Plan::Filter(expression.clone(), Rc::new(child))
+      },
+      Plan::Limit(limit, _) => {
+        let child = get_unary!("Limit", children);
+        Plan::Limit(*limit, Rc::new(child))
+      },
+      Plan::Project(expressions, _) => {
+        let child = get_unary!("Project", children);
+        Plan::Project(expressions.clone(), Rc::new(child))
+      },
+      Plan::TableScan(ref schema, ref name) => {
+        Plan::TableScan(schema.clone(), name.clone())
+      },
+      Plan::Empty => Plan::Empty,
     }
   }
 }
@@ -74,50 +134,6 @@ pub enum Expression {
   UnaryMinus(Rc<Expression>),
 }
 
-macro_rules! copy_binary {
-  ($tpe:expr, $name:expr, $children:expr) => {{
-    assert_eq!(
-      $children.len(),
-      2,
-      "Expected 2 child nodes for {} binary expression but found {}",
-      $name,
-      $children.len()
-    );
-    let right = $children.pop().unwrap();
-    let left = $children.pop().unwrap();
-    $tpe(Rc::new(left), Rc::new(right))
-  }}
-}
-
-macro_rules! copy_unary {
-  ($tpe:expr, $name:expr, $children:expr) => {{
-    assert_eq!(
-      $children.len(),
-      1,
-      "Expected 1 child node for {} unary expression but found {}",
-      $name,
-      $children.len()
-    );
-    let child = $children.pop().unwrap();
-    $tpe(Rc::new(child))
-  }}
-}
-
-macro_rules! display_binary {
-  ($f:expr, $left:expr, $op:expr, $right:expr) => {{
-    $left.display($f)?;
-    write!($f, " {} ", $op)?;
-    $right.display($f)
-  }}
-}
-
-macro_rules! display_unary {
-  ($f:expr, $op:expr, $child:expr) => {{
-    write!($f, "{}", $op)?;
-    $child.display($f)
-  }}
-}
-
 impl TreeNode<Expression> for Expression {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -125,7 +141,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Add(ref left, ref right) => display_binary!(f, left, "+", right),
       Expression::Alias(ref child, ref name) => {
         child.display(f)?;
-        write!(f, "as {}", name)
+        write!(f, " as {}", name)
       },
       Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
       Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
@@ -180,34 +196,179 @@ impl TreeNode<Expression> for Expression {
   #[inline]
   fn copy(&self, mut children: Vec<Expression>) -> Expression {
     match self {
-      Expression::Add(_, _) => copy_binary!(Expression::Add, "Add", children),
+      Expression::Add(_, _) => {
+        let (left, right) = get_binary!("Add", children);
+        Expression::Add(Rc::new(left), Rc::new(right))
+      },
       Expression::Alias(_, ref name) => {
-        assert_eq!(
-          children.len(),
-          1,
-          "Expected 1 child for Alias expression but found {}",
-          children.len()
-        );
-        let child = children.pop().unwrap();
+        let child = get_unary!("Alias", children);
         Expression::Alias(Rc::new(child), name.clone())
       },
-      Expression::And(_, _) => copy_binary!(Expression::And, "And", children),
-      Expression::Divide(_, _) => copy_binary!(Expression::Divide, "Divide", children),
-      Expression::Equals(_, _) => copy_binary!(Expression::Equals, "Equals", children),
-      Expression::GreaterThan(_, _) => copy_binary!(Expression::GreaterThan, "GreaterThan", children),
-      Expression::GreaterThanEquals(_, _) => copy_binary!(Expression::GreaterThanEquals, "GreaterThanEquals", children),
+      Expression::And(_, _) => {
+        let (left, right) = get_binary!("And", children);
+        Expression::And(Rc::new(left), Rc::new(right))
+      },
+      Expression::Divide(_, _) => {
+        let (left, right) = get_binary!("Divide", children);
+        Expression::Divide(Rc::new(left), Rc::new(right))
+      },
+      Expression::Equals(_, _) => {
+        let (left, right) = get_binary!("Equals", children);
+        Expression::Equals(Rc::new(left), Rc::new(right))
+      },
+      Expression::GreaterThan(_, _) => {
+        let (left, right) = get_binary!("GreaterThan", children);
+        Expression::GreaterThan(Rc::new(left), Rc::new(right))
+      },
+      Expression::GreaterThanEquals(_, _) => {
+        let (left, right) = get_binary!("GreaterThanEquals", children);
+        Expression::GreaterThanEquals(Rc::new(left), Rc::new(right))
+      },
       Expression::Identifier(value) => Expression::Identifier(value.clone()),
-      Expression::LessThan(_, _) => copy_binary!(Expression::LessThan, "LessThan", children),
-      Expression::LessThanEquals(_, _) => copy_binary!(Expression::LessThanEquals, "LessThanEquals", children),
+      Expression::LessThan(_, _) => {
+        let (left, right) = get_binary!("LessThan", children);
+        Expression::LessThan(Rc::new(left), Rc::new(right))
+      },
+      Expression::LessThanEquals(_, _) => {
+        let (left, right) = get_binary!("LessThanEquals", children);
+        Expression::LessThanEquals(Rc::new(left), Rc::new(right))
+      },
       Expression::LiteralNumber(value) => Expression::LiteralNumber(value.clone()),
       Expression::LiteralString(value) => Expression::LiteralString(value.clone()),
-      Expression::Multiply(_, _) => copy_binary!(Expression::Multiply, "Multiply", children),
+      Expression::Multiply(_, _) => {
+        let (left, right) = get_binary!("Multiply", children);
+        Expression::Multiply(Rc::new(left), Rc::new(right))
+      },
       Expression::Null => Expression::Null,
-      Expression::Or(_, _) => copy_binary!(Expression::Or, "Or", children),
+      Expression::Or(_, _) => {
+        let (left, right) = get_binary!("Or", children);
+        Expression::Or(Rc::new(left), Rc::new(right))
+      },
       Expression::Star => Expression::Star,
-      Expression::Subtract(_, _) => copy_binary!(Expression::Subtract, "Subtract", children),
-      Expression::UnaryPlus(_) => copy_unary!(Expression::UnaryPlus, "UnaryPlus", children),
-      Expression::UnaryMinus(_) => copy_unary!(Expression::UnaryMinus, "UnaryMinus", children),
+      Expression::Subtract(_, _) => {
+        let (left, right) = get_binary!("Subtract", children);
+        Expression::Subtract(Rc::new(left), Rc::new(right))
+      },
+      Expression::UnaryPlus(_) => {
+        let child = get_unary!("UnaryPlus", children);
+        Expression::UnaryPlus(Rc::new(child))
+      },
+      Expression::UnaryMinus(_) => {
+        let child = get_unary!("UnaryMinus", children);
+        Expression::UnaryMinus(Rc::new(child))
+      },
     }
+  }
+}
+
+//========================
+// Plan and Expression DSL
+//========================
+
+pub mod dsl {
+  use std::rc::Rc;
+  use super::{Expression, Plan};
+
+  pub fn identifier(name: &str) -> Expression {
+    Expression::Identifier(Rc::new(name.to_string()))
+  }
+
+  pub fn number(value: &str) -> Expression {
+    Expression::LiteralNumber(Rc::new(value.to_string()))
+  }
+
+  pub fn string(value: &str) -> Expression {
+    Expression::LiteralString(Rc::new(format!("'{}'", value)))
+  }
+
+  pub fn null() -> Expression {
+    Expression::Null
+  }
+
+  pub fn star() -> Expression {
+    Expression::Star
+  }
+
+  pub fn alias(child: Expression, name: &str) -> Expression {
+    Expression::Alias(Rc::new(child), Rc::new(name.to_string()))
+  }
+
+  pub fn add(left: Expression, right: Expression) -> Expression {
+    Expression::Add(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn subtract(left: Expression, right: Expression) -> Expression {
+    Expression::Subtract(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn multiply(left: Expression, right: Expression) -> Expression {
+    Expression::Multiply(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn divide(left: Expression, right: Expression) -> Expression {
+    Expression::Divide(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn _plus(child: Expression) -> Expression {
+    Expression::UnaryPlus(Rc::new(child))
+  }
+
+  pub fn _minus(child: Expression) -> Expression {
+    Expression::UnaryMinus(Rc::new(child))
+  }
+
+  pub fn equals(left: Expression, right: Expression) -> Expression {
+    Expression::Equals(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn less_than(left: Expression, right: Expression) -> Expression {
+    Expression::LessThan(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn greater_than(left: Expression, right: Expression) -> Expression {
+    Expression::GreaterThan(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn and(left: Expression, right: Expression) -> Expression {
+    Expression::And(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn or(left: Expression, right: Expression) -> Expression {
+    Expression::Or(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn filter(expression: Expression, child: Plan) -> Plan {
+    Plan::Filter(Rc::new(expression), Rc::new(child))
+  }
+
+  pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
+    Plan::Project(Rc::new(expressions), Rc::new(child))
+  }
+
+  pub fn empty() -> Plan {
+    Plan::Empty
+  }
+
+  pub fn from(schema: Option<&str>, table: &str) -> Plan {
+    Plan::TableScan(schema.map(|x| Rc::new(x.to_string())), Rc::new(table.to_string()))
+  }
+
+  pub fn limit(value: usize, child: Plan) -> Plan {
+    Plan::Limit(value, Rc::new(child))
+  }
+}
+
+#[cfg(test)]
+pub mod tests {
+  use super::dsl::*;
+  use crate::common::trees;
+
+  #[test]
+  fn test_plan_display() {
+    let expr = and(equals(number("1"), number("2")), less_than(identifier("a"), string("abc")));
+    assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < ('abc'))\n");
+
+    let expr = equals(alias(identifier("a"), "A"), _minus(number("2")));
+    assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");
   }
 }
