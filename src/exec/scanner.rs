@@ -12,8 +12,8 @@ pub enum TokenType {
   IDENTIFIER, NUMBER, STRING,
 
   // Keywords.
-  ALL, AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, IS, LIKE, LIMIT,
-  NULL, OR, ORDER, SELECT, THEN, UNION, WHEN, WHERE, WITH,
+  ALL, AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, INSERT, INTO, IS,
+  LIKE, LIMIT, NULL, OR, ORDER, SELECT, THEN, UNION, VALUES, WHEN, WHERE, WITH,
 
   // Others.
   ERROR,
@@ -240,6 +240,10 @@ impl<'a> Scanner<'a> {
       TokenType::GROUP
     } else if self.match_keyword(b"IN") {
       TokenType::IN
+    } else if self.match_keyword(b"INSERT") {
+      TokenType::INSERT
+    } else if self.match_keyword(b"INTO") {
+      TokenType::INTO
     } else if self.match_keyword(b"IS") {
       TokenType::IS
     } else if self.match_keyword(b"LIKE") {
@@ -258,6 +262,8 @@ impl<'a> Scanner<'a> {
       TokenType::THEN
     } else if self.match_keyword(b"UNION") {
       TokenType::UNION
+    } else if self.match_keyword(b"VALUES") {
+      TokenType::VALUES
     } else if self.match_keyword(b"WHEN") {
       TokenType::WHEN
     } else if self.match_keyword(b"WHERE") {
@@ -801,7 +807,7 @@ from
         line7''line8
         '"),
       ]
-    )
+    );
   }
 
   #[test]
@@ -823,7 +829,7 @@ from
         (TokenType::NUMBER, "2"),
         (TokenType::SEMICOLON, ";"),
       ]
-    )
+    );
   }
 
   #[test]
@@ -850,6 +856,63 @@ from
         (TokenType::BY, "by"),
         (TokenType::IDENTIFIER, "a"),
       ]
-    )
+    );
+  }
+
+  #[test]
+  fn test_scanner_insert1() {
+    assert_sql(
+      "insert into t1 (a, b, c) values (1, 2, 3), (4, 5, 6);",
+      vec![
+        (TokenType::INSERT, "insert"),
+        (TokenType::INTO, "into"),
+        (TokenType::IDENTIFIER, "t1"),
+        (TokenType::PAREN_LEFT, "("),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "b"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "c"),
+        (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::VALUES, "values"),
+        (TokenType::PAREN_LEFT, "("),
+        (TokenType::NUMBER, "1"),
+        (TokenType::COMMA, ","),
+        (TokenType::NUMBER, "2"),
+        (TokenType::COMMA, ","),
+        (TokenType::NUMBER, "3"),
+        (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::COMMA, ","),
+        (TokenType::PAREN_LEFT, "("),
+        (TokenType::NUMBER, "4"),
+        (TokenType::COMMA, ","),
+        (TokenType::NUMBER, "5"),
+        (TokenType::COMMA, ","),
+        (TokenType::NUMBER, "6"),
+        (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_insert2() {
+    assert_sql(
+      "insert into t1 select a, b, c from t2;",
+      vec![
+        (TokenType::INSERT, "insert"),
+        (TokenType::INTO, "into"),
+        (TokenType::IDENTIFIER, "t1"),
+        (TokenType::SELECT, "select"),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "b"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "c"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "t2"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
   }
 }

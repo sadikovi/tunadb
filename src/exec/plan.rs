@@ -52,11 +52,26 @@ macro_rules! display_binary {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct TableIdentifier {
+  schema: Option<String>,
+  table: String,
+}
+
+impl TableIdentifier {
+  #[inline]
+  pub fn new(schema: Option<String>, table: String) -> TableIdentifier {
+    Self { schema, table }
+  }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Plan {
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
+  InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
+  LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
-  TableScan(Option<Rc<String>> /* schema */, Rc<String> /* table name */),
+  TableScan(Rc<TableIdentifier> /* table identifier */),
   Empty, // indicates an empty relation, e.g. "select 1;"
 }
 
@@ -65,9 +80,11 @@ impl TreeNode<Plan> for Plan {
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Plan::Filter(_, _) => write!(f, "Filter"),
+      Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _) => write!(f, "Limit"),
+      Plan::LocalRelation(_) => write!(f, "LocalRelation"),
       Plan::Project(_, _) => write!(f, "Project"),
-      Plan::TableScan(_, _) => write!(f, "TableScan"),
+      Plan::TableScan(_) => write!(f, "TableScan"),
       Plan::Empty => write!(f, "Empty"),
     }
   }
@@ -81,9 +98,11 @@ impl TreeNode<Plan> for Plan {
   fn children(&self) -> Vec<&Plan> {
     match self {
       Plan::Filter(_, ref child) => vec![child],
+      Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, ref child) => vec![child],
+      Plan::LocalRelation(_) => Vec::new(),
       Plan::Project(_, ref child) => vec![child],
-      Plan::TableScan(_, _) => Vec::new(),
+      Plan::TableScan(_) => Vec::new(),
       Plan::Empty => Vec::new(),
     }
   }
@@ -95,16 +114,22 @@ impl TreeNode<Plan> for Plan {
         let child = get_unary!("Filter", children);
         Plan::Filter(expression.clone(), Rc::new(child))
       },
+      Plan::InsertInto(ref table_ident, ref cols, ref query) => {
+        Plan::InsertInto(table_ident.clone(), cols.clone(), query.clone())
+      },
       Plan::Limit(limit, _) => {
         let child = get_unary!("Limit", children);
         Plan::Limit(*limit, Rc::new(child))
+      },
+      Plan::LocalRelation(ref expressions) => {
+        Plan::LocalRelation(expressions.clone())
       },
       Plan::Project(expressions, _) => {
         let child = get_unary!("Project", children);
         Plan::Project(expressions.clone(), Rc::new(child))
       },
-      Plan::TableScan(ref schema, ref name) => {
-        Plan::TableScan(schema.clone(), name.clone())
+      Plan::TableScan(ref table_ident) => {
+        Plan::TableScan(table_ident.clone())
       },
       Plan::Empty => Plan::Empty,
     }
@@ -267,7 +292,7 @@ impl TreeNode<Expression> for Expression {
 
 pub mod dsl {
   use std::rc::Rc;
-  use super::{Expression, Plan};
+  use super::{Expression, Plan, TableIdentifier};
 
   pub fn identifier(name: &str) -> Expression {
     Expression::Identifier(Rc::new(name.to_string()))
@@ -350,7 +375,37 @@ pub mod dsl {
   }
 
   pub fn from(schema: Option<&str>, table: &str) -> Plan {
-    Plan::TableScan(schema.map(|x| Rc::new(x.to_string())), Rc::new(table.to_string()))
+    let table_ident = TableIdentifier::new(
+      schema.map(|x| x.to_string()),
+      table.to_string()
+    );
+    Plan::TableScan(Rc::new(table_ident))
+  }
+
+  pub fn insert_into_values(
+    schema: Option<&str>,
+    table: &str,
+    cols: Vec<String>,
+    expr: Vec<Vec<Expression>>
+  ) -> Plan {
+    insert_into_select(schema, table, cols, Plan::LocalRelation(Rc::new(expr)))
+  }
+
+  pub fn insert_into_select(
+    schema: Option<&str>,
+    table: &str,
+    cols: Vec<String>,
+    query: Plan
+  ) -> Plan {
+    let table_ident = TableIdentifier::new(
+      schema.map(|x| x.to_string()),
+      table.to_string()
+    );
+    Plan::InsertInto(
+      Rc::new(table_ident),
+      Rc::new(cols),
+      Rc::new(query)
+    )
   }
 
   pub fn limit(value: usize, child: Plan) -> Plan {

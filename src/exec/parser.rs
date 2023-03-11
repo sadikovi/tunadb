@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::exec::plan::{Expression, Plan};
+use crate::exec::plan::{Expression, Plan, TableIdentifier};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
 pub struct Parser<'a> {
@@ -131,7 +131,7 @@ impl<'a> Parser<'a> {
 
     if self.matches(TokenType::PAREN_LEFT)? {
       let expr = self.expression()?;
-      self.consume(TokenType::PAREN_RIGHT, "Expected closing `)`")?;
+      self.consume(TokenType::PAREN_RIGHT, "Expected closing ')'")?;
       return Ok(expr);
     }
 
@@ -293,7 +293,7 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn from_statement(&mut self) -> Res<Plan> {
+  fn table_identifier(&mut self) -> Res<TableIdentifier> {
     // We expect:
     //   [schema].[table]
     //   [table] (implies the currently selected schema)
@@ -309,25 +309,31 @@ impl<'a> Parser<'a> {
         if self.check(TokenType::IDENTIFIER) {
           let identifier2 = self.token_value().to_string();
           self.advance()?;
-          Ok(Plan::TableScan(Some(Rc::new(identifier1)), Rc::new(identifier2)))
+          Ok(TableIdentifier::new(Some(identifier1), identifier2))
         } else {
           Err(self.error_at(&context_token, "Expected a table name after the schema name"))
         }
       } else {
         // We have [table] with the current schema.
-        Ok(Plan::TableScan(None, Rc::new(identifier1.to_string())))
+        Ok(TableIdentifier::new(None, identifier1))
       }
     } else {
       Err(
         self.error_at(
           &self.current,
           &format!(
-            "Expected a table name or `schema`.`table` qualifier after FROM but found '{}'",
+            "Expected a table name or schema.table qualifier '{}'",
             self.token_value()
           )
         )
       )
     }
+  }
+
+  #[inline]
+  fn from_statement(&mut self) -> Res<Plan> {
+    let table_ident = self.table_identifier()?;
+    Ok(Plan::TableScan(Rc::new(table_ident)))
   }
 
   #[inline]
@@ -389,23 +395,120 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn insert_statement(&mut self) -> Res<Plan> {
+    // insert into t1 values
+    self.consume(TokenType::INTO, "Expected INTO keyword")?;
+    // Extract the table name.
+    let table_ident = self.table_identifier()?;
+
+    // Parse the target columns.
+    let mut columns = Vec::new();
+    if self.matches(TokenType::PAREN_LEFT)? {
+      loop {
+        if self.check(TokenType::IDENTIFIER) {
+          columns.push(self.token_value().to_string());
+          self.advance()?;
+        } else {
+          return Err(
+            self.error_at(
+              &self.current,
+              &format!(
+                "Expected column name, found '{}'",
+                self.token_value()
+              )
+            )
+          );
+        }
+
+        if self.matches(TokenType::COMMA)? {
+          // Continue parsing identifiers.
+        } else {
+          break;
+        }
+      }
+
+      self.consume(TokenType::PAREN_RIGHT, "Expected closing ')'")?;
+    }
+
+    // Parse values or the query.
+    let query = if self.matches(TokenType::VALUES)? {
+      let mut rows = Vec::new();
+      // The initial number of expressions must equal to the number of columns.
+      // If columns are empty, then no columns were provided.
+      let mut num_expressions: usize = columns.len();
+      loop {
+        self.consume(TokenType::PAREN_LEFT, "Expected opening '('")?;
+        // Parse expression list.
+        let mut expr = Vec::new();
+        loop {
+          expr.push(self.expression()?);
+          if !self.matches(TokenType::COMMA)? {
+            break;
+          }
+        }
+
+        if num_expressions == 0 {
+          num_expressions = expr.len();
+        }
+
+        if expr.len() != num_expressions {
+          return Err(
+            self.error_at(
+              &self.current,
+              &format!(
+                "Mismatch in the number of expressions: {} != {}",
+                expr.len(),
+                num_expressions
+              )
+            )
+          );
+        }
+
+        rows.push(expr);
+
+        self.consume(TokenType::PAREN_RIGHT, "Expected closing ')'")?;
+
+        // Check if we need to continue parsing expressions.
+        if !self.matches(TokenType::COMMA)? {
+          break;
+        }
+      }
+      Plan::LocalRelation(Rc::new(rows))
+    } else if self.matches(TokenType::SELECT)? {
+      self.select_statement()?
+    } else {
+      return Err(
+        self.error_at(
+          &self.current,
+          "Expected either SELECT query or VALUES list"
+        )
+      );
+    };
+
+    Ok(Plan::InsertInto(Rc::new(table_ident), Rc::new(columns), Rc::new(query)))
+  }
+
+  #[inline]
   fn statement(&mut self) -> Res<Plan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture any errors when the statement is followed by some other token.
-    if self.matches(TokenType::SELECT)? {
-      let stmt = self.select_statement()?;
-      if !self.matches(TokenType::SEMICOLON)? && !self.done() {
-        Err(self.error_at(&self.current, &format!("Unexpected token '{}'", self.token_value())))
-      } else {
-        Ok(stmt)
-      }
+    let stmt = if self.matches(TokenType::SELECT)? {
+      self.select_statement()?
+    } else if self.matches(TokenType::INSERT)? {
+      self.insert_statement()?
     } else {
-      Err(
+      return Err(
         self.error_at(
           &self.current,
           &format!("Unsupported token {}", self.token_value())
         )
-      )
+      );
+    };
+
+    if !self.matches(TokenType::SEMICOLON)? && !self.done() {
+      Err(self.error_at(&self.current, &format!("Unexpected token '{}'", self.token_value())))
+    } else {
+      Ok(stmt)
     }
   }
 }
@@ -627,6 +730,146 @@ pub mod tests {
       limit(
         123,
         project(vec![star()], from(None, "test"))
+      )
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected either SELECT query or VALUES list")]
+  fn test_parser_insert_into_error() {
+    assert_plan(
+      "insert into table",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected expression but found ')'")]
+  fn test_parser_insert_into_values_unclosed_list() {
+    assert_plan(
+      "insert into table values (1, 'a', )",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected opening '('")]
+  fn test_parser_insert_into_values_unclosed_sequence() {
+    assert_plan(
+      "insert into table values (1, 'a'),",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Mismatch in the number of expressions: 3 != 2")]
+  fn test_parser_insert_into_values_expr_mismatch() {
+    assert_plan(
+      "insert into table values (1, 'a'), (2, 'b', 'c')",
+      empty()
+    )
+  }
+
+  #[test]
+  #[should_panic(expected = "Mismatch in the number of expressions: 2 != 3")]
+  fn test_parser_insert_into_values_cols_mismatch() {
+    assert_plan(
+      "insert into table (a, b, c) values (1, 'a'), (2, 'b')",
+      empty()
+    )
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected expression but found ')'")]
+  fn test_parser_insert_into_values_empty_list() {
+    assert_plan(
+      "insert into table (a, b, c) values (), (2, 'b')",
+      empty()
+    )
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected expression but found '*'")]
+  fn test_parser_insert_into_values_star() {
+    assert_plan(
+      "insert into table (a, b, c) values (*, 1, 2)",
+      empty()
+    )
+  }
+
+  #[test]
+  fn test_parser_insert_into_values() {
+    assert_plan(
+      "insert into table values (1, 'a'), (2, 'b')",
+      insert_into_values(
+        None,
+        "table",
+        vec![],
+        vec![
+          vec![number("1"), string("a")],
+          vec![number("2"), string("b")],
+        ]
+      )
+    );
+
+    assert_plan(
+      "insert into schema.table values (1, 'a'), (2, 'b')",
+      insert_into_values(
+        Some("schema"),
+        "table",
+        vec![],
+        vec![
+          vec![number("1"), string("a")],
+          vec![number("2"), string("b")],
+        ]
+      )
+    );
+
+    assert_plan(
+      "insert into schema.table (a, b) values (1, 'a'), (1 + 2, 'b')",
+      insert_into_values(
+        Some("schema"),
+        "table",
+        vec!["a".to_string(), "b".to_string()],
+        vec![
+          vec![number("1"), string("a")],
+          vec![add(number("1"), number("2")), string("b")],
+        ]
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_insert_into_select() {
+    assert_plan(
+      "insert into schema.table select 1 as a, 2 as b",
+      insert_into_select(
+        Some("schema"),
+        "table",
+        vec![],
+        project(
+          vec![
+            alias(number("1"), "a"),
+            alias(number("2"), "b"),
+          ],
+          empty()
+        )
+      )
+    );
+
+    assert_plan(
+      "insert into schema.table (a, b) select 1 as a, 2 as b",
+      insert_into_select(
+        Some("schema"),
+        "table",
+        vec!["a".to_string(), "b".to_string()],
+        project(
+          vec![
+            alias(number("1"), "a"),
+            alias(number("2"), "b"),
+          ],
+          empty()
+        )
       )
     );
   }
