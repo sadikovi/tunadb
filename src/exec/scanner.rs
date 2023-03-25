@@ -12,22 +12,32 @@ pub enum TokenType {
   IDENTIFIER, NUMBER, STRING,
 
   // Keywords.
-  ALL, AND, AS, BETWEEN, BY, CASE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, INSERT, INTO, IS,
-  LIKE, LIMIT, NULL, OR, ORDER, SELECT, THEN, UNION, VALUES, WHEN, WHERE, WITH,
+  ALL, AND, AS, BETWEEN, BY, CASE, CREATE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, INSERT,
+  INTO, IS, LIKE, LIMIT, NULL, OR, ORDER, SCHEMA, SELECT, TABLE, THEN, UNION, VALUES, WHEN, WHERE,
+  WITH,
 
   // Others.
   ERROR,
   EOF
 }
 
-#[derive(Clone, Debug, PartialEq)]
+// Error messages.
+const ERROR_AMBIGUOUS_TRAILING_NUM_LITERAL: &str = "Ambiguous trailing of the numeric literal";
+const ERROR_ILLEGAL_CHARACTER: &str = "Illegal character";
+const ERROR_UNTERMINATED_IDENTIFIER: &str = "Unterminated identifier";
+const ERROR_UNTERMINATED_STRING: &str = "Unterminated string";
+
+// Token that is produced by the scanner.
+// It must implement Copy trait as we use it in parser to return tokens
+// after advancing the cursor.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Token {
   tpe: TokenType,
   pos: usize,
   len: usize,
   line_num: usize,
   line_pos: usize,
-  err_msg: Option<String>, // only available for TokenType::ERROR
+  err_msg: Option<&'static str>, // only available for TokenType::ERROR
 }
 
 impl Token {
@@ -185,7 +195,7 @@ impl<'a> Scanner<'a> {
   }
 
   #[inline]
-  fn _new_token(&self, tpe: TokenType, msg: Option<String>) -> Token {
+  fn _new_token(&self, tpe: TokenType, msg: Option<&'static str>) -> Token {
     Token {
       tpe,
       pos: self.start,
@@ -202,8 +212,8 @@ impl<'a> Scanner<'a> {
   }
 
   #[inline]
-  fn error_token(&self, msg: &str) -> Token {
-    self._new_token(TokenType::ERROR, Some(msg.to_string()))
+  fn error_token(&self, msg: &'static str) -> Token {
+    self._new_token(TokenType::ERROR, Some(msg))
   }
 
   #[inline]
@@ -226,6 +236,8 @@ impl<'a> Scanner<'a> {
       TokenType::BY
     } else if self.match_keyword(b"CASE") {
       TokenType::CASE
+    } else if self.match_keyword(b"CREATE") {
+      TokenType::CREATE
     } else if self.match_keyword(b"DISTINCT") {
       TokenType::DISTINCT
     } else if self.match_keyword(b"ELSE") {
@@ -256,8 +268,12 @@ impl<'a> Scanner<'a> {
       TokenType::OR
     } else if self.match_keyword(b"ORDER") {
       TokenType::ORDER
+    } else if self.match_keyword(b"SCHEMA") {
+      TokenType::SCHEMA
     } else if self.match_keyword(b"SELECT") {
       TokenType::SELECT
+    } else if self.match_keyword(b"TABLE") {
+      TokenType::TABLE
     } else if self.match_keyword(b"THEN") {
       TokenType::THEN
     } else if self.match_keyword(b"UNION") {
@@ -312,7 +328,7 @@ impl<'a> Scanner<'a> {
     }
 
     if self.done() {
-      self.error_token("Unterminated identifier")
+      self.error_token(ERROR_UNTERMINATED_IDENTIFIER)
     } else {
       // Move over the closing double quote.
       self.advance();
@@ -330,7 +346,7 @@ impl<'a> Scanner<'a> {
     if !self.done() && self.consume(b'.') {
       // If "." exists, then the fractional part must follow.
       if self.done() || !is_digit(self.peek()) {
-        return self.error_token("Ambiguous trailing of the numeric literal");
+        return self.error_token(ERROR_AMBIGUOUS_TRAILING_NUM_LITERAL);
       }
       while !self.done() && is_digit(self.peek()) {
         self.advance();
@@ -342,15 +358,15 @@ impl<'a> Scanner<'a> {
       // If "e" exists, then the exponent must follow.
       if self.consume(b'-') {
         if self.done() || !is_digit(self.peek()) {
-          return self.error_token("Ambiguous trailing of the numeric literal");
+          return self.error_token(ERROR_AMBIGUOUS_TRAILING_NUM_LITERAL);
         }
       } else if self.consume(b'+') {
         if self.done() || !is_digit(self.peek()) {
-          return self.error_token("Ambiguous trailing of the numeric literal");
+          return self.error_token(ERROR_AMBIGUOUS_TRAILING_NUM_LITERAL);
         }
       } else {
         if self.done() || !is_digit(self.peek()) {
-          return self.error_token("Ambiguous trailing of the numeric literal");
+          return self.error_token(ERROR_AMBIGUOUS_TRAILING_NUM_LITERAL);
         }
       }
       while !self.done() && is_digit(self.peek()) {
@@ -389,7 +405,7 @@ impl<'a> Scanner<'a> {
     }
 
     if self.done() {
-      self.error_token("Unterminated string")
+      self.error_token(ERROR_UNTERMINATED_STRING)
     } else {
       // Move over the closing quote.
       self.advance();
@@ -441,7 +457,7 @@ impl<'a> Scanner<'a> {
         },
         b'\'' => return self.string(),
         b'"' => return self.escaped_identifier(),
-        _ => return self.error_token("Illegal character"),
+        _ => return self.error_token(ERROR_ILLEGAL_CHARACTER),
       }
     }
   }
@@ -728,6 +744,31 @@ from
   }
 
   #[test]
+  fn test_scanner_keywords() {
+    // We parse "schema" name as SCHEMA token even if it comes after FROM.
+    assert_sql(
+      "select * from schema",
+      vec![
+        (TokenType::SELECT, "select"),
+        (TokenType::STAR, "*"),
+        (TokenType::FROM, "from"),
+        (TokenType::SCHEMA, "schema"),
+      ]
+    );
+
+    // We parse "table" name as TABLE token even if it comes after FROM.
+    assert_sql(
+      "select * from table",
+      vec![
+        (TokenType::SELECT, "select"),
+        (TokenType::STAR, "*"),
+        (TokenType::FROM, "from"),
+        (TokenType::TABLE, "table"),
+      ]
+    );
+  }
+
+  #[test]
   fn test_scanner_sql1() {
     assert_sql(
       r"
@@ -748,14 +789,14 @@ from
   #[test]
   fn test_scanner_sql2() {
     assert_sql(
-      "select a as \"a b c\"\" d e\" from table",
+      "select a as \"a b c\"\" d e\" from table0",
       vec![
         (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::AS, "as"),
         (TokenType::IDENTIFIER, "\"a b c\"\" d e\""),
         (TokenType::FROM, "from"),
-        (TokenType::IDENTIFIER, "table"),
+        (TokenType::IDENTIFIER, "table0"),
       ]
     );
   }
@@ -781,7 +822,7 @@ from
       r"
 
         -- multiline strings
-        select 1 from table where t = 'line1
+        select 1 from table0 where t = 'line1
           line2
         line3''
             line4\
@@ -794,7 +835,7 @@ from
         (TokenType::SELECT, "select"),
         (TokenType::NUMBER, "1"),
         (TokenType::FROM, "from"),
-        (TokenType::IDENTIFIER, "table"),
+        (TokenType::IDENTIFIER, "table0"),
         (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "t"),
         (TokenType::EQUALS, "="),
@@ -813,12 +854,12 @@ from
   #[test]
   fn test_scanner_sql5() {
     assert_sql(
-      r"select a from table where a >= 1 and b <= 2;",
+      r"select a from table0 where a >= 1 and b <= 2;",
       vec![
         (TokenType::SELECT, "select"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::FROM, "from"),
-        (TokenType::IDENTIFIER, "table"),
+        (TokenType::IDENTIFIER, "table0"),
         (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::GREATER_THAN_EQUALS, ">="),
@@ -835,12 +876,12 @@ from
   #[test]
   fn test_scanner_sql6() {
     assert_sql(
-      r"select * from table where a is null or b is null group by a order by a",
+      r"select * from table0 where a is null or b is null group by a order by a",
       vec![
         (TokenType::SELECT, "select"),
         (TokenType::STAR, "*"),
         (TokenType::FROM, "from"),
-        (TokenType::IDENTIFIER, "table"),
+        (TokenType::IDENTIFIER, "table0"),
         (TokenType::WHERE, "where"),
         (TokenType::IDENTIFIER, "a"),
         (TokenType::IS, "is"),
