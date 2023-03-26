@@ -587,6 +587,16 @@ pub mod tests {
   }
 
   #[test]
+  #[should_panic(expected = "Expected an identifier after AS")]
+  fn test_parser_alias_fail_as() {
+    // The test verifies that an identifier follows AS.
+    assert_plan(
+      "select a col1, b as, c as col3;",
+      empty()
+    );
+  }
+
+  #[test]
   fn test_parser_from() {
     assert_plan(
       "select * from test_table",
