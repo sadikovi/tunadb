@@ -450,31 +450,48 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn create_schema_statement(&mut self) -> Res<Plan> {
+    let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
+    Ok(Plan::CreateSchema(Rc::new(token.value(&self.sql).to_string())))
+  }
+
+  #[inline]
   fn statement(&mut self) -> Res<Plan> {
     // Each statement can have an optional `;` at the end.
-    // We need to capture any errors when the statement is followed by some other token.
-    let stmt = if self.matches(TokenType::SELECT)? {
-      self.select_statement()?
-    } else if self.matches(TokenType::INSERT)? {
-      self.insert_statement()?
-    } else {
-      return Err(
-        self.error_at(
-          &self.current,
-          &format!("Unsupported token '{}'", self.current.value(&self.sql))
-        )
-      );
-    };
+    // We need to capture errors when there are extra tokens at the end of the statement.
+    let mut stmt: Option<Plan> = None;
 
-    if !self.matches(TokenType::SEMICOLON)? && !self.done() {
-      Err(
-        self.error_at(
-          &self.current,
-          &format!("Unexpected token '{}'", self.current.value(&self.sql))
+    if self.matches(TokenType::CREATE)? {
+      if self.matches(TokenType::SCHEMA)? {
+        stmt = Some(self.create_schema_statement()?);
+      }
+    } else if self.matches(TokenType::INSERT)? {
+      stmt = Some(self.insert_statement()?);
+    } else if self.matches(TokenType::SELECT)? {
+      stmt = Some(self.select_statement()?);
+    }
+
+    match stmt {
+      Some(stmt) => {
+        if !self.matches(TokenType::SEMICOLON)? && !self.done() {
+          Err(
+            self.error_at(
+              &self.current,
+              &format!("Unexpected token '{}'", self.current.value(&self.sql))
+            )
+          )
+        } else {
+          Ok(stmt)
+        }
+      },
+      None => {
+        Err(
+          self.error_at(
+            &self.current,
+            &format!("Unsupported token '{}'", self.current.value(&self.sql))
+          )
         )
-      )
-    } else {
-      Ok(stmt)
+      },
     }
   }
 }
@@ -847,6 +864,23 @@ pub mod tests {
           empty()
         )
       )
+    );
+  }
+
+  #[test]
+  fn test_parser_create_schema() {
+    assert_plan(
+      "create schema test;",
+      create_schema("test")
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected schema identifier")]
+  fn test_parser_create_schema_error() {
+    assert_plan(
+      "create schema 123;",
+      empty()
     );
   }
 }

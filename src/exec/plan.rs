@@ -66,6 +66,7 @@ impl TableIdentifier {
 
 #[derive(Debug, PartialEq)]
 pub enum Plan {
+  CreateSchema(Rc<String> /* schema name */),
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
@@ -79,6 +80,7 @@ impl TreeNode<Plan> for Plan {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Plan::CreateSchema(_) => write!(f, "CreateSchema"),
       Plan::Filter(_, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _) => write!(f, "Limit"),
@@ -97,6 +99,7 @@ impl TreeNode<Plan> for Plan {
   #[inline]
   fn children(&self) -> Vec<&Plan> {
     match self {
+      Plan::CreateSchema(_) => Vec::new(),
       Plan::Filter(_, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, ref child) => vec![child],
@@ -110,6 +113,9 @@ impl TreeNode<Plan> for Plan {
   #[inline]
   fn copy(&self, mut children: Vec<Plan>) -> Plan {
     match self {
+      Plan::CreateSchema(ref schema_name) => {
+        Plan::CreateSchema(schema_name.clone())
+      },
       Plan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
         Plan::Filter(expression.clone(), Rc::new(child))
@@ -294,6 +300,8 @@ pub mod dsl {
   use std::rc::Rc;
   use super::{Expression, Plan, TableIdentifier};
 
+  // Expressions.
+
   pub fn identifier(name: &str) -> Expression {
     Expression::Identifier(Rc::new(name.to_string()))
   }
@@ -362,16 +370,18 @@ pub mod dsl {
     Expression::Or(Rc::new(left), Rc::new(right))
   }
 
-  pub fn filter(expression: Expression, child: Plan) -> Plan {
-    Plan::Filter(Rc::new(expression), Rc::new(child))
-  }
+  // Plan nodes.
 
-  pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
-    Plan::Project(Rc::new(expressions), Rc::new(child))
+  pub fn create_schema(schema: &str) -> Plan {
+    Plan::CreateSchema(Rc::new(schema.to_string()))
   }
 
   pub fn empty() -> Plan {
     Plan::Empty
+  }
+
+  pub fn filter(expression: Expression, child: Plan) -> Plan {
+    Plan::Filter(Rc::new(expression), Rc::new(child))
   }
 
   pub fn from(schema: Option<&str>, table: &str) -> Plan {
@@ -410,6 +420,10 @@ pub mod dsl {
 
   pub fn limit(value: usize, child: Plan) -> Plan {
     Plan::Limit(value, Rc::new(child))
+  }
+
+  pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
+    Plan::Project(Rc::new(expressions), Rc::new(child))
   }
 }
 
