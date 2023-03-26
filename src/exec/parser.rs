@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
+use crate::common::types::{Field, Fields, Type};
 use crate::exec::plan::{Expression, Plan, TableIdentifier};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
@@ -253,6 +254,22 @@ impl<'a> Parser<'a> {
   //============
 
   #[inline]
+  fn column_type(&mut self) -> Res<Type> {
+    let token = self.consume(TokenType::IDENTIFIER, "Expected column type")?;
+    let type_str = token.value(&self.sql);
+
+    if type_str.eq_ignore_ascii_case("INT") {
+      Ok(Type::INT)
+    } else if type_str.eq_ignore_ascii_case("BIGINT") {
+      Ok(Type::BIGINT)
+    } else if type_str.eq_ignore_ascii_case("TEXT") {
+      Ok(Type::TEXT)
+    } else {
+      Err(self.error_at(&self.current, &format!("Unknown column type '{}'", type_str)))
+    }
+  }
+
+  #[inline]
   fn expression_list(&mut self) -> Res<Vec<Expression>> {
     let mut expressions = Vec::new();
 
@@ -456,6 +473,64 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn create_table_statement(&mut self) -> Res<Plan> {
+    let ident = self.table_identifier()?;
+    let mut fields = Vec::new();
+
+    self.consume(TokenType::PAREN_LEFT, "Expected '('")?;
+
+    loop {
+      let col_name = self.consume(TokenType::IDENTIFIER, "Expected column name")?;
+      let col_type = self.column_type()?;
+      let mut col_nullable = true; // column is nullable by default.
+      // Parse optional constraints.
+      if self.matches(TokenType::NULL)? {
+        // The field is null.
+        col_nullable = true;
+      } else if self.matches(TokenType::NOT)? {
+        self.consume(TokenType::NULL, "Expected NOT NULL constraint")?;
+        col_nullable = false;
+      }
+
+      match Field::new(col_name.value(&self.sql), col_type, col_nullable) {
+        Ok(field) => {
+          fields.push(field);
+        },
+        Err(err) => {
+          return Err(
+            self.error_at(
+              &self.current,
+              &format!("Error while creating a field: {:?}", err)
+            )
+          );
+        },
+      }
+
+      if self.matches(TokenType::COMMA)? {
+        // Continue parsing fields.
+      } else {
+        break;
+      }
+    }
+
+    self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
+
+    let schema = match Fields::new(fields) {
+      Ok(fields) => fields,
+      Err(err) => {
+        return Err(
+          self.error_at(
+            &self.current,
+            &format!("Error in table schema: {:?}", err)
+          )
+        );
+      },
+    };
+
+    Ok(Plan::CreateTable(Rc::new(ident), Rc::new(schema)))
+  }
+
+  #[inline]
   fn statement(&mut self) -> Res<Plan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture errors when there are extra tokens at the end of the statement.
@@ -464,6 +539,8 @@ impl<'a> Parser<'a> {
     if self.matches(TokenType::CREATE)? {
       if self.matches(TokenType::SCHEMA)? {
         stmt = Some(self.create_schema_statement()?);
+      } else if self.matches(TokenType::TABLE)? {
+        stmt = Some(self.create_table_statement()?);
       }
     } else if self.matches(TokenType::INSERT)? {
       stmt = Some(self.insert_statement()?);
@@ -881,6 +958,69 @@ pub mod tests {
     assert_plan(
       "create schema 123;",
       empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected '('")]
+  fn test_parser_create_table_error_no_columns() {
+    assert_plan(
+      "create table test_schema.test_table;",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected column name")]
+  fn test_parser_create_table_error_no_column_name() {
+    assert_plan(
+      "create table test_schema.test_table ();",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected column type")]
+  fn test_parser_create_table_error_no_column_type() {
+    assert_plan(
+      "create table test_schema.test_table (c1);",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected NOT NULL constraint")]
+  fn test_parser_create_table_error_column_non_null() {
+    assert_plan(
+      "create table test_schema.test_table (c1 int not);",
+      empty()
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Unknown column type 'int2'")]
+  fn test_parser_create_table_error_unknown_column_type() {
+    assert_plan(
+      "create table test_schema.test_table (c1 int2);",
+      empty()
+    );
+  }
+
+  #[test]
+  fn test_parser_create_table() {
+    assert_plan(
+      "create table test_schema.test_table (c1 int not null, c2 text null, c3 bigint);",
+      create_table(
+        Some("test_schema"),
+        "test_table",
+        Fields::new(
+          vec![
+            Field::new("c1", Type::INT, false).unwrap(),
+            Field::new("c2", Type::TEXT, true).unwrap(),
+            Field::new("c3", Type::BIGINT, true).unwrap(),
+          ]
+        ).unwrap()
+      )
     );
   }
 }

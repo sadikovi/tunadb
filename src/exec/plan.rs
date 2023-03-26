@@ -1,6 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
 use crate::common::trees::TreeNode;
+use crate::common::types::Fields;
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -67,6 +68,7 @@ impl TableIdentifier {
 #[derive(Debug, PartialEq)]
 pub enum Plan {
   CreateSchema(Rc<String> /* schema name */),
+  CreateTable(Rc<TableIdentifier>, Rc<Fields> /* schema */),
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
@@ -81,6 +83,7 @@ impl TreeNode<Plan> for Plan {
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Plan::CreateSchema(_) => write!(f, "CreateSchema"),
+      Plan::CreateTable(_, _) => write!(f, "CreateTable"),
       Plan::Filter(_, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _) => write!(f, "Limit"),
@@ -100,6 +103,7 @@ impl TreeNode<Plan> for Plan {
   fn children(&self) -> Vec<&Plan> {
     match self {
       Plan::CreateSchema(_) => Vec::new(),
+      Plan::CreateTable(_, _) => Vec::new(),
       Plan::Filter(_, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, ref child) => vec![child],
@@ -115,6 +119,9 @@ impl TreeNode<Plan> for Plan {
     match self {
       Plan::CreateSchema(ref schema_name) => {
         Plan::CreateSchema(schema_name.clone())
+      },
+      Plan::CreateTable(ref ident, ref schema) => {
+        Plan::CreateTable(ident.clone(), schema.clone())
       },
       Plan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -298,7 +305,7 @@ impl TreeNode<Expression> for Expression {
 
 pub mod dsl {
   use std::rc::Rc;
-  use super::{Expression, Plan, TableIdentifier};
+  use super::{Expression, Fields, Plan, TableIdentifier};
 
   // Expressions.
 
@@ -374,6 +381,14 @@ pub mod dsl {
 
   pub fn create_schema(schema: &str) -> Plan {
     Plan::CreateSchema(Rc::new(schema.to_string()))
+  }
+
+  pub fn create_table(schema: Option<&str>, table: &str, fields: Fields) -> Plan {
+    let table_ident = TableIdentifier::new(
+      schema.map(|x| x.to_string()),
+      table.to_string()
+    );
+    Plan::CreateTable(Rc::new(table_ident), Rc::new(fields))
   }
 
   pub fn empty() -> Plan {

@@ -13,8 +13,8 @@ pub enum TokenType {
 
   // Keywords.
   ALL, AND, AS, BETWEEN, BY, CASE, CREATE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, INSERT,
-  INTO, IS, LIKE, LIMIT, NULL, OR, ORDER, SCHEMA, SELECT, TABLE, THEN, UNION, VALUES, WHEN, WHERE,
-  WITH,
+  INTO, IS, LIKE, LIMIT, NOT, NULL, OR, ORDER, SCHEMA, SELECT, TABLE, THEN, UNION, VALUES, WHEN,
+  WHERE, WITH,
 
   // Others.
   ERROR,
@@ -262,6 +262,8 @@ impl<'a> Scanner<'a> {
       TokenType::LIKE
     } else if self.match_keyword(b"LIMIT") {
       TokenType::LIMIT
+    } else if self.match_keyword(b"NOT") {
+      TokenType::NOT
     } else if self.match_keyword(b"NULL") {
       TokenType::NULL
     } else if self.match_keyword(b"OR") {
@@ -896,6 +898,47 @@ from
         (TokenType::ORDER, "order"),
         (TokenType::BY, "by"),
         (TokenType::IDENTIFIER, "a"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_create1() {
+    assert_sql(
+      "create schema test_schema;",
+      vec![
+        (TokenType::CREATE, "create"),
+        (TokenType::SCHEMA, "schema"),
+        (TokenType::IDENTIFIER, "test_schema"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_create2() {
+    assert_sql(
+      "create table test_schema.test_table (c1 int null, c2 int not null, c3 int);",
+      vec![
+        (TokenType::CREATE, "create"),
+        (TokenType::TABLE, "table"),
+        (TokenType::IDENTIFIER, "test_schema"),
+        (TokenType::DOT, "."),
+        (TokenType::IDENTIFIER, "test_table"),
+        (TokenType::PAREN_LEFT, "("),
+        (TokenType::IDENTIFIER, "c1"),
+        (TokenType::IDENTIFIER, "int"),
+        (TokenType::NULL, "null"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "c2"),
+        (TokenType::IDENTIFIER, "int"),
+        (TokenType::NOT, "not"),
+        (TokenType::NULL, "null"),
+        (TokenType::COMMA, ","),
+        (TokenType::IDENTIFIER, "c3"),
+        (TokenType::IDENTIFIER, "int"),
+        (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::SEMICOLON, ";"),
       ]
     );
   }
