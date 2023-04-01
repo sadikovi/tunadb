@@ -22,11 +22,16 @@ pub trait TreeNode<A> {
   fn copy(&self, children: Vec<A>) -> A;
 }
 
+// Rule to transform a tree.
+pub trait Rule<A> {
+  fn apply(&self, node: &A) -> Option<A>;
+}
+
 // Returns a copy of this node where the `rule` has been recursively applied to it and
 // all of its children (pre-order). When the `rule` does not apply to a given node it
 // is left unchanged.
-pub fn transform_down<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&A) -> Option<A> {
-  let binding = rule(node);
+pub fn transform_down<A>(node: &A, rule: &dyn Rule<A>) -> A where A: TreeNode<A> {
+  let binding = rule.apply(node);
   let node = binding.as_ref().unwrap_or(node);
 
   let mut children = Vec::new();
@@ -41,7 +46,7 @@ pub fn transform_down<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn
 // Returns a copy of this node where the `rule` has been recursively applied first to all
 // of its children and then itself (post-order). When the `rule` does not apply to a given
 // node, it is left unchanged.
-pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&A) -> Option<A> {
+pub fn transform_up<A>(node: &A, rule: &dyn Rule<A>) -> A where A: TreeNode<A> {
   let mut children = Vec::new();
   for child in node.children() {
     let updated = transform_up(child.as_ref(), rule);
@@ -49,7 +54,7 @@ pub fn transform_up<A, R>(node: &A, rule: &R) -> A where A: TreeNode<A>, R: Fn(&
   }
 
   let node = node.copy(children);
-  rule(&node).unwrap_or(node)
+  rule.apply(&node).unwrap_or(node)
 }
 
 // Expanded plan tree display.
@@ -121,4 +126,232 @@ pub fn tree_output<A>(plan: &A) -> String where A: TreeNode<A> {
 pub fn plan_output<A>(plan: &A) -> String where A: TreeNode<A> {
   let output = PlanSimpleDisplay { plan };
   output.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[derive(Debug, PartialEq)]
+  struct TestNode {
+    name: String,
+    children: Vec<TestNode>,
+  }
+
+  impl TestNode {
+    fn new(name: &str, children: Vec<TestNode>) -> Self {
+      Self { name: name.to_owned(), children }
+    }
+  }
+
+  impl TreeNode<TestNode> for TestNode {
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.name)
+    }
+
+    fn as_ref(&self) -> &TestNode {
+      self
+    }
+
+    fn children(&self) -> Vec<&TestNode> {
+      self.children.iter().map(|node| node).collect()
+    }
+
+    fn copy(&self, children: Vec<TestNode>) -> TestNode {
+      Self::new(&self.name, children)
+    }
+  }
+
+  // Helper method that returns a simple test tree.
+  fn get_test_tree() -> TestNode {
+    TestNode::new(
+      "A",
+      vec![
+        TestNode::new(
+          "B",
+          vec![
+            TestNode::new("C", vec![]),
+            TestNode::new("D", vec![]),
+          ]
+        ),
+        TestNode::new("E", vec![]),
+      ]
+    )
+  }
+
+  struct NoopRule {
+  }
+
+  impl Rule<TestNode> for NoopRule {
+    fn apply(&self, _node: &TestNode) -> Option<TestNode> {
+      None
+    }
+  }
+
+  #[test]
+  fn test_trees_transform_up_not_modified() {
+    let rule = NoopRule {};
+
+    let node = TestNode::new("A", vec![]);
+    let res = transform_up(&node, &rule);
+    assert_eq!(res, node);
+
+    let node = get_test_tree();
+    let res = transform_up(&node, &rule);
+    assert_eq!(res, node);
+  }
+
+  struct RenameRule {
+  }
+
+  impl Rule<TestNode> for RenameRule {
+    fn apply(&self, node: &TestNode) -> Option<TestNode> {
+      if &node.name == "A" {
+        Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
+      } else if &node.name == "B" {
+        Some(TestNode::new("Bp", vec![TestNode::new("C", vec![])]))
+      } else {
+        None
+      }
+    }
+  }
+
+  #[test]
+  fn test_trees_transform_up_modified() {
+    let rule = RenameRule {};
+
+    let node = TestNode::new("A", vec![]);
+    let res = transform_up(&node, &rule);
+    assert_eq!(res, TestNode::new("Ap", vec![TestNode::new("B", vec![])]));
+
+    let node = get_test_tree();
+    let res = transform_up(&node, &rule);
+    assert_eq!(res, TestNode::new("Ap", vec![TestNode::new("B", vec![])]));
+  }
+
+  #[test]
+  fn test_trees_transform_down_not_modified() {
+    let rule = NoopRule {};
+
+    let node = TestNode::new("A", vec![]);
+    let res = transform_down(&node, &rule);
+    assert_eq!(res, node);
+
+    let node = get_test_tree();
+    let res = transform_down(&node, &rule);
+    assert_eq!(res, node);
+  }
+
+  struct Rename2Rule {
+  }
+
+  impl Rule<TestNode> for Rename2Rule {
+    fn apply(&self, node: &TestNode) -> Option<TestNode> {
+      if &node.name == "A" {
+        Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
+      } else if &node.name == "B" {
+        Some(TestNode::new("Bp", vec![TestNode::new("Cp", vec![])]))
+      } else {
+        None
+      }
+    }
+  }
+
+  #[test]
+  fn test_trees_transform_down_modified() {
+    let rule = Rename2Rule {};
+
+    let exp = TestNode::new(
+      "Ap",
+      vec![
+        TestNode::new(
+          "Bp",
+          vec![
+            TestNode::new("Cp", vec![])
+          ]
+        )
+      ]
+    );
+
+    let node = TestNode::new("A", vec![]);
+    let res = transform_down(&node, &rule);
+    assert_eq!(res, exp);
+
+    let node = get_test_tree();
+    let res = transform_down(&node, &rule);
+    assert_eq!(res, exp);
+  }
+
+  #[test]
+  fn test_trees_output() {
+    let node = TestNode::new("A", vec![]);
+    assert_eq!(tree_output(&node).trim(), "A");
+
+    let node = TestNode::new(
+      "A",
+      vec![
+        TestNode::new("B", vec![]),
+        TestNode::new("C", vec![]),
+      ]
+    );
+    assert_eq!(
+      tree_output(&node).trim(),
+      vec![
+        "A",
+        ":- B",
+        "+- C"
+      ].join("\n")
+    );
+
+    let node = TestNode::new(
+      "A",
+      vec![
+        TestNode::new(
+          "B",
+          vec![
+            TestNode::new("C", vec![]),
+          ]
+        ),
+      ]
+    );
+    assert_eq!(
+      tree_output(&node).trim(),
+      vec![
+        "A",
+        "+- B",
+        "   +- C"
+      ].join("\n")
+    );
+
+    let node = TestNode::new(
+      "A",
+      vec![
+        TestNode::new(
+          "B",
+          vec![
+            TestNode::new("C", vec![]),
+            TestNode::new("D", vec![]),
+          ]
+        ),
+        TestNode::new(
+          "E",
+          vec![
+            TestNode::new("F", vec![]),
+          ]
+        ),
+      ]
+    );
+
+    assert_eq!(
+      tree_output(&node).trim(),
+      vec![
+        "A",
+        ":- B",
+        ":  :- C",
+        ":  +- D",
+        "+- E",
+        "   +- F"
+      ].join("\n")
+    );
+  }
 }

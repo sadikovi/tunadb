@@ -573,7 +573,8 @@ impl<'a> Parser<'a> {
   }
 }
 
-// Returns Plan instance from the sql string.
+// Returns a sequence of Plans corresponding to the input SQL string.
+// SQL string can contain one or more statements, each plan represents a statement/query.
 pub fn parse(sql: &str) -> Res<Vec<Plan>> {
   let mut scanner = Scanner::new(sql.as_bytes());
   let token = scanner.next_token();
