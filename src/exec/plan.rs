@@ -69,6 +69,8 @@ impl TableIdentifier {
 pub enum Plan {
   CreateSchema(Rc<String> /* schema name */),
   CreateTable(Rc<TableIdentifier>, Rc<Fields> /* schema */),
+  DropSchema(Rc<String> /* schema name */, bool /* cascade */),
+  DropTable(Rc<TableIdentifier>),
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
@@ -84,6 +86,8 @@ impl TreeNode<Plan> for Plan {
     match self {
       Plan::CreateSchema(_) => write!(f, "CreateSchema"),
       Plan::CreateTable(_, _) => write!(f, "CreateTable"),
+      Plan::DropSchema(_, _) => write!(f, "DropSchema"),
+      Plan::DropTable(_) => write!(f, "DropTable"),
       Plan::Filter(_, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _) => write!(f, "Limit"),
@@ -104,6 +108,8 @@ impl TreeNode<Plan> for Plan {
     match self {
       Plan::CreateSchema(_) => Vec::new(),
       Plan::CreateTable(_, _) => Vec::new(),
+      Plan::DropSchema(_, _) => Vec::new(),
+      Plan::DropTable(_) => Vec::new(),
       Plan::Filter(_, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, ref child) => vec![child],
@@ -122,6 +128,12 @@ impl TreeNode<Plan> for Plan {
       },
       Plan::CreateTable(ref ident, ref schema) => {
         Plan::CreateTable(ident.clone(), schema.clone())
+      },
+      Plan::DropSchema(ref schema_name, cascade) => {
+        Plan::DropSchema(schema_name.clone(), *cascade)
+      },
+      Plan::DropTable(ref ident) => {
+        Plan::DropTable(ident.clone())
       },
       Plan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -389,6 +401,18 @@ pub mod dsl {
       table.to_string()
     );
     Plan::CreateTable(Rc::new(table_ident), Rc::new(fields))
+  }
+
+  pub fn drop_schema(schema: &str, is_cascade: bool) -> Plan {
+    Plan::DropSchema(Rc::new(schema.to_string()), is_cascade)
+  }
+
+  pub fn drop_table(schema: Option<&str>, table: &str) -> Plan {
+    let table_ident = TableIdentifier::new(
+      schema.map(|x| x.to_string()),
+      table.to_string()
+    );
+    Plan::DropTable(Rc::new(table_ident))
   }
 
   pub fn empty() -> Plan {

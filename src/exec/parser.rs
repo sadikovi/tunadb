@@ -531,6 +531,19 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn drop_schema_statement(&mut self) -> Res<Plan> {
+    let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
+    let is_cascade = self.matches(TokenType::CASCADE)?;
+    Ok(Plan::DropSchema(Rc::new(token.value(&self.sql).to_string()), is_cascade))
+  }
+
+  #[inline]
+  fn drop_table_statement(&mut self) -> Res<Plan> {
+    let ident = self.table_identifier()?;
+    Ok(Plan::DropTable(Rc::new(ident)))
+  }
+
+  #[inline]
   fn statement(&mut self) -> Res<Plan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture errors when there are extra tokens at the end of the statement.
@@ -541,6 +554,12 @@ impl<'a> Parser<'a> {
         stmt = Some(self.create_schema_statement()?);
       } else if self.matches(TokenType::TABLE)? {
         stmt = Some(self.create_table_statement()?);
+      }
+    } else if self.matches(TokenType::DROP)? {
+      if self.matches(TokenType::SCHEMA)? {
+        stmt = Some(self.drop_schema_statement()?);
+      } else if self.matches(TokenType::TABLE)? {
+        stmt = Some(self.drop_table_statement()?);
       }
     } else if self.matches(TokenType::INSERT)? {
       stmt = Some(self.insert_statement()?);
@@ -1022,6 +1041,32 @@ pub mod tests {
           ]
         ).unwrap()
       )
+    );
+  }
+
+  #[test]
+  fn test_parser_drop_schema() {
+    assert_plan(
+      "drop schema test_schema;",
+      drop_schema("test_schema", false)
+    );
+
+    assert_plan(
+      "drop schema test_schema cascade;",
+      drop_schema("test_schema", true)
+    );
+  }
+
+  #[test]
+  fn test_parser_drop_table() {
+    assert_plan(
+      "drop table test_table;",
+      drop_table(None, "test_table")
+    );
+
+    assert_plan(
+      "drop table test_schema.test_table;",
+      drop_table(Some("test_schema"), "test_table")
     );
   }
 }

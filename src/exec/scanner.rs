@@ -2,19 +2,65 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenType {
   // 1 character tokens.
-  COMMA, DOT, EQUALS, GREATER_THAN, LESS_THAN, MINUS, PAREN_LEFT, PAREN_RIGHT, PLUS, SEMICOLON,
-  SLASH, STAR, VERTICAL_SINGLE,
+  COMMA,
+  DOT,
+  EQUALS,
+  GREATER_THAN,
+  LESS_THAN,
+  MINUS,
+  PAREN_LEFT,
+  PAREN_RIGHT,
+  PLUS,
+  SEMICOLON,
+  SLASH,
+  STAR,
+  VERTICAL_SINGLE,
 
   // 2+ character tokens.
-  GREATER_THAN_EQUALS, LESS_THAN_EQUALS, VERTICAL_DOUBLE,
+  GREATER_THAN_EQUALS,
+  LESS_THAN_EQUALS,
+  VERTICAL_DOUBLE,
 
   // Literals.
-  IDENTIFIER, NUMBER, STRING,
+  IDENTIFIER,
+  NUMBER,
+  STRING,
 
   // Keywords.
-  ALL, AND, AS, BETWEEN, BY, CASE, CREATE, DISTINCT, ELSE, END, EXISTS, FROM, GROUP, IN, INSERT,
-  INTO, IS, LIKE, LIMIT, NOT, NULL, OR, ORDER, SCHEMA, SELECT, TABLE, THEN, UNION, VALUES, WHEN,
-  WHERE, WITH,
+  ALL,
+  AND,
+  AS,
+  BETWEEN,
+  BY,
+  CASCADE,
+  CASE,
+  CREATE,
+  DISTINCT,
+  DROP,
+  ELSE,
+  END,
+  EXISTS,
+  FROM,
+  GROUP,
+  IN,
+  INSERT,
+  INTO,
+  IS,
+  LIKE,
+  LIMIT,
+  NOT,
+  NULL,
+  OR,
+  ORDER,
+  SCHEMA,
+  SELECT,
+  TABLE,
+  THEN,
+  UNION,
+  VALUES,
+  WHEN,
+  WHERE,
+  WITH,
 
   // Others.
   ERROR,
@@ -234,12 +280,16 @@ impl<'a> Scanner<'a> {
       TokenType::BETWEEN
     } else if self.match_keyword(b"BY") {
       TokenType::BY
+    } else if self.match_keyword(b"CASCADE") {
+      TokenType::CASCADE
     } else if self.match_keyword(b"CASE") {
       TokenType::CASE
     } else if self.match_keyword(b"CREATE") {
       TokenType::CREATE
     } else if self.match_keyword(b"DISTINCT") {
       TokenType::DISTINCT
+    } else if self.match_keyword(b"DROP") {
+      TokenType::DROP
     } else if self.match_keyword(b"ELSE") {
       TokenType::ELSE
     } else if self.match_keyword(b"END") {
@@ -938,6 +988,35 @@ from
         (TokenType::IDENTIFIER, "c3"),
         (TokenType::IDENTIFIER, "int"),
         (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_drop1() {
+    assert_sql(
+      "drop schema test_schema cascade;",
+      vec![
+        (TokenType::DROP, "drop"),
+        (TokenType::SCHEMA, "schema"),
+        (TokenType::IDENTIFIER, "test_schema"),
+        (TokenType::CASCADE, "cascade"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_drop2() {
+    assert_sql(
+      "drop table test_schema.test_table;",
+      vec![
+        (TokenType::DROP, "drop"),
+        (TokenType::TABLE, "table"),
+        (TokenType::IDENTIFIER, "test_schema"),
+        (TokenType::DOT, "."),
+        (TokenType::IDENTIFIER, "test_table"),
         (TokenType::SEMICOLON, ";"),
       ]
     );
