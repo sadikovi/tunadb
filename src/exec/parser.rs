@@ -341,7 +341,7 @@ impl<'a> Parser<'a> {
   #[inline]
   fn from_statement(&mut self) -> Res<Plan> {
     let table_ident = self.table_identifier()?;
-    Ok(Plan::TableScan(Rc::new(table_ident)))
+    Ok(Plan::UnresolvedTableScan(Rc::new(table_ident)))
   }
 
   #[inline]

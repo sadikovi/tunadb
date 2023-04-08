@@ -2,6 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 use crate::core::trees::TreeNode;
 use crate::core::types::Fields;
+use crate::exec::catalog::TableInfo;
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -63,6 +64,16 @@ impl TableIdentifier {
   pub fn new(schema: Option<String>, table: String) -> TableIdentifier {
     Self { schema, table }
   }
+
+  #[inline]
+  pub fn schema(&self) -> Option<&str> {
+    self.schema.as_ref().map(|schema| schema.as_str())
+  }
+
+  #[inline]
+  pub fn table(&self) -> &str {
+    &self.table
+  }
 }
 
 #[derive(Debug, PartialEq)]
@@ -71,13 +82,15 @@ pub enum Plan {
   CreateTable(Rc<TableIdentifier>, Rc<Fields> /* schema */),
   DropSchema(Rc<String> /* schema name */, bool /* cascade */),
   DropTable(Rc<TableIdentifier>),
+  // Indicates an empty relation, e.g. "select 1;".
+  Empty,
   Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
   Limit(usize /* limit */, Rc<Plan> /* child */),
   LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
-  TableScan(Rc<TableIdentifier> /* table identifier */),
-  Empty, // indicates an empty relation, e.g. "select 1;"
+  TableScan(Rc<TableInfo>),
+  UnresolvedTableScan(Rc<TableIdentifier> /* table identifier */),
 }
 
 impl TreeNode<Plan> for Plan {
@@ -88,13 +101,14 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateTable(_, _) => write!(f, "CreateTable"),
       Plan::DropSchema(_, _) => write!(f, "DropSchema"),
       Plan::DropTable(_) => write!(f, "DropTable"),
+      Plan::Empty => write!(f, "Empty"),
       Plan::Filter(_, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _) => write!(f, "Limit"),
       Plan::LocalRelation(_) => write!(f, "LocalRelation"),
       Plan::Project(_, _) => write!(f, "Project"),
       Plan::TableScan(_) => write!(f, "TableScan"),
-      Plan::Empty => write!(f, "Empty"),
+      Plan::UnresolvedTableScan(_) => write!(f, "UnresolvedTableScan"),
     }
   }
 
@@ -110,13 +124,14 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateTable(_, _) => Vec::new(),
       Plan::DropSchema(_, _) => Vec::new(),
       Plan::DropTable(_) => Vec::new(),
+      Plan::Empty => Vec::new(),
       Plan::Filter(_, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, ref child) => vec![child],
       Plan::LocalRelation(_) => Vec::new(),
       Plan::Project(_, ref child) => vec![child],
       Plan::TableScan(_) => Vec::new(),
-      Plan::Empty => Vec::new(),
+      Plan::UnresolvedTableScan(_) => Vec::new(),
     }
   }
 
@@ -134,6 +149,9 @@ impl TreeNode<Plan> for Plan {
       },
       Plan::DropTable(ref ident) => {
         Plan::DropTable(ident.clone())
+      },
+      Plan::Empty => {
+        Plan::Empty
       },
       Plan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -153,10 +171,12 @@ impl TreeNode<Plan> for Plan {
         let child = get_unary!("Project", children);
         Plan::Project(expressions.clone(), Rc::new(child))
       },
-      Plan::TableScan(ref table_ident) => {
-        Plan::TableScan(table_ident.clone())
+      Plan::TableScan(ref info) => {
+        Plan::TableScan(info.clone())
       },
-      Plan::Empty => Plan::Empty,
+      Plan::UnresolvedTableScan(ref table_ident) => {
+        Plan::UnresolvedTableScan(table_ident.clone())
+      },
     }
   }
 }
@@ -428,7 +448,7 @@ pub mod dsl {
       schema.map(|x| x.to_string()),
       table.to_string()
     );
-    Plan::TableScan(Rc::new(table_ident))
+    Plan::UnresolvedTableScan(Rc::new(table_ident))
   }
 
   pub fn insert_into_values(
