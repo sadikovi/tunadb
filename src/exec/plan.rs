@@ -1,7 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
-use crate::common::trees::TreeNode;
-use crate::common::types::Fields;
+use crate::core::trees::TreeNode;
+use crate::core::types::Fields;
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -469,7 +469,7 @@ pub mod dsl {
 #[cfg(test)]
 pub mod tests {
   use super::dsl::*;
-  use crate::common::trees;
+  use crate::core::trees;
 
   #[test]
   fn test_plan_display() {

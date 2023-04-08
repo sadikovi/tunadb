@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
-use crate::common::util::to_valid_identifier;
+use crate::core::util::to_valid_identifier;
 
 const TYPE_INT: u8 = 1;
 const TYPE_BIGINT: u8 = 2;

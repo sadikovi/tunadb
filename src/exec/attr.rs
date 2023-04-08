@@ -2,9 +2,9 @@ use std::fmt;
 use std::rc::Rc;
 use crate::common::error::Res;
 use crate::common::row::Row;
-use crate::common::trees::TreeNode;
-use crate::common::types::{Field, Fields, Type};
-use crate::common::util::to_valid_identifier;
+use crate::core::trees::TreeNode;
+use crate::core::types::{Field, Fields, Type};
+use crate::core::util::to_valid_identifier;
 
 // Creates a new alias for the provided attribute.
 pub fn alias(child: Attribute, name: &str) -> Res<Attribute> {
@@ -161,7 +161,7 @@ impl TreeNode<Attribute> for Attribute {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::common::trees::tree_string;
+  use crate::core::trees::tree_string;
 
   #[test]
   fn test_attr_create_alias() {

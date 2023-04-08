@@ -1,8 +1,8 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
-use crate::common::types::{Field, Fields, Type};
-use crate::common::util::to_valid_identifier;
+use crate::core::types::{Field, Fields, Type};
+use crate::core::util::to_valid_identifier;
 use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
 

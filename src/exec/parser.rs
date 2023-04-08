@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::common::types::{Field, Fields, Type};
+use crate::core::types::{Field, Fields, Type};
 use crate::exec::plan::{Expression, Plan, TableIdentifier};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 

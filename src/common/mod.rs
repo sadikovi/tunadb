@@ -111,8 +111,4 @@ macro_rules! write_bytes {
 
 pub mod error;
 pub mod lru;
-pub mod row;
 pub mod serde;
-pub mod trees;
-pub mod types;
-pub mod util;
