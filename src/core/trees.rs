@@ -1,4 +1,5 @@
 use std::fmt;
+use crate::common::error::Res;
 
 // Generic `TreeNode` to provide traversal and transform.
 pub trait TreeNode<A> {
@@ -24,37 +25,42 @@ pub trait TreeNode<A> {
 
 // Rule to transform a tree.
 pub trait Rule<A> {
-  fn apply(&self, node: &A) -> Option<A>;
+  // Applies the rule on the `node`.
+  // The function can return:
+  // - Ok(Some(new_node)), where the new_node is a new subtree that replaces node.
+  // - Ok(None), means the rule did not apply, the node should remain unchanged.
+  // - Err(_), error during the rule resolution.
+  fn apply(&self, node: &A) -> Res<Option<A>>;
 }
 
 // Returns a copy of this node where the `rule` has been recursively applied to it and
 // all of its children (pre-order). When the `rule` does not apply to a given node it
 // is left unchanged.
-pub fn transform_down<A>(node: &A, rule: &dyn Rule<A>) -> A where A: TreeNode<A> {
-  let binding = rule.apply(node);
+pub fn transform_down<A>(node: &A, rule: &dyn Rule<A>) -> Res<A> where A: TreeNode<A> {
+  let binding = rule.apply(node)?;
   let node = binding.as_ref().unwrap_or(node);
 
   let mut children = Vec::new();
   for child in node.children() {
-    let updated = transform_down(child.as_ref(), rule);
+    let updated = transform_down(child.as_ref(), rule)?;
     children.push(updated);
   }
 
-  node.copy(children)
+  Ok(node.copy(children))
 }
 
 // Returns a copy of this node where the `rule` has been recursively applied first to all
 // of its children and then itself (post-order). When the `rule` does not apply to a given
 // node, it is left unchanged.
-pub fn transform_up<A>(node: &A, rule: &dyn Rule<A>) -> A where A: TreeNode<A> {
+pub fn transform_up<A>(node: &A, rule: &dyn Rule<A>) -> Res<A> where A: TreeNode<A> {
   let mut children = Vec::new();
   for child in node.children() {
-    let updated = transform_up(child.as_ref(), rule);
+    let updated = transform_up(child.as_ref(), rule)?;
     children.push(updated);
   }
 
   let node = node.copy(children);
-  rule.apply(&node).unwrap_or(node)
+  Ok(rule.apply(&node)?.unwrap_or(node))
 }
 
 // Expanded plan tree display.
@@ -183,8 +189,8 @@ mod tests {
   }
 
   impl Rule<TestNode> for NoopRule {
-    fn apply(&self, _node: &TestNode) -> Option<TestNode> {
-      None
+    fn apply(&self, _node: &TestNode) -> Res<Option<TestNode>> {
+      Ok(None)
     }
   }
 
@@ -193,11 +199,11 @@ mod tests {
     let rule = NoopRule {};
 
     let node = TestNode::new("A", vec![]);
-    let res = transform_up(&node, &rule);
+    let res = transform_up(&node, &rule).unwrap();
     assert_eq!(res, node);
 
     let node = get_test_tree();
-    let res = transform_up(&node, &rule);
+    let res = transform_up(&node, &rule).unwrap();
     assert_eq!(res, node);
   }
 
@@ -205,13 +211,13 @@ mod tests {
   }
 
   impl Rule<TestNode> for RenameRule {
-    fn apply(&self, node: &TestNode) -> Option<TestNode> {
+    fn apply(&self, node: &TestNode) -> Res<Option<TestNode>> {
       if &node.name == "A" {
-        Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
+        Ok(Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])])))
       } else if &node.name == "B" {
-        Some(TestNode::new("Bp", vec![TestNode::new("C", vec![])]))
+        Ok(Some(TestNode::new("Bp", vec![TestNode::new("C", vec![])])))
       } else {
-        None
+        Ok(None)
       }
     }
   }
@@ -221,11 +227,11 @@ mod tests {
     let rule = RenameRule {};
 
     let node = TestNode::new("A", vec![]);
-    let res = transform_up(&node, &rule);
+    let res = transform_up(&node, &rule).unwrap();
     assert_eq!(res, TestNode::new("Ap", vec![TestNode::new("B", vec![])]));
 
     let node = get_test_tree();
-    let res = transform_up(&node, &rule);
+    let res = transform_up(&node, &rule).unwrap();
     assert_eq!(res, TestNode::new("Ap", vec![TestNode::new("B", vec![])]));
   }
 
@@ -234,11 +240,11 @@ mod tests {
     let rule = NoopRule {};
 
     let node = TestNode::new("A", vec![]);
-    let res = transform_down(&node, &rule);
+    let res = transform_down(&node, &rule).unwrap();
     assert_eq!(res, node);
 
     let node = get_test_tree();
-    let res = transform_down(&node, &rule);
+    let res = transform_down(&node, &rule).unwrap();
     assert_eq!(res, node);
   }
 
@@ -246,13 +252,13 @@ mod tests {
   }
 
   impl Rule<TestNode> for Rename2Rule {
-    fn apply(&self, node: &TestNode) -> Option<TestNode> {
+    fn apply(&self, node: &TestNode) -> Res<Option<TestNode>> {
       if &node.name == "A" {
-        Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])]))
+        Ok(Some(TestNode::new("Ap", vec![TestNode::new("B", vec![])])))
       } else if &node.name == "B" {
-        Some(TestNode::new("Bp", vec![TestNode::new("Cp", vec![])]))
+        Ok(Some(TestNode::new("Bp", vec![TestNode::new("Cp", vec![])])))
       } else {
-        None
+        Ok(None)
       }
     }
   }
@@ -274,11 +280,11 @@ mod tests {
     );
 
     let node = TestNode::new("A", vec![]);
-    let res = transform_down(&node, &rule);
+    let res = transform_down(&node, &rule).unwrap();
     assert_eq!(res, exp);
 
     let node = get_test_tree();
-    let res = transform_down(&node, &rule);
+    let res = transform_down(&node, &rule).unwrap();
     assert_eq!(res, exp);
   }
 
