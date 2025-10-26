@@ -474,9 +474,10 @@ impl BlockManager for PageCache {
   fn stats(&self) -> BlockManagerStats {
     BlockManagerStats {
       page_size: self.page_size,
+      storage_version: self.mngr.version(),
       num_pages: self.mngr.num_pages(),
       num_free_pages: self.mngr.num_free_pages(),
-      is_proxy_cache: false,
+      is_noop_cache: false,
       cache_mem_used: self.mem_used(),
       cache_mem_max: self.max_mem,
       cache_num_hits: self.num_cache_hits,
@@ -569,9 +570,10 @@ impl BlockManager for NoPageCache {
   fn stats(&self) -> BlockManagerStats {
     BlockManagerStats {
       page_size: self.page_size(),
+      storage_version: self.mngr.version(),
       num_pages: self.mngr.num_pages(),
       num_free_pages: self.mngr.num_free_pages(),
-      is_proxy_cache: true,
+      is_noop_cache: true,
       cache_mem_used: self.mngr.estimated_mem_usage(),
       // Max memory does not quite make sense in no-op page cache.
       cache_mem_max: self.mngr.estimated_mem_usage(),

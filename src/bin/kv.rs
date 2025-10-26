@@ -1,5 +1,6 @@
 use std::io;
 use std::io::Write;
+use tunadb::common::version_to_str;
 use tunadb::storage::db;
 use tunadb::storage::txn::{Set, create_set, get_set};
 
@@ -142,18 +143,24 @@ fn exec_cmd(curr_db: &mut db::DB, cmd: Cmd) -> Result<bool, String> {
       println!("Using database {}.", path);
     },
     Cmd::DebugDb => {
-      let info = curr_db.stats();
+      let stats = curr_db.stats();
+      let txn_stats = stats.mngr_stats;
+      let block_stats = txn_stats.mngr_stats;
 
-      println!("      page size: {}", info.page_size);
-      println!("num total pages: {}", info.num_pages);
-      println!(" num free pages: {}", info.num_free_pages);
-      println!(" is cache proxy: {}", info.is_proxy_cache);
-      println!(" cache mem used: {} bytes", info.cache_mem_used);
-      println!("  cache mem max: {} bytes", info.cache_mem_max);
-      println!(" cache mem pcnt: {:.2}%", info.cache_mem_used_pcnt());
-      println!("     cache hits: {}", info.cache_num_hits);
-      println!("   cache misses: {}", info.cache_num_misses);
-      println!("cache hit ratio: {:.2}%", info.cache_hit_pcnt());
+      println!("  engine version: {}", version_to_str(stats.engine_version));
+      println!(" storage version: {}", version_to_str(block_stats.storage_version));
+      println!("       txn count: {}", txn_stats.txn_count);
+      println!("  has active txn: {}", txn_stats.has_active_txn);
+      println!("       page size: {}", block_stats.page_size);
+      println!(" num total pages: {}", block_stats.num_pages);
+      println!("  num free pages: {}", block_stats.num_free_pages);
+      println!("  is no-op cache: {}", block_stats.is_noop_cache);
+      println!("  cache mem used: {} bytes", block_stats.cache_mem_used);
+      println!("   cache mem max: {} bytes", block_stats.cache_mem_max);
+      println!("  cache mem pcnt: {:.2}%", block_stats.cache_mem_used_pcnt());
+      println!("      cache hits: {}", block_stats.cache_num_hits);
+      println!("    cache misses: {}", block_stats.cache_num_misses);
+      println!(" cache hit ratio: {:.2}%", block_stats.cache_hit_pcnt());
     },
     Cmd::DebugTable => {
       let info = with_table(curr_db, |table| {

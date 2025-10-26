@@ -410,12 +410,6 @@ impl StorageManager {
     }
   }
 
-  // Returns true if the storage manager has lock, i.e. has an underlying file.
-  #[inline]
-  pub fn has_lock(&self) -> bool {
-    self.lock.is_some()
-  }
-
   // Returns version that was used to write the file or the current version if the file is new.
   // Storage layout version of the file may be different from the engine version.
   #[inline]
@@ -423,7 +417,14 @@ impl StorageManager {
     self.version
   }
 
+  // Returns true if the storage manager has lock, i.e. has an underlying file.
+  #[inline]
+  pub fn has_lock(&self) -> bool {
+    self.lock.is_some()
+  }
+
   // Returns the next motonically increasing id from the counter.
+  // The counter is incremented afterwards for the next id.
   #[inline]
   pub fn next_id(&mut self) -> u64 {
     let id = self.counter;

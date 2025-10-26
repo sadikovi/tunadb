@@ -1,11 +1,21 @@
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use crate::common::error::Res;
 use crate::storage::btree;
-use crate::storage::block::BlockManager;
+use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::cache::is_virtual_page_id;
 use crate::storage::smgr::INVALID_PAGE_ID;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TransactionManagerStats {
+  // Current transaction count.
+  pub txn_count: usize,
+  // Whether there is an active/open transaction.
+  pub has_active_txn: bool,
+  // Underlying block manager stats.
+  pub mngr_stats: BlockManagerStats,
+}
 
 // Transaction manager.
 // Used as a wrapper on block manager to handle transactions.
@@ -24,13 +34,17 @@ impl TransactionManager {
     Self {
       counter: 1,
       mngr: mngr,
-      curr_txn: None
+      curr_txn: None,
     }
   }
 
-  // Returns reference to the underlying block manager (read-only).
-  pub fn block_mngr(&self) -> Ref<'_, dyn BlockManager> {
-    self.mngr.borrow()
+  // Returns the statistics of the transaction manager.
+  pub fn stats(&self) -> TransactionManagerStats {
+    TransactionManagerStats {
+      txn_count: self.counter - 1,
+      has_active_txn: self.curr_txn.is_some(),
+      mngr_stats: self.mngr.borrow().stats(),
+    }
   }
 
   // Starts a new transaction and runs any operations within it.
@@ -418,6 +432,28 @@ mod tests {
   ) {
     assert_eq!(cache.borrow_mut().get_mngr().num_pages(), num_pages, "num_pages");
     assert_eq!(cache.borrow_mut().get_mngr().num_free_pages(), num_free_pages, "num_free_pages");
+  }
+
+  #[test]
+  fn test_txn_transaction_manager_stats() {
+    let cache = get_block_mngr();
+    let mut mngr = TransactionManager::new(cache);
+
+    let stats = mngr.stats();
+    assert_eq!(stats.txn_count, 0);
+    assert!(!stats.has_active_txn);
+    assert_eq!(stats.mngr_stats.num_pages, 0);
+
+    mngr.with_txn(false, |txn| {
+      let mut set = create_set(&txn, b"abc").unwrap();
+      set.put(&[1], &[2]);
+      txn.borrow_mut().commit();
+    }).unwrap();
+
+    let stats = mngr.stats();
+    assert_eq!(stats.txn_count, 1);
+    assert!(!stats.has_active_txn);
+    assert_eq!(stats.mngr_stats.num_pages, 2);
   }
 
   #[test]

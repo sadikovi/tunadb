@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::common::DB_VERSION;
 use crate::common::error::Res;
-use crate::storage::block::{BlockManager, BlockManagerStats};
+use crate::storage::block::BlockManager;
 use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, NoPageCache, PageCache};
 use crate::storage::smgr::{DEFAULT_PAGE_SIZE, StorageManager};
-use crate::storage::txn::{TransactionRef, TransactionManager};
+use crate::storage::txn::{TransactionRef, TransactionManager, TransactionManagerStats};
 
 // Main entry to create a database client.
 // Opens a database using the provided path or an in-memory database.
@@ -63,6 +63,12 @@ impl DbBuilder {
   }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct DbStats {
+  pub engine_version: u32,
+  pub mngr_stats: TransactionManagerStats,
+}
+
 // Handler for the database state.
 pub struct DB {
   mngr: TransactionManager,
@@ -76,8 +82,11 @@ impl DB {
   }
 
   // Database/storage statistics.
-  pub fn stats(&self) -> BlockManagerStats {
-    self.mngr.block_mngr().stats()
+  pub fn stats(&self) -> DbStats {
+    DbStats {
+      engine_version: self.version(),
+      mngr_stats: self.mngr.stats(),
+    }
   }
 
   // Starts a new transaction and runs any operations within it.
@@ -93,6 +102,13 @@ mod tests {
   use super::*;
   use crate::storage::smgr::tests::with_tmp_file;
   use crate::storage::txn::{create_set, get_set};
+
+  #[test]
+  fn test_db_stats() {
+    let db = open(None).try_build().unwrap();
+    let stats = db.stats();
+    assert_eq!(stats.engine_version, db.version());
+  }
 
   #[test]
   fn test_db_open_close() {

@@ -26,10 +26,16 @@ pub trait BlockManager {
 
 #[derive(Clone, Copy, Debug)]
 pub struct BlockManagerStats {
+  // Current page size.
   pub page_size: usize, // in bytes
+  // Storage layout version.
+  pub storage_version: u32,
+  // Total number of pages.
   pub num_pages: usize,
+  // Number of free pages.
   pub num_free_pages: usize,
-  pub is_proxy_cache: bool,
+  // Whether we use a no-op page cache.
+  pub is_noop_cache: bool,
   pub cache_mem_used: usize, // in bytes
   pub cache_mem_max: usize, // in bytes
   pub cache_num_hits: usize,
@@ -64,9 +70,10 @@ mod tests {
   fn get_test_stats() -> BlockManagerStats {
     BlockManagerStats {
       page_size: 1024,
+      storage_version: 1,
       num_pages: 10,
       num_free_pages: 2,
-      is_proxy_cache: false,
+      is_noop_cache: false,
       cache_mem_used: 0,
       cache_mem_max: 0,
       cache_num_hits: 0,
