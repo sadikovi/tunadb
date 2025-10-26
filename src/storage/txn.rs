@@ -29,7 +29,7 @@ impl TransactionManager {
   }
 
   // Returns reference to the underlying block manager (read-only).
-  pub fn block_mngr(&self) -> Ref<dyn BlockManager> {
+  pub fn block_mngr(&self) -> Ref<'_, dyn BlockManager> {
     self.mngr.borrow()
   }
 

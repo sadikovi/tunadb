@@ -1,12 +1,6 @@
-// =========
-// Versions
-// =========
-
-pub const DB_VERSION: &str = env!("CARGO_PKG_VERSION"); // extracted from Cargo.toml
-
-//======
-// Misc
-//======
+//=============
+// Misc macros
+//=============
 
 // Macro to render binary data as hex.
 macro_rules! hex {
@@ -109,6 +103,43 @@ macro_rules! write_bytes {
   }}
 }
 
+// =========
+// Versions
+// =========
+
+// The version should match the version from Cargo.toml.
+// This is verified by the test below and needs to be updated if the version changes.
+pub const DB_VERSION: u32 = u8_u32!([0, 1, 0, 0]);
+
+// Converts u32 version into human-readable string.
+pub fn version_to_str(version: u32) -> String {
+  let parts: [u8; 4] = u32_u8!(version);
+  // We only use the first 3 bytes for major, minor, and patch.
+  format!("{}.{}.{}", parts[0], parts[1], parts[2])
+}
+
 pub mod error;
 pub mod lru;
 pub mod serde;
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_version_cargo_toml() {
+    let cargo_toml_version = env!("CARGO_PKG_VERSION");
+    assert_eq!(version_to_str(DB_VERSION), cargo_toml_version)
+  }
+
+  #[test]
+  fn test_version_str_u8() {
+    assert_eq!(version_to_str(0), "0.0.0");
+    assert_eq!(version_to_str(1), "1.0.0");
+    assert_eq!(version_to_str(u8_u32!([1, 2, 3, 0])), "1.2.3");
+    // We don't use the last byte for version.
+    assert_eq!(version_to_str(u8_u32!([1, 2, 3, 255])), "1.2.3");
+    assert_eq!(version_to_str(u8_u32!([255, 255, 255, 255])), "255.255.255");
+
+  }
+}

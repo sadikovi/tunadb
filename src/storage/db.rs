@@ -69,9 +69,9 @@ pub struct DB {
 }
 
 impl DB {
-  // Returns the database version.
+  // Returns the database/engine version.
   #[inline]
-  pub fn version(&self) -> &str {
+  pub fn version(&self) -> u32 {
     DB_VERSION
   }
 
