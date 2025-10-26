@@ -486,25 +486,25 @@ impl BlockManager for PageCache {
 }
 
 //=================
-// Page cache proxy
+// No-op page cache
 //=================
 
-// Proxy page cache delegates to the storage manager directly without any buffering.
-pub struct PageCacheProxy {
+// No-op page cache that delegates to the storage manager directly without any buffering.
+pub struct NoPageCache {
   mngr: StorageManager,
   free_set: HashSet<u32>,
   write_set: HashSet<u32>,
   num_cache_hits: usize,
 }
 
-impl PageCacheProxy {
-  // Creates new page cache.
+impl NoPageCache {
+  // Creates new no-op page cache.
   pub fn new(mngr: StorageManager) -> Self {
     Self { mngr, free_set: HashSet::new(), write_set: HashSet::new(), num_cache_hits: 0 }
   }
 }
 
-impl BlockManager for PageCacheProxy {
+impl BlockManager for NoPageCache {
   #[inline]
   fn page_size(&self) -> usize {
     self.mngr.page_size()
@@ -573,7 +573,7 @@ impl BlockManager for PageCacheProxy {
       num_free_pages: self.mngr.num_free_pages(),
       is_proxy_cache: true,
       cache_mem_used: self.mngr.estimated_mem_usage(),
-      // Max memory does not quite make sense in proxy cache.
+      // Max memory does not quite make sense in no-op page cache.
       cache_mem_max: self.mngr.estimated_mem_usage(),
       cache_num_hits: self.num_cache_hits,
       cache_num_misses: 0, // everything is in memory
@@ -735,11 +735,11 @@ mod tests {
     assert_eq!(cache.get_mngr().num_free_pages(), 130);
   }
 
-  // Copy of the test_cache_rollback for PageCacheProxy.
+  // Copy of the test_cache_rollback for NoPageCache.
   #[test]
-  fn test_cache_proxy_rollback() {
+  fn test_cache_noop_page_cache_rollback() {
     let page_size = 256;
-    let mut cache = PageCacheProxy::new(get_mngr(page_size));
+    let mut cache = NoPageCache::new(get_mngr(page_size));
 
     let mut root = INVALID_PAGE_ID;
 
@@ -800,10 +800,10 @@ mod tests {
   }
 
   #[test]
-  fn test_cache_proxy_stats() {
+  fn test_cache_noop_page_cache_stats() {
     let page_size = 256;
-    let cache = PageCacheProxy::new(get_mngr(page_size as u32));
-    // Proxy cache routes calls directly to storage manager, we don't need to explicitly check.
+    let cache = NoPageCache::new(get_mngr(page_size as u32));
+    // No-op cache routes calls directly to storage manager, we don't need to explicitly check.
     assert_eq!(cache.stats().page_size, page_size);
     assert_eq!(cache.stats().num_pages, 0);
     assert_eq!(cache.stats().num_free_pages, 0);

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::common::DB_VERSION;
 use crate::common::error::Res;
 use crate::storage::block::{BlockManager, BlockManagerStats};
-use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, PageCache, PageCacheProxy};
+use crate::storage::cache::{DEFAULT_PAGE_CACHE_MEM, NoPageCache, PageCache};
 use crate::storage::smgr::{DEFAULT_PAGE_SIZE, StorageManager};
 use crate::storage::txn::{TransactionRef, TransactionManager};
 
@@ -54,8 +54,8 @@ impl DbBuilder {
           .as_mem(0)
           .with_page_size(self.page_size)
           .try_build()?;
-        // We use proxy since the storage data is already in memory.
-        Rc::new(RefCell::new(PageCacheProxy::new(storage)))
+        // We use no-op page cache since the storage data is already in memory.
+        Rc::new(RefCell::new(NoPageCache::new(storage)))
       }
     };
 
