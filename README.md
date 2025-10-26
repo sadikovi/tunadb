@@ -1,5 +1,7 @@
 # TunaDB
 
+![build](https://github.com/sadikovi/tunadb/actions/workflows/build.yml/badge.svg)
+
 A simple single-threaded implementation of a storage engine and a database
 based on copy-on-write B+tree with unconstrained key and value length in Rust.
 
