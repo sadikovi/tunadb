@@ -1,9 +1,12 @@
+//! Parser to convert a SQL string into list of plans.
+
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::core::types::{Field, Fields, Type};
 use crate::exec::plan::{Expression, Plan, TableIdentifier};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
+// Parser for the SQL queries.
 pub struct Parser<'a> {
   sql: &'a str,
   scanner: Scanner<'a>,
@@ -619,10 +622,13 @@ pub mod tests {
   use crate::exec::plan::dsl::*;
 
   // Helper method to check the query plan.
-  fn assert_plan(query: &str, plan: Plan) {
+  fn assert_plans(query: &str, plans: Vec<Plan>) {
     match parse(query) {
-      Ok(mut v) => {
-        assert_eq!(v.pop().unwrap(), plan);
+      Ok(v) => {
+        assert_eq!(v.len(), plans.len());
+        for i in 0..plans.len() {
+          assert_eq!(v[i], plans[i]);
+        }
       },
       Err(Error::SQLParseError(ref msg)) => {
         panic!("SQLParseError: Failed to parse the query: \n{}", msg);
@@ -631,6 +637,26 @@ pub mod tests {
         panic!("Unexpected error during query parsing: \n{:?}", err);
       },
     }
+  }
+
+  fn assert_plan(query: &str, plan: Plan) {
+    assert_plans(query, vec![plan]);
+  }
+
+  #[test]
+  fn test_parser_empty_query() {
+    assert_plans("", vec![]);
+  }
+
+  #[test]
+  #[should_panic(expected = "Unsupported token ';'")]
+  fn test_parser_empty_query_semicolon() {
+    assert_plan(";", empty());
+  }
+
+  #[test]
+  fn test_parser_comment() {
+    assert_plans("-- comment", vec![]);
   }
 
   #[test]
@@ -1067,6 +1093,18 @@ pub mod tests {
     assert_plan(
       "drop table test_schema.test_table;",
       drop_table(Some("test_schema"), "test_table")
+    );
+  }
+
+  #[test]
+  fn test_parser_multiple_statements() {
+    assert_plans(
+      "select 1; select 2; select 3",
+      vec![
+        project(vec![number("1")], empty()),
+        project(vec![number("2")], empty()),
+        project(vec![number("3")], empty()),
+      ],
     );
   }
 }

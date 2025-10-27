@@ -1,3 +1,6 @@
+//! Scanner to convert a sequence of characters/bytes into a sequence of tokens.
+//! Used internally in parser.
+
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenType {
@@ -148,7 +151,7 @@ fn is_digit(c: u8) -> bool {
 // over tokens.
 //
 // Input string can contain more than one statement separated by a semicolon.
-// The end of string is indicated by next() method returning None.
+// The end of string is indicated by next_token() method returning an "EOF" token.
 pub struct Scanner<'a> {
   input: &'a [u8],
   start: usize,
