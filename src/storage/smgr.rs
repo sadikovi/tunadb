@@ -62,7 +62,6 @@ impl Descriptor {
         res!(fd.seek(SeekFrom::Start(pos)), "Failed to seek to pos {}", pos);
         res!(fd.write_all(buf), "Failed to write {} bytes at pos {}", buf.len(), pos);
         res!(fd.flush(), "Failed to flush the file descriptor");
-        // TODO: call self.fd.sync_all()
       },
       Descriptor::Mem { data } => {
         let pos = pos as usize;
