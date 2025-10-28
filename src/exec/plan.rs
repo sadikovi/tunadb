@@ -90,7 +90,7 @@ pub enum Plan {
   LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
   TableScan(Rc<TableInfo>),
-  UnresolvedTableScan(Rc<TableIdentifier> /* table identifier */),
+  UnresolvedTableScan(Rc<TableIdentifier> /* table identifier */, Option<Rc<String>> /* alias */),
 }
 
 impl TreeNode<Plan> for Plan {
@@ -108,7 +108,7 @@ impl TreeNode<Plan> for Plan {
       Plan::LocalRelation(_) => write!(f, "LocalRelation"),
       Plan::Project(_, _) => write!(f, "Project"),
       Plan::TableScan(_) => write!(f, "TableScan"),
-      Plan::UnresolvedTableScan(_) => write!(f, "UnresolvedTableScan"),
+      Plan::UnresolvedTableScan(_, _) => write!(f, "UnresolvedTableScan"),
     }
   }
 
@@ -131,7 +131,7 @@ impl TreeNode<Plan> for Plan {
       Plan::LocalRelation(_) => Vec::new(),
       Plan::Project(_, ref child) => vec![child],
       Plan::TableScan(_) => Vec::new(),
-      Plan::UnresolvedTableScan(_) => Vec::new(),
+      Plan::UnresolvedTableScan(_, _) => Vec::new(),
     }
   }
 
@@ -174,8 +174,8 @@ impl TreeNode<Plan> for Plan {
       Plan::TableScan(ref info) => {
         Plan::TableScan(info.clone())
       },
-      Plan::UnresolvedTableScan(ref table_ident) => {
-        Plan::UnresolvedTableScan(table_ident.clone())
+      Plan::UnresolvedTableScan(ref table_ident, ref table_alias) => {
+        Plan::UnresolvedTableScan(table_ident.clone(), table_alias.clone())
       },
     }
   }
@@ -443,12 +443,13 @@ pub mod dsl {
     Plan::Filter(Rc::new(expression), Rc::new(child))
   }
 
-  pub fn from(schema: Option<&str>, table: &str) -> Plan {
+  pub fn from(schema: Option<&str>, table: &str, alias: Option<&str>) -> Plan {
     let table_ident = TableIdentifier::new(
       schema.map(|x| x.to_string()),
       table.to_string()
     );
-    Plan::UnresolvedTableScan(Rc::new(table_ident))
+    let table_alias = alias.map(|x| Rc::new(x.to_string()));
+    Plan::UnresolvedTableScan(Rc::new(table_ident), table_alias)
   }
 
   pub fn insert_into_values(

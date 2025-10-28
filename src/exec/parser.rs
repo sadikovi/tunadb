@@ -102,9 +102,9 @@ impl<'a> Parser<'a> {
     Error::SQLParseError(full_msg)
   }
 
-  //============
-  // Expresions
-  //============
+  //=============
+  // Expressions
+  //=============
 
   #[inline]
   fn primary(&mut self) -> Res<Expression> {
@@ -272,6 +272,24 @@ impl<'a> Parser<'a> {
     }
   }
 
+  // Parses an optional alias.
+  // The position is only advanced if the alias exists.
+  #[inline]
+  fn optional_alias(&mut self) -> Res<Option<Rc<String>>> {
+    if self.check(TokenType::IDENTIFIER) {
+      let value = self.current.value(&self.sql).to_string();
+      self.advance()?;
+      Ok(Some(Rc::new(value)))
+    } else if self.matches(TokenType::AS)? {
+      let token = self.consume(TokenType::IDENTIFIER, "Expected an identifier after AS")?;
+      let value = token.value(&self.sql).to_string();
+      Ok(Some(Rc::new(value)))
+    } else {
+      // There is no alias.
+      Ok(None)
+    }
+  }
+
   #[inline]
   fn expression_list(&mut self) -> Res<Vec<Expression>> {
     let mut expressions = Vec::new();
@@ -285,14 +303,8 @@ impl<'a> Parser<'a> {
         // Parse optional alias:
         //   Expression [alias]
         //   Expression [AS alias]
-        if self.check(TokenType::IDENTIFIER) {
-          let value = self.current.value(&self.sql).to_string();
-          self.advance()?;
-          expr = Expression::Alias(Rc::new(expr), Rc::new(value));
-        } else if self.matches(TokenType::AS)? {
-          let token = self.consume(TokenType::IDENTIFIER, "Expected an identifier after AS")?;
-          let value = token.value(&self.sql).to_string();
-          expr = Expression::Alias(Rc::new(expr), Rc::new(value));
+        if let Some(alias) = self.optional_alias()? {
+          expr = Expression::Alias(Rc::new(expr), alias);
         }
 
         expressions.push(expr);
@@ -344,7 +356,11 @@ impl<'a> Parser<'a> {
   #[inline]
   fn from_statement(&mut self) -> Res<Plan> {
     let table_ident = self.table_identifier()?;
-    Ok(Plan::UnresolvedTableScan(Rc::new(table_ident)))
+    // Parse optional alias:
+    //   FROM table [alias]
+    //   FROM table [AS alias]
+    let table_alias = self.optional_alias()?;
+    Ok(Plan::UnresolvedTableScan(Rc::new(table_ident), table_alias))
   }
 
   #[inline]
@@ -714,12 +730,13 @@ pub mod tests {
   #[test]
   fn test_parser_alias() {
     assert_plan(
-      "select a as col1, b col2, c as col3;",
+      "select a as col1, b col2, c as col3, d col4;",
       project(
         vec![
           alias(identifier("a"), "col1"),
           alias(identifier("b"), "col2"),
           alias(identifier("c"), "col3"),
+          alias(identifier("d"), "col4"),
         ],
         empty()
       )
@@ -744,7 +761,7 @@ pub mod tests {
         vec![
           star(),
         ],
-        from(None, "test_table")
+        from(None, "test_table", None)
       )
     );
 
@@ -754,8 +771,31 @@ pub mod tests {
         vec![
           star(),
         ],
-        from(Some("test_schema"), "test_table")
+        from(Some("test_schema"), "test_table", None)
       )
+    );
+  }
+
+  #[test]
+  fn test_parser_from_alias() {
+    assert_plan(
+      "select col1 as a from test as t",
+      project(
+        vec![
+          alias(identifier("col1"), "a"),
+        ],
+        from(None, "test", Some("t"))
+      ),
+    );
+
+    assert_plan(
+      "select col1 a from test t",
+      project(
+        vec![
+          alias(identifier("col1"), "a"),
+        ],
+        from(None, "test", Some("t"))
+      ),
     );
   }
 
@@ -765,7 +805,7 @@ pub mod tests {
       "select * from test where a",
       filter(
         identifier("a"), // boolean column
-        project(vec![star()], from(None, "test"))
+        project(vec![star()], from(None, "test", None))
       )
     );
 
@@ -788,7 +828,7 @@ pub mod tests {
             identifier("d")
           )
         ),
-        project(vec![star()], from(None, "test"))
+        project(vec![star()], from(None, "test", None))
       )
     );
 
@@ -811,7 +851,7 @@ pub mod tests {
             )
           )
         ),
-        project(vec![star()], from(None, "test"))
+        project(vec![star()], from(None, "test", None))
       )
     );
 
@@ -834,7 +874,7 @@ pub mod tests {
             string("abc")
           )
         ),
-        project(vec![star()], from(None, "test"))
+        project(vec![star()], from(None, "test", None))
       )
     );
   }
@@ -845,7 +885,7 @@ pub mod tests {
       "select * from test limit 123",
       limit(
         123,
-        project(vec![star()], from(None, "test"))
+        project(vec![star()], from(None, "test", None))
       )
     );
   }
