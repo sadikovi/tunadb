@@ -113,7 +113,23 @@ impl<'a> Parser<'a> {
       let mut parts = Vec::new();
       loop {
         let token = self.consume(TokenType::IDENTIFIER, "Expected identifier")?;
-        parts.push(token.value(&self.sql).to_string());
+
+        let mut part = String::new();
+        let mut last_char = '"'; // removes the first double quote.
+        for c in token.value(&self.sql).chars() {
+          if c == '"' && last_char == c {
+            // Reset to avoid removal of the next, non-paired, double quote.
+            last_char = '\0';
+          } else {
+            part.push(c);
+            last_char = c;
+          }
+        }
+        if last_char == '"' {
+          part.pop(); // removes the last double quote.
+        }
+        parts.push(part);
+
         if !self.matches(TokenType::DOT)? {
           return Ok(Expression::Identifier(Rc::new(parts)));
         }
@@ -126,9 +142,22 @@ impl<'a> Parser<'a> {
       self.advance()?;
       return Ok(Expression::LiteralNumber(Rc::new(value)));
     } else if self.check(TokenType::STRING) {
-      let value = self.current.value(&self.sql).to_string();
+      let mut literal = String::new();
+      let mut last_char = '\''; // removes the first single quote.
+      for c in self.current.value(&self.sql).chars() {
+        if c == '\'' && last_char == c {
+          // Reset to avoid removal of the next, non-paired, single quote.
+          last_char = '\0';
+        } else {
+          literal.push(c);
+          last_char = c;
+        }
+      }
+      if last_char == '\'' {
+        literal.pop(); // removes the last single quote.
+      }
       self.advance()?;
-      return Ok(Expression::LiteralString(Rc::new(value)));
+      return Ok(Expression::LiteralString(Rc::new(literal)));
     } else if self.check(TokenType::NULL) {
       self.advance()?;
       return Ok(Expression::Null);
@@ -700,6 +729,37 @@ pub mod tests {
   }
 
   #[test]
+  fn test_parser_literals_strings() {
+    assert_plan(
+      "select 'a', 'a b', 'a''b''c''d', 'a\"''b', '\"aa''s bb\"', 'quotes: ''\"''';",
+      project(
+        vec![
+          string("a"),
+          string("a b"),
+          string("a'b'c'd"),
+          string("a\"'b"),
+          string("\"aa's bb\""),
+          string("quotes: '\"'"),
+        ],
+        empty()
+      )
+    );
+
+    assert_plan(
+      "select '', ' ', '''', '\"'",
+      project(
+        vec![
+          string(""),
+          string(" "),
+          string("'"),
+          string("\""),
+        ],
+        empty()
+      )
+    );
+  }
+
+  #[test]
   fn test_parser_expressions() {
     assert_plan(
       "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5);",
@@ -733,6 +793,21 @@ pub mod tests {
   }
 
   #[test]
+  fn test_parser_expressions_identifier() {
+    assert_plan(
+      "select \"a b\", \"a \"\" b\", \"ab\"\"\"",
+      project(
+        vec![
+          identifier("a b"),
+          identifier("a \" b"),
+          identifier("ab\""),
+        ],
+        empty()
+      ),
+    );
+  }
+
+  #[test]
   fn test_parser_expressions_chain() {
     assert_plan(
       "select a.b.c, 'a.b.c', \"a.b.c\", \"a\".\"b\".\"c\", \"a.b\".c",
@@ -740,9 +815,9 @@ pub mod tests {
         vec![
           complex_identifier(vec!["a", "b", "c"]),
           string("a.b.c"),
-          identifier("\"a.b.c\""),
-          complex_identifier(vec!["\"a\"", "\"b\"", "\"c\""]),
-          complex_identifier(vec!["\"a.b\"", "c"]),
+          identifier("a.b.c"),
+          complex_identifier(vec!["a", "b", "c"]),
+          complex_identifier(vec!["a.b", "c"]),
         ],
         empty()
       ),

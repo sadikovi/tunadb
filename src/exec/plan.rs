@@ -354,7 +354,7 @@ pub mod dsl {
   }
 
   pub fn string(value: &str) -> Expression {
-    Expression::LiteralString(Rc::new(format!("'{}'", value)))
+    Expression::LiteralString(Rc::new(format!("{}", value)))
   }
 
   pub fn null() -> Expression {
@@ -499,10 +499,10 @@ pub mod tests {
   #[test]
   fn test_plan_display() {
     let expr = and(equals(number("1"), number("2")), less_than(identifier("a"), string("abc")));
-    assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < ('abc'))\n");
+    assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))\n");
 
     let expr = equals(alias(complex_identifier(vec!["a", "b"]), "col"), string("abc"));
-    assert_eq!(trees::plan_output(&expr), "($a.b as col) = ('abc')\n");
+    assert_eq!(trees::plan_output(&expr), "($a.b as col) = (abc)\n");
 
     let expr = equals(alias(identifier("a"), "A"), _minus(number("2")));
     assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");
