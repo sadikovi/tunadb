@@ -190,7 +190,7 @@ pub enum Expression {
   Equals(Rc<Expression>, Rc<Expression>),
   GreaterThan(Rc<Expression>, Rc<Expression>),
   GreaterThanEquals(Rc<Expression>, Rc<Expression>),
-  Identifier(Rc<String> /* identifier value */),
+  Identifier(Rc<Vec<String>> /* identifier parts */),
   LessThan(Rc<Expression>, Rc<Expression>),
   LessThanEquals(Rc<Expression>, Rc<Expression>),
   LiteralNumber(Rc<String> /* numeric value */),
@@ -218,7 +218,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
       Expression::GreaterThan(ref left, ref right) => display_binary!(f, left, ">", right),
       Expression::GreaterThanEquals(ref left, ref right) => display_binary!(f, left, ">=", right),
-      Expression::Identifier(value) => write!(f, "${}", value),
+      Expression::Identifier(parts) => write!(f, "${}", parts.join(".")),
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
       Expression::LiteralNumber(value) => write!(f, "{}", value),
@@ -294,7 +294,7 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("GreaterThanEquals", children);
         Expression::GreaterThanEquals(Rc::new(left), Rc::new(right))
       },
-      Expression::Identifier(value) => Expression::Identifier(value.clone()),
+      Expression::Identifier(parts) => Expression::Identifier(parts.clone()),
       Expression::LessThan(_, _) => {
         let (left, right) = get_binary!("LessThan", children);
         Expression::LessThan(Rc::new(left), Rc::new(right))
@@ -341,8 +341,12 @@ pub mod dsl {
 
   // Expressions.
 
+  pub fn complex_identifier(parts: Vec<&str>) -> Expression {
+    Expression::Identifier(Rc::new(parts.into_iter().map(|x| x.to_string()).collect()))
+  }
+
   pub fn identifier(name: &str) -> Expression {
-    Expression::Identifier(Rc::new(name.to_string()))
+    complex_identifier(vec![name])
   }
 
   pub fn number(value: &str) -> Expression {
@@ -496,6 +500,9 @@ pub mod tests {
   fn test_plan_display() {
     let expr = and(equals(number("1"), number("2")), less_than(identifier("a"), string("abc")));
     assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < ('abc'))\n");
+
+    let expr = equals(alias(complex_identifier(vec!["a", "b"]), "col"), string("abc"));
+    assert_eq!(trees::plan_output(&expr), "($a.b as col) = ('abc')\n");
 
     let expr = equals(alias(identifier("a"), "A"), _minus(number("2")));
     assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");

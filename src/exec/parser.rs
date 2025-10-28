@@ -110,9 +110,14 @@ impl<'a> Parser<'a> {
   fn primary(&mut self) -> Res<Expression> {
     // Identifier.
     if self.check(TokenType::IDENTIFIER) {
-      let value = self.current.value(&self.sql).to_string();
-      self.advance()?;
-      return Ok(Expression::Identifier(Rc::new(value)));
+      let mut parts = Vec::new();
+      loop {
+        let token = self.consume(TokenType::IDENTIFIER, "Expected identifier")?;
+        parts.push(token.value(&self.sql).to_string());
+        if !self.matches(TokenType::DOT)? {
+          return Ok(Expression::Identifier(Rc::new(parts)));
+        }
+      }
     }
 
     // Literals.
@@ -728,6 +733,46 @@ pub mod tests {
   }
 
   #[test]
+  fn test_parser_expressions_chain() {
+    assert_plan(
+      "select a.b.c, 'a.b.c', \"a.b.c\", \"a\".\"b\".\"c\", \"a.b\".c",
+      project(
+        vec![
+          complex_identifier(vec!["a", "b", "c"]),
+          string("a.b.c"),
+          identifier("\"a.b.c\""),
+          complex_identifier(vec!["\"a\"", "\"b\"", "\"c\""]),
+          complex_identifier(vec!["\"a.b\"", "c"]),
+        ],
+        empty()
+      ),
+    );
+
+    assert_plan(
+      "select 1.2",
+      project(vec![number("1.2")], empty()),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected identifier")]
+  fn test_parser_expressions_chain_fail_extra_dot() {
+    assert_plan(
+      "select a.b.",
+      empty(),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected identifier")]
+  fn test_parser_expressions_chain_fail_missing_identifier() {
+    assert_plan(
+      "select a.1",
+      empty(),
+    );
+  }
+
+  #[test]
   fn test_parser_alias() {
     assert_plan(
       "select a as col1, b col2, c as col3, d col4;",
@@ -796,6 +841,15 @@ pub mod tests {
         ],
         from(None, "test", Some("t"))
       ),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected an identifier after AS")]
+  fn test_parser_from_alias_fail_as() {
+    assert_plan(
+      "select a from test as",
+      empty(),
     );
   }
 
