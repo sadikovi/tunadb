@@ -89,7 +89,7 @@ pub enum Plan {
   Limit(usize /* limit */, Rc<Plan> /* child */),
   LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
-  TableScan(Rc<TableInfo>),
+  TableScan(Rc<TableInfo> /* resolved table info */, Option<Rc<String>> /* alias */),
   UnresolvedTableScan(Rc<TableIdentifier> /* table identifier */, Option<Rc<String>> /* alias */),
 }
 
@@ -107,7 +107,7 @@ impl TreeNode<Plan> for Plan {
       Plan::Limit(_, _) => write!(f, "Limit"),
       Plan::LocalRelation(_) => write!(f, "LocalRelation"),
       Plan::Project(_, _) => write!(f, "Project"),
-      Plan::TableScan(_) => write!(f, "TableScan"),
+      Plan::TableScan(_, _) => write!(f, "TableScan"),
       Plan::UnresolvedTableScan(_, _) => write!(f, "UnresolvedTableScan"),
     }
   }
@@ -130,7 +130,7 @@ impl TreeNode<Plan> for Plan {
       Plan::Limit(_, ref child) => vec![child],
       Plan::LocalRelation(_) => Vec::new(),
       Plan::Project(_, ref child) => vec![child],
-      Plan::TableScan(_) => Vec::new(),
+      Plan::TableScan(_, _) => Vec::new(),
       Plan::UnresolvedTableScan(_, _) => Vec::new(),
     }
   }
@@ -171,8 +171,8 @@ impl TreeNode<Plan> for Plan {
         let child = get_unary!("Project", children);
         Plan::Project(expressions.clone(), Rc::new(child))
       },
-      Plan::TableScan(ref info) => {
-        Plan::TableScan(info.clone())
+      Plan::TableScan(ref info, ref table_alias) => {
+        Plan::TableScan(info.clone(), table_alias.clone())
       },
       Plan::UnresolvedTableScan(ref table_ident, ref table_alias) => {
         Plan::UnresolvedTableScan(table_ident.clone(), table_alias.clone())
@@ -198,7 +198,7 @@ pub enum Expression {
   Multiply(Rc<Expression>, Rc<Expression>),
   Null,
   Or(Rc<Expression>, Rc<Expression>),
-  Star,
+  Star(Rc<Vec<String>> /* identifier parts */),
   Subtract(Rc<Expression>, Rc<Expression>),
   UnaryPlus(Rc<Expression>),
   UnaryMinus(Rc<Expression>),
@@ -218,7 +218,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
       Expression::GreaterThan(ref left, ref right) => display_binary!(f, left, ">", right),
       Expression::GreaterThanEquals(ref left, ref right) => display_binary!(f, left, ">=", right),
-      Expression::Identifier(parts) => write!(f, "${}", parts.join(".")),
+      Expression::Identifier(ref parts) => write!(f, "${}", parts.join(".")),
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
       Expression::LiteralNumber(value) => write!(f, "{}", value),
@@ -226,7 +226,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Multiply(ref left, ref right) => display_binary!(f, left, "x", right),
       Expression::Null => write!(f, "null"),
       Expression::Or(ref left, ref right) => display_binary!(f, left, "or", right),
-      Expression::Star => write!(f, "*"),
+      Expression::Star(ref parts) => write!(f, "{}.*", parts.join(".")),
       Expression::Subtract(ref left, ref right) => display_binary!(f, left, "-", right),
       Expression::UnaryPlus(ref child) => display_unary!(f, "+", child),
       Expression::UnaryMinus(ref child) => display_unary!(f, "-", child),
@@ -256,7 +256,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Multiply(ref left, ref right) => vec![left, right],
       Expression::Null => Vec::new(),
       Expression::Or(ref left, ref right) => vec![left, right],
-      Expression::Star => Vec::new(),
+      Expression::Star(_) => Vec::new(),
       Expression::Subtract(ref left, ref right) => vec![left, right],
       Expression::UnaryPlus(ref child) => vec![child],
       Expression::UnaryMinus(ref child) => vec![child],
@@ -314,7 +314,7 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("Or", children);
         Expression::Or(Rc::new(left), Rc::new(right))
       },
-      Expression::Star => Expression::Star,
+      Expression::Star(parts) => Expression::Star(parts.clone()),
       Expression::Subtract(_, _) => {
         let (left, right) = get_binary!("Subtract", children);
         Expression::Subtract(Rc::new(left), Rc::new(right))
@@ -341,12 +341,12 @@ pub mod dsl {
 
   // Expressions.
 
-  pub fn complex_identifier(parts: Vec<&str>) -> Expression {
+  pub fn qualified_identifier(parts: Vec<&str>) -> Expression {
     Expression::Identifier(Rc::new(parts.into_iter().map(|x| x.to_string()).collect()))
   }
 
   pub fn identifier(name: &str) -> Expression {
-    complex_identifier(vec![name])
+    qualified_identifier(vec![name])
   }
 
   pub fn number(value: &str) -> Expression {
@@ -362,7 +362,11 @@ pub mod dsl {
   }
 
   pub fn star() -> Expression {
-    Expression::Star
+    Expression::Star(Rc::new(Vec::new()))
+  }
+
+  pub fn qualified_star(parts: Vec<&str>) -> Expression {
+    Expression::Star(Rc::new(parts.into_iter().map(|x| x.to_string()).collect()))
   }
 
   pub fn alias(child: Expression, name: &str) -> Expression {
@@ -501,7 +505,7 @@ pub mod tests {
     let expr = and(equals(number("1"), number("2")), less_than(identifier("a"), string("abc")));
     assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))\n");
 
-    let expr = equals(alias(complex_identifier(vec!["a", "b"]), "col"), string("abc"));
+    let expr = equals(alias(qualified_identifier(vec!["a", "b"]), "col"), string("abc"));
     assert_eq!(trees::plan_output(&expr), "($a.b as col) = (abc)\n");
 
     let expr = equals(alias(identifier("a"), "A"), _minus(number("2")));

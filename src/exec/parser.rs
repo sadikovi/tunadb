@@ -108,6 +108,11 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn primary(&mut self) -> Res<Expression> {
+    // Global star.
+    if self.matches(TokenType::STAR)? {
+      return Ok(Expression::Star(Rc::new(Vec::new())));
+    }
+
     // Identifier.
     if self.check(TokenType::IDENTIFIER) {
       let mut parts = Vec::new();
@@ -132,6 +137,11 @@ impl<'a> Parser<'a> {
 
         if !self.matches(TokenType::DOT)? {
           return Ok(Expression::Identifier(Rc::new(parts)));
+        }
+
+        // For the cases "identifer.*".
+        if self.matches(TokenType::STAR)? {
+          return Ok(Expression::Star(Rc::new(parts)));
         }
       }
     }
@@ -329,20 +339,16 @@ impl<'a> Parser<'a> {
     let mut expressions = Vec::new();
 
     loop {
-      if self.matches(TokenType::STAR)? {
-        expressions.push(Expression::Star);
-      } else {
-        let mut expr = self.expression()?;
+      let mut expr = self.expression()?;
 
-        // Parse optional alias:
-        //   Expression [alias]
-        //   Expression [AS alias]
-        if let Some(alias) = self.optional_alias()? {
-          expr = Expression::Alias(Rc::new(expr), alias);
-        }
-
-        expressions.push(expr);
+      // Parse optional alias:
+      //   Expression [alias]
+      //   Expression [AS alias]
+      if let Some(alias) = self.optional_alias()? {
+        expr = Expression::Alias(Rc::new(expr), alias);
       }
+
+      expressions.push(expr);
 
       if self.check(TokenType::COMMA) {
         self.advance()?;
@@ -762,6 +768,17 @@ pub mod tests {
   #[test]
   fn test_parser_expressions() {
     assert_plan(
+      "select *, 1 * 2",
+      project(
+        vec![
+          star(),
+          multiply(number("1"), number("2")),
+        ],
+        empty()
+      )
+    );
+
+    assert_plan(
       "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5);",
       project(
         vec![
@@ -813,11 +830,11 @@ pub mod tests {
       "select a.b.c, 'a.b.c', \"a.b.c\", \"a\".\"b\".\"c\", \"a.b\".c",
       project(
         vec![
-          complex_identifier(vec!["a", "b", "c"]),
+          qualified_identifier(vec!["a", "b", "c"]),
           string("a.b.c"),
           identifier("a.b.c"),
-          complex_identifier(vec!["a", "b", "c"]),
-          complex_identifier(vec!["a.b", "c"]),
+          qualified_identifier(vec!["a", "b", "c"]),
+          qualified_identifier(vec!["a.b", "c"]),
         ],
         empty()
       ),
@@ -826,6 +843,65 @@ pub mod tests {
     assert_plan(
       "select 1.2",
       project(vec![number("1.2")], empty()),
+    );
+  }
+
+  #[test]
+  fn test_parser_expressions_star() {
+    assert_plan(
+      "select *",
+      project(vec![star()], empty()),
+    );
+
+    assert_plan(
+      "select *, *",
+      project(vec![star(), star()], empty()),
+    );
+
+    assert_plan(
+      "select t.* from test t",
+      project(vec![qualified_star(vec!["t"])], from(None, "test", Some("t"))),
+    );
+
+    assert_plan(
+      "select s.t.*",
+      project(vec![qualified_star(vec!["s", "t"])], empty()),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Unexpected token '.'")]
+  fn test_parser_expressions_star_invalid_0() {
+    assert_plan(
+      "select *.a",
+      empty(),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Unexpected token '.'")]
+  fn test_parser_expressions_star_invalid_1() {
+    assert_plan(
+      "select *.*",
+      empty(),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Unexpected token '.'")]
+  fn test_parser_expressions_star_invalid_2() {
+    assert_plan(
+      "select t.*.*",
+      empty(),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Unexpected token '2'")]
+  fn test_parser_expressions_star_invalid_3() {
+    assert_plan(
+      "select * 2",
+      empty(),
     );
   }
 
@@ -1074,11 +1150,21 @@ pub mod tests {
   }
 
   #[test]
-  #[should_panic(expected = "Expected expression but found '*'")]
   fn test_parser_insert_into_values_star() {
     assert_plan(
-      "insert into test_table (a, b, c) values (*, 1, 2)",
-      empty()
+      "insert into test_table (a, b, c) values (*, 1, 2 + 3)",
+      insert_into_values(
+        None,
+        "test_table",
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        vec![
+          vec![
+            star(),
+            number("1"),
+            add(number("2"), number("3"))
+          ],
+        ]
+      )
     )
   }
 
