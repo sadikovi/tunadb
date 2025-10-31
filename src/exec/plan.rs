@@ -193,7 +193,10 @@ pub enum Expression {
   Identifier(Rc<Vec<String>> /* identifier parts */),
   LessThan(Rc<Expression>, Rc<Expression>),
   LessThanEquals(Rc<Expression>, Rc<Expression>),
-  LiteralNumber(Rc<String> /* numeric value */),
+  LiteralInt(i32),
+  LiteralBigInt(i64),
+  LiteralFloat(f32),
+  LiteralDouble(f64),
   LiteralString(Rc<String> /* string value */),
   Multiply(Rc<Expression>, Rc<Expression>),
   Null,
@@ -221,7 +224,10 @@ impl TreeNode<Expression> for Expression {
       Expression::Identifier(ref parts) => write!(f, "${}", parts.join(".")),
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
-      Expression::LiteralNumber(value) => write!(f, "{}", value),
+      Expression::LiteralInt(value) => write!(f, "{}", value),
+      Expression::LiteralBigInt(value) => write!(f, "{}", value),
+      Expression::LiteralFloat(value) => write!(f, "{}", value),
+      Expression::LiteralDouble(value) => write!(f, "{}", value),
       Expression::LiteralString(value) => write!(f, "{}", value),
       Expression::Multiply(ref left, ref right) => display_binary!(f, left, "x", right),
       Expression::Null => write!(f, "null"),
@@ -251,7 +257,10 @@ impl TreeNode<Expression> for Expression {
       Expression::Identifier(_) => Vec::new(),
       Expression::LessThan(ref left, ref right) => vec![left, right],
       Expression::LessThanEquals(ref left, ref right) => vec![left, right],
-      Expression::LiteralNumber(_) => Vec::new(),
+      Expression::LiteralInt(_) => Vec::new(),
+      Expression::LiteralBigInt(_) => Vec::new(),
+      Expression::LiteralFloat(_) => Vec::new(),
+      Expression::LiteralDouble(_) => Vec::new(),
       Expression::LiteralString(_) => Vec::new(),
       Expression::Multiply(ref left, ref right) => vec![left, right],
       Expression::Null => Vec::new(),
@@ -303,7 +312,10 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("LessThanEquals", children);
         Expression::LessThanEquals(Rc::new(left), Rc::new(right))
       },
-      Expression::LiteralNumber(value) => Expression::LiteralNumber(value.clone()),
+      Expression::LiteralInt(value) => Expression::LiteralInt(*value),
+      Expression::LiteralBigInt(value) => Expression::LiteralBigInt(*value),
+      Expression::LiteralFloat(value) => Expression::LiteralFloat(*value),
+      Expression::LiteralDouble(value) => Expression::LiteralDouble(*value),
       Expression::LiteralString(value) => Expression::LiteralString(value.clone()),
       Expression::Multiply(_, _) => {
         let (left, right) = get_binary!("Multiply", children);
@@ -349,8 +361,20 @@ pub mod dsl {
     qualified_identifier(vec![name])
   }
 
-  pub fn number(value: &str) -> Expression {
-    Expression::LiteralNumber(Rc::new(value.to_string()))
+  pub fn int(value: i32) -> Expression {
+    Expression::LiteralInt(value)
+  }
+
+  pub fn bigint(value: i64) -> Expression {
+    Expression::LiteralBigInt(value)
+  }
+
+  pub fn float(value: f32) -> Expression {
+    Expression::LiteralFloat(value)
+  }
+
+  pub fn double(value: f64) -> Expression {
+    Expression::LiteralDouble(value)
   }
 
   pub fn string(value: &str) -> Expression {
@@ -502,13 +526,13 @@ pub mod tests {
 
   #[test]
   fn test_plan_display() {
-    let expr = and(equals(number("1"), number("2")), less_than(identifier("a"), string("abc")));
+    let expr = and(equals(int(1), int(2)), less_than(identifier("a"), string("abc")));
     assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))\n");
 
     let expr = equals(alias(qualified_identifier(vec!["a", "b"]), "col"), string("abc"));
     assert_eq!(trees::plan_output(&expr), "($a.b as col) = (abc)\n");
 
-    let expr = equals(alias(identifier("a"), "A"), _minus(number("2")));
+    let expr = equals(alias(identifier("a"), "A"), _minus(int(2)));
     assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");
   }
 }

@@ -149,8 +149,26 @@ impl<'a> Parser<'a> {
     // Literals.
     if self.check(TokenType::NUMBER) {
       let value = self.current.value(&self.sql).to_string();
-      self.advance()?;
-      return Ok(Expression::LiteralNumber(Rc::new(value)));
+
+      if let Ok(int_value) = value.parse::<i64>() {
+        self.advance()?;
+        if int_value >= i32::MIN.into() && int_value <= i32::MAX.into() {
+          return Ok(Expression::LiteralInt(int_value as i32));
+        } else {
+          return Ok(Expression::LiteralBigInt(int_value));
+        }
+      }
+
+      if let Ok(double_value) = value.parse::<f64>() {
+        self.advance()?;
+        if double_value >= f32::MIN.into() && double_value <= f32::MAX.into() {
+          return Ok(Expression::LiteralFloat(double_value as f32));
+        } else {
+          return Ok(Expression::LiteralDouble(double_value));
+        }
+      }
+
+      return Err(self.error_at(&self.current, &format!("Invalid number '{}'", value)));
     } else if self.check(TokenType::STRING) {
       let mut literal = String::new();
       let mut last_char = '\''; // removes the first single quote.
@@ -721,12 +739,12 @@ pub mod tests {
       "select 1, 1.2, -3.4, +5.6, '7.8', (9), null;",
       project(
         vec![
-          number("1"),
-          number("1.2"),
-          _minus(number("3.4")),
-          _plus(number("5.6")),
+          int(1),
+          float(1.2),
+          _minus(float(3.4)),
+          _plus(float(5.6)),
           string("7.8"),
-          number("9"),
+          int(9),
           null(),
         ],
         empty()
@@ -772,37 +790,39 @@ pub mod tests {
       project(
         vec![
           star(),
-          multiply(number("1"), number("2")),
+          multiply(int(1), int(2)),
         ],
         empty()
       )
     );
 
     assert_plan(
-      "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5);",
+      "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5), 100000000000, 1e50;",
       project(
         vec![
-          add(number("1"), number("2")),
+          add(int(1), int(2)),
           multiply(
             divide(
               subtract(
-                number("2"),
-                number("1")
+                int(2),
+                int(1)
               ),
-              number("3")
+              int(3)
             ),
-            number("5")
+            int(5)
           ),
           divide(
             subtract(
-              number("2"),
-              number("1")
+              int(2),
+              int(1)
             ),
             multiply(
-              number("3"),
-              number("5")
+              int(3),
+              int(5)
             )
           ),
+          bigint(100000000000),
+          double(1e50),
         ],
         empty()
       )
@@ -842,7 +862,7 @@ pub mod tests {
 
     assert_plan(
       "select 1.2",
-      project(vec![number("1.2")], empty()),
+      project(vec![float(1.2)], empty()),
     );
   }
 
@@ -1020,8 +1040,8 @@ pub mod tests {
         or(
           and(
             equals(
-              number("1"),
-              number("2")
+              int(1),
+              int(2)
             ),
             greater_than(
               identifier("a"),
@@ -1042,8 +1062,8 @@ pub mod tests {
       filter(
         and(
           equals(
-            number("1"),
-            number("2")
+            int(1),
+            int(2)
           ),
           or(
             greater_than(
@@ -1071,7 +1091,7 @@ pub mod tests {
             ),
             greater_than(
               identifier("a"),
-              number("1")
+              int(1)
             )
           ),
           equals(
@@ -1160,8 +1180,8 @@ pub mod tests {
         vec![
           vec![
             star(),
-            number("1"),
-            add(number("2"), number("3"))
+            int(1),
+            add(int(2), int(3))
           ],
         ]
       )
@@ -1177,8 +1197,8 @@ pub mod tests {
         "test_table",
         vec![],
         vec![
-          vec![number("1"), string("a")],
-          vec![number("2"), string("b")],
+          vec![int(1), string("a")],
+          vec![int(2), string("b")],
         ]
       )
     );
@@ -1190,8 +1210,8 @@ pub mod tests {
         "test_table",
         vec![],
         vec![
-          vec![number("1"), string("a")],
-          vec![number("2"), string("b")],
+          vec![int(1), string("a")],
+          vec![int(2), string("b")],
         ]
       )
     );
@@ -1203,8 +1223,8 @@ pub mod tests {
         "test_table",
         vec!["a".to_string(), "b".to_string()],
         vec![
-          vec![number("1"), string("a")],
-          vec![add(number("1"), number("2")), string("b")],
+          vec![int(1), string("a")],
+          vec![add(int(1), int(2)), string("b")],
         ]
       )
     );
@@ -1220,8 +1240,8 @@ pub mod tests {
         vec![],
         project(
           vec![
-            alias(number("1"), "a"),
-            alias(number("2"), "b"),
+            alias(int(1), "a"),
+            alias(int(2), "b"),
           ],
           empty()
         )
@@ -1236,8 +1256,8 @@ pub mod tests {
         vec!["a".to_string(), "b".to_string()],
         project(
           vec![
-            alias(number("1"), "a"),
-            alias(number("2"), "b"),
+            alias(int(1), "a"),
+            alias(int(2), "b"),
           ],
           empty()
         )
@@ -1356,9 +1376,9 @@ pub mod tests {
     assert_plans(
       "select 1; select 2; select 3",
       vec![
-        project(vec![number("1")], empty()),
-        project(vec![number("2")], empty()),
-        project(vec![number("3")], empty()),
+        project(vec![int(1)], empty()),
+        project(vec![int(2)], empty()),
+        project(vec![int(3)], empty()),
       ],
     );
   }

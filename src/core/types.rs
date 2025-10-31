@@ -6,15 +6,19 @@ use crate::core::util::to_valid_identifier;
 
 const TYPE_INT: u8 = 1;
 const TYPE_BIGINT: u8 = 2;
-const TYPE_TEXT: u8 = 3;
-const TYPE_STRUCT: u8 = 4;
-const TYPE_STRUCT_FIELD: u8 = 5;
+const TYPE_FLOAT: u8 = 3;
+const TYPE_DOUBLE: u8 = 4;
+const TYPE_TEXT: u8 = 5;
+const TYPE_STRUCT: u8 = 254;
+const TYPE_STRUCT_FIELD: u8 = 255;
 
 // Enum represents column type and/or table schema.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
   INT, // i32
   BIGINT, // i64
+  FLOAT, // f32,
+  DOUBLE, // f64
   TEXT, // String
   STRUCT(Fields), // can represent table schema
 }
@@ -44,6 +48,8 @@ impl SerDe for Type {
     match self {
       Type::INT => writer.write_u8(TYPE_INT),
       Type::BIGINT => writer.write_u8(TYPE_BIGINT),
+      Type::FLOAT => writer.write_u8(TYPE_FLOAT),
+      Type::DOUBLE => writer.write_u8(TYPE_DOUBLE),
       Type::TEXT => writer.write_u8(TYPE_TEXT),
       Type::STRUCT(ref fields) => {
         writer.write_u8(TYPE_STRUCT);
@@ -56,6 +62,8 @@ impl SerDe for Type {
     match reader.read_u8() {
       TYPE_INT => Type::INT,
       TYPE_BIGINT => Type::BIGINT,
+      TYPE_FLOAT => Type::FLOAT,
+      TYPE_DOUBLE => Type::DOUBLE,
       TYPE_TEXT => Type::TEXT,
       TYPE_STRUCT => Type::STRUCT(Fields::deserialise(reader)),
       invalid_tpe => panic!("Unknown type: {}", invalid_tpe),
@@ -68,6 +76,8 @@ impl fmt::Display for Type {
     match self {
       Type::INT => write!(f, "INT"),
       Type::BIGINT => write!(f, "BIGINT"),
+      Type::FLOAT => write!(f, "FLOAT"),
+      Type::DOUBLE => write!(f, "DOUBLE"),
       Type::TEXT => write!(f, "TEXT"),
       Type::STRUCT(ref fields) => write!(f, "STRUCT({})", fields),
     }
@@ -237,6 +247,8 @@ mod tests {
   fn test_types_convert() {
     test_types_convert_roundtrip(Type::INT);
     test_types_convert_roundtrip(Type::BIGINT);
+    test_types_convert_roundtrip(Type::FLOAT);
+    test_types_convert_roundtrip(Type::DOUBLE);
     test_types_convert_roundtrip(Type::TEXT);
     test_types_convert_roundtrip(Type::STRUCT(Fields::new(Vec::new()).unwrap()));
 
@@ -245,6 +257,8 @@ mod tests {
       Field::new("f1", Type::INT, false).unwrap(),
       Field::new("f2", Type::TEXT, true).unwrap(),
       Field::new("f3", Type::BIGINT, false).unwrap(),
+      Field::new("f4", Type::FLOAT, true).unwrap(),
+      Field::new("f5", Type::DOUBLE, true).unwrap(),
     ];
     test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields).unwrap()));
 
@@ -259,6 +273,8 @@ mod tests {
               Field::new("f21", Type::INT, false).unwrap(),
               Field::new("f22", Type::TEXT, true).unwrap(),
               Field::new("f23", Type::BIGINT, false).unwrap(),
+              Field::new("f24", Type::FLOAT, true).unwrap(),
+              Field::new("f25", Type::DOUBLE, false).unwrap(),
             ]
           ).unwrap()
         ),
@@ -272,6 +288,8 @@ mod tests {
   fn test_types_is_struct() {
     assert_eq!(Type::INT.is_struct(), false);
     assert_eq!(Type::BIGINT.is_struct(), false);
+    assert_eq!(Type::FLOAT.is_struct(), false);
+    assert_eq!(Type::DOUBLE.is_struct(), false);
     assert_eq!(Type::TEXT.is_struct(), false);
     assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).is_struct(), true);
   }
@@ -280,6 +298,8 @@ mod tests {
   fn test_types_num_fields() {
     assert_eq!(Type::INT.num_fields(), 0);
     assert_eq!(Type::BIGINT.num_fields(), 0);
+    assert_eq!(Type::FLOAT.num_fields(), 0);
+    assert_eq!(Type::DOUBLE.num_fields(), 0);
     assert_eq!(Type::TEXT.num_fields(), 0);
     assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).num_fields(), 0);
     assert_eq!(
@@ -335,6 +355,8 @@ mod tests {
   fn test_types_display() {
     assert_eq!(format!("{}", Type::INT), "INT");
     assert_eq!(format!("{}", Type::BIGINT), "BIGINT");
+    assert_eq!(format!("{}", Type::FLOAT), "FLOAT");
+    assert_eq!(format!("{}", Type::DOUBLE), "DOUBLE");
     assert_eq!(format!("{}", Type::TEXT), "TEXT");
     assert_eq!(format!("{}", Type::STRUCT(Fields::new(vec![]).unwrap())), "STRUCT([])");
     assert_eq!(
