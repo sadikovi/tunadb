@@ -43,6 +43,7 @@ pub enum TokenType {
   ELSE,
   END,
   EXISTS,
+  FALSE,
   FROM,
   GROUP,
   IN,
@@ -59,6 +60,7 @@ pub enum TokenType {
   SELECT,
   TABLE,
   THEN,
+  TRUE,
   UNION,
   VALUES,
   WHEN,
@@ -299,6 +301,8 @@ impl<'a> Scanner<'a> {
       TokenType::END
     } else if self.match_keyword(b"EXISTS") {
       TokenType::EXISTS
+    } else if self.match_keyword(b"FALSE") {
+      TokenType::FALSE
     } else if self.match_keyword(b"FROM") {
       TokenType::FROM
     } else if self.match_keyword(b"GROUP") {
@@ -331,6 +335,8 @@ impl<'a> Scanner<'a> {
       TokenType::TABLE
     } else if self.match_keyword(b"THEN") {
       TokenType::THEN
+    } else if self.match_keyword(b"TRUE") {
+      TokenType::TRUE
     } else if self.match_keyword(b"UNION") {
       TokenType::UNION
     } else if self.match_keyword(b"VALUES") {
@@ -756,6 +762,16 @@ from
         (TokenType::IDENTIFIER, "e")
       ]
     );
+  }
+
+  #[test]
+  fn test_scanner_boolean() {
+    assert_sql("true", vec![(TokenType::TRUE, "true")]);
+    assert_sql("TRUE", vec![(TokenType::TRUE, "TRUE")]);
+    assert_sql("tRuE", vec![(TokenType::TRUE, "tRuE")]);
+    assert_sql("false", vec![(TokenType::FALSE, "false")]);
+    assert_sql("FALSE", vec![(TokenType::FALSE, "FALSE")]);
+    assert_sql("fAlSe", vec![(TokenType::FALSE, "fAlSe")]);
   }
 
   #[test]

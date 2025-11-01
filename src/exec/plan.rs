@@ -193,6 +193,7 @@ pub enum Expression {
   Identifier(Rc<Vec<String>> /* identifier parts */),
   LessThan(Rc<Expression>, Rc<Expression>),
   LessThanEquals(Rc<Expression>, Rc<Expression>),
+  LiteralBool(bool),
   LiteralInt(i32),
   LiteralBigInt(i64),
   LiteralFloat(f32),
@@ -224,6 +225,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Identifier(ref parts) => write!(f, "${}", parts.join(".")),
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
+      Expression::LiteralBool(value) => write!(f, "{}", value),
       Expression::LiteralInt(value) => write!(f, "{}", value),
       Expression::LiteralBigInt(value) => write!(f, "{}", value),
       Expression::LiteralFloat(value) => write!(f, "{}", value),
@@ -257,6 +259,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Identifier(_) => Vec::new(),
       Expression::LessThan(ref left, ref right) => vec![left, right],
       Expression::LessThanEquals(ref left, ref right) => vec![left, right],
+      Expression::LiteralBool(_) => Vec::new(),
       Expression::LiteralInt(_) => Vec::new(),
       Expression::LiteralBigInt(_) => Vec::new(),
       Expression::LiteralFloat(_) => Vec::new(),
@@ -312,6 +315,7 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("LessThanEquals", children);
         Expression::LessThanEquals(Rc::new(left), Rc::new(right))
       },
+      Expression::LiteralBool(value) => Expression::LiteralBool(*value),
       Expression::LiteralInt(value) => Expression::LiteralInt(*value),
       Expression::LiteralBigInt(value) => Expression::LiteralBigInt(*value),
       Expression::LiteralFloat(value) => Expression::LiteralFloat(*value),
@@ -359,6 +363,10 @@ pub mod dsl {
 
   pub fn identifier(name: &str) -> Expression {
     qualified_identifier(vec![name])
+  }
+
+  pub fn boolean(value: bool) -> Expression {
+    Expression::LiteralBool(value)
   }
 
   pub fn int(value: i32) -> Expression {

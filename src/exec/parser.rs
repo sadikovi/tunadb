@@ -147,7 +147,11 @@ impl<'a> Parser<'a> {
     }
 
     // Literals.
-    if self.check(TokenType::NUMBER) {
+    if self.matches(TokenType::FALSE)? {
+      return Ok(Expression::LiteralBool(false));
+    } else if self.matches(TokenType::TRUE)? {
+      return Ok(Expression::LiteralBool(true));
+    } else if self.check(TokenType::NUMBER) {
       let value = self.current.value(&self.sql).to_string();
 
       if let Ok(int_value) = value.parse::<i64>() {
@@ -323,10 +327,16 @@ impl<'a> Parser<'a> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected column type")?;
     let type_str = token.value(&self.sql);
 
-    if type_str.eq_ignore_ascii_case("INT") {
+    if type_str.eq_ignore_ascii_case("BOOL") {
+      Ok(Type::BOOL)
+    } else if type_str.eq_ignore_ascii_case("INT") {
       Ok(Type::INT)
     } else if type_str.eq_ignore_ascii_case("BIGINT") {
       Ok(Type::BIGINT)
+    } else if type_str.eq_ignore_ascii_case("FLOAT") {
+      Ok(Type::FLOAT)
+    } else if type_str.eq_ignore_ascii_case("DOUBLE") {
+      Ok(Type::DOUBLE)
     } else if type_str.eq_ignore_ascii_case("TEXT") {
       Ok(Type::TEXT)
     } else {
@@ -736,7 +746,7 @@ pub mod tests {
   #[test]
   fn test_parser_literals() {
     assert_plan(
-      "select 1, 1.2, -3.4, +5.6, '7.8', (9), null;",
+      "select 1, 1.2, -3.4, +5.6, '7.8', (9), true, FALSE, null;",
       project(
         vec![
           int(1),
@@ -745,6 +755,8 @@ pub mod tests {
           _plus(float(5.6)),
           string("7.8"),
           int(9),
+          boolean(true),
+          boolean(false),
           null(),
         ],
         empty()
@@ -1330,15 +1342,25 @@ pub mod tests {
   #[test]
   fn test_parser_create_table() {
     assert_plan(
-      "create table test_schema.test_table (c1 int not null, c2 text null, c3 bigint);",
+      "create table test_schema.test_table (\n
+        c0 bool, \n
+        c1 int not null, \n
+        c2 bigint, \n
+        c3 float not null, \n
+        c4 double, \n
+        c5 text null\n
+      );",
       create_table(
         Some("test_schema"),
         "test_table",
         Fields::new(
           vec![
+            Field::new("c0", Type::BOOL, true).unwrap(),
             Field::new("c1", Type::INT, false).unwrap(),
-            Field::new("c2", Type::TEXT, true).unwrap(),
-            Field::new("c3", Type::BIGINT, true).unwrap(),
+            Field::new("c2", Type::BIGINT, true).unwrap(),
+            Field::new("c3", Type::FLOAT, false).unwrap(),
+            Field::new("c4", Type::DOUBLE, true).unwrap(),
+            Field::new("c5", Type::TEXT, true).unwrap(),
           ]
         ).unwrap()
       )
