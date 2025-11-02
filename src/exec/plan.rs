@@ -82,8 +82,6 @@ pub enum Plan {
   CreateTable(Rc<TableIdentifier>, Rc<Fields> /* schema */),
   DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
   DropTable(Rc<TableInfo> /* table info */),
-  // Indicates an empty relation, e.g. "select 1;".
-  Empty,
   Filter(Rc<Fields> /* schema */, Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(Rc<TableInfo> /* table info */, Rc<Fields> /* columns */, Rc<Plan> /* query */),
   Limit(Rc<Fields> /* schema */, usize /* limit */, Rc<Plan> /* child */),
@@ -108,7 +106,6 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateTable(_, _) => write!(f, "CreateTable"),
       Plan::DropSchema(_, _) => write!(f, "DropSchema"),
       Plan::DropTable(_) => write!(f, "DropTable"),
-      Plan::Empty => write!(f, "Empty"),
       Plan::Filter(_, _, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _, _) => write!(f, "Limit"),
@@ -138,7 +135,6 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateTable(_, _) => Vec::new(),
       Plan::DropSchema(_, _) => Vec::new(),
       Plan::DropTable(_) => Vec::new(),
-      Plan::Empty => Vec::new(),
       Plan::Filter(_, _, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
       Plan::Limit(_, _, ref child) => vec![child],
@@ -170,9 +166,6 @@ impl TreeNode<Plan> for Plan {
       },
       Plan::DropTable(ref table_info) => {
         Plan::DropTable(table_info.clone())
-      },
-      Plan::Empty => {
-        Plan::Empty
       },
       Plan::Filter(ref schema, ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -521,8 +514,9 @@ pub mod dsl {
     Plan::UnresolvedDropTable(Rc::new(table_ident))
   }
 
+  // Returns an empty local relation with no rows.
   pub fn empty() -> Plan {
-    Plan::Empty
+    Plan::UnresolvedLocalRelation(Rc::new(vec![vec![]]))
   }
 
   pub fn filter(expression: Expression, child: Plan) -> Plan {
@@ -566,6 +560,10 @@ pub mod dsl {
 
   pub fn limit(value: usize, child: Plan) -> Plan {
     Plan::UnresolvedLimit(value, Rc::new(child))
+  }
+
+  pub fn local(expressions: Vec<Expression>) -> Plan {
+    Plan::UnresolvedLocalRelation(Rc::new(vec![expressions]))
   }
 
   pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {

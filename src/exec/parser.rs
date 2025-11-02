@@ -450,16 +450,15 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn select_statement(&mut self) -> Res<Plan> {
-    let mut plan = Plan::Empty;
-
     // Parse the list of columns for projection.
     let expressions = self.expression_list()?;
 
-    if self.matches(TokenType::FROM)? {
-      plan = self.from_statement()?;
-    }
-
-    plan = Plan::UnresolvedProject(Rc::new(expressions), Rc::new(plan));
+    let mut plan = if self.matches(TokenType::FROM)? {
+      let parent = self.from_statement()?;
+      Plan::UnresolvedProject(Rc::new(expressions), Rc::new(parent))
+    } else {
+      Plan::UnresolvedLocalRelation(Rc::new(vec![expressions]))
+    };
 
     if self.matches(TokenType::WHERE)? {
       plan = self.where_statement(plan)?;
@@ -747,7 +746,7 @@ pub mod tests {
   fn test_parser_literals() {
     assert_plan(
       "select 1, 1.2, -3.4, +5.6, '7.8', (9), true, FALSE, null;",
-      project(
+      local(
         vec![
           int(1),
           float(1.2),
@@ -758,8 +757,7 @@ pub mod tests {
           boolean(true),
           boolean(false),
           null(),
-        ],
-        empty()
+        ]
       )
     );
   }
@@ -768,7 +766,7 @@ pub mod tests {
   fn test_parser_literals_strings() {
     assert_plan(
       "select 'a', 'a b', 'a''b''c''d', 'a\"''b', '\"aa''s bb\"', 'quotes: ''\"''';",
-      project(
+      local(
         vec![
           string("a"),
           string("a b"),
@@ -776,21 +774,19 @@ pub mod tests {
           string("a\"'b"),
           string("\"aa's bb\""),
           string("quotes: '\"'"),
-        ],
-        empty()
+        ]
       )
     );
 
     assert_plan(
       "select '', ' ', '''', '\"'",
-      project(
+      local(
         vec![
           string(""),
           string(" "),
           string("'"),
           string("\""),
-        ],
-        empty()
+        ]
       )
     );
   }
@@ -799,18 +795,17 @@ pub mod tests {
   fn test_parser_expressions() {
     assert_plan(
       "select *, 1 * 2",
-      project(
+      local(
         vec![
           star(),
           multiply(int(1), int(2)),
-        ],
-        empty()
+        ]
       )
     );
 
     assert_plan(
       "select 1 + 2, (2 - 1) / 3 * 5, (2 - 1) / (3 * 5), 100000000000, 1e50;",
-      project(
+      local(
         vec![
           add(int(1), int(2)),
           multiply(
@@ -835,8 +830,7 @@ pub mod tests {
           ),
           bigint(100000000000),
           double(1e50),
-        ],
-        empty()
+        ]
       )
     );
   }
@@ -845,13 +839,12 @@ pub mod tests {
   fn test_parser_expressions_identifier() {
     assert_plan(
       "select \"a b\", \"a \"\" b\", \"ab\"\"\"",
-      project(
+      local(
         vec![
           identifier("a b"),
           identifier("a \" b"),
           identifier("ab\""),
-        ],
-        empty()
+        ]
       ),
     );
   }
@@ -860,21 +853,20 @@ pub mod tests {
   fn test_parser_expressions_chain() {
     assert_plan(
       "select a.b.c, 'a.b.c', \"a.b.c\", \"a\".\"b\".\"c\", \"a.b\".c",
-      project(
+      local(
         vec![
           qualified_identifier(vec!["a", "b", "c"]),
           string("a.b.c"),
           identifier("a.b.c"),
           qualified_identifier(vec!["a", "b", "c"]),
           qualified_identifier(vec!["a.b", "c"]),
-        ],
-        empty()
+        ]
       ),
     );
 
     assert_plan(
       "select 1.2",
-      project(vec![float(1.2)], empty()),
+      local(vec![float(1.2)]),
     );
   }
 
@@ -882,12 +874,12 @@ pub mod tests {
   fn test_parser_expressions_star() {
     assert_plan(
       "select *",
-      project(vec![star()], empty()),
+      local(vec![star()]),
     );
 
     assert_plan(
       "select *, *",
-      project(vec![star(), star()], empty()),
+      local(vec![star(), star()]),
     );
 
     assert_plan(
@@ -897,7 +889,7 @@ pub mod tests {
 
     assert_plan(
       "select s.t.*",
-      project(vec![qualified_star(vec!["s", "t"])], empty()),
+      local(vec![qualified_star(vec!["s", "t"])]),
     );
   }
 
@@ -959,14 +951,13 @@ pub mod tests {
   fn test_parser_alias() {
     assert_plan(
       "select a as col1, b col2, c as col3, d col4;",
-      project(
+      local(
         vec![
           alias(identifier("a"), "col1"),
           alias(identifier("b"), "col2"),
           alias(identifier("c"), "col3"),
           alias(identifier("d"), "col4"),
-        ],
-        empty()
+        ]
       )
     );
   }
@@ -1250,12 +1241,11 @@ pub mod tests {
         Some("test_schema"),
         "test_table",
         vec![],
-        project(
+        local(
           vec![
             alias(int(1), "a"),
             alias(int(2), "b"),
-          ],
-          empty()
+          ]
         )
       )
     );
@@ -1266,12 +1256,11 @@ pub mod tests {
         Some("test_schema"),
         "test_table",
         vec!["a".to_string(), "b".to_string()],
-        project(
+        local(
           vec![
             alias(int(1), "a"),
             alias(int(2), "b"),
-          ],
-          empty()
+          ]
         )
       )
     );
@@ -1398,9 +1387,9 @@ pub mod tests {
     assert_plans(
       "select 1; select 2; select 3",
       vec![
-        project(vec![int(1)], empty()),
-        project(vec![int(2)], empty()),
-        project(vec![int(3)], empty()),
+        local(vec![int(1)]),
+        local(vec![int(2)]),
+        local(vec![int(3)]),
       ],
     );
   }
