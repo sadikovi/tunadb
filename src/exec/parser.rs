@@ -434,7 +434,7 @@ impl<'a> Parser<'a> {
   #[inline]
   fn where_statement(&mut self, plan: Plan) -> Res<Plan> {
     let expression = self.expression()?;
-    Ok(Plan::Filter(Rc::new(expression), Rc::new(plan)))
+    Ok(Plan::UnresolvedFilter(Rc::new(expression), Rc::new(plan)))
   }
 
   #[inline]
@@ -442,7 +442,7 @@ impl<'a> Parser<'a> {
     // LIMIT <number>.
     let token = self.consume(TokenType::NUMBER, "Expected LIMIT value")?;
     match token.value(&self.sql).parse() {
-      Ok(value) => Ok(Plan::Limit(value, Rc::new(plan))),
+      Ok(value) => Ok(Plan::UnresolvedLimit(value, Rc::new(plan))),
       // We failed to parse the value for the limit node.
       Err(_) => Err(self.error_at(&token, "Invalid LIMIT number")),
     }
@@ -459,7 +459,7 @@ impl<'a> Parser<'a> {
       plan = self.from_statement()?;
     }
 
-    plan = Plan::Project(Rc::new(expressions), Rc::new(plan));
+    plan = Plan::UnresolvedProject(Rc::new(expressions), Rc::new(plan));
 
     if self.matches(TokenType::WHERE)? {
       plan = self.where_statement(plan)?;
@@ -538,7 +538,7 @@ impl<'a> Parser<'a> {
           break;
         }
       }
-      Plan::LocalRelation(Rc::new(rows))
+      Plan::UnresolvedLocalRelation(Rc::new(rows))
     } else if self.matches(TokenType::SELECT)? {
       self.select_statement()?
     } else {
@@ -550,7 +550,7 @@ impl<'a> Parser<'a> {
       );
     };
 
-    Ok(Plan::InsertInto(Rc::new(table_ident), Rc::new(columns), Rc::new(query)))
+    Ok(Plan::UnresolvedInsertInto(Rc::new(table_ident), Rc::new(columns), Rc::new(query)))
   }
 
   #[inline]
@@ -621,13 +621,13 @@ impl<'a> Parser<'a> {
   fn drop_schema_statement(&mut self) -> Res<Plan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
     let is_cascade = self.matches(TokenType::CASCADE)?;
-    Ok(Plan::DropSchema(Rc::new(token.value(&self.sql).to_string()), is_cascade))
+    Ok(Plan::UnresolvedDropSchema(Rc::new(token.value(&self.sql).to_string()), is_cascade))
   }
 
   #[inline]
   fn drop_table_statement(&mut self) -> Res<Plan> {
     let ident = self.table_identifier()?;
-    Ok(Plan::DropTable(Rc::new(ident)))
+    Ok(Plan::UnresolvedDropTable(Rc::new(ident)))
   }
 
   #[inline]

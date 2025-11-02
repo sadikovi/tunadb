@@ -2,7 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 use crate::core::trees::TreeNode;
 use crate::core::types::Fields;
-use crate::exec::catalog::TableInfo;
+use crate::exec::catalog::{SchemaInfo, TableInfo};
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -80,16 +80,23 @@ impl TableIdentifier {
 pub enum Plan {
   CreateSchema(Rc<String> /* schema name */),
   CreateTable(Rc<TableIdentifier>, Rc<Fields> /* schema */),
-  DropSchema(Rc<String> /* schema name */, bool /* cascade */),
-  DropTable(Rc<TableIdentifier>),
+  DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
+  DropTable(Rc<TableInfo> /* table info */),
   // Indicates an empty relation, e.g. "select 1;".
   Empty,
-  Filter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
-  InsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
-  Limit(usize /* limit */, Rc<Plan> /* child */),
-  LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
-  Project(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
-  TableScan(Rc<TableInfo> /* resolved table info */, Option<Rc<String>> /* alias */),
+  Filter(Rc<Fields> /* schema */, Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
+  InsertInto(Rc<TableInfo> /* table info */, Rc<Fields> /* columns */, Rc<Plan> /* query */),
+  Limit(Rc<Fields> /* schema */, usize /* limit */, Rc<Plan> /* child */),
+  LocalRelation(Rc<Fields> /* schema */, Rc<Vec<Vec<Expression>>> /* expressions */),
+  Project(Rc<Fields> /* schema */, Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
+  TableScan(Rc<TableInfo> /* table info */, Option<Rc<String>> /* alias */),
+  UnresolvedDropSchema(Rc<String> /* schema name */, bool /* cascade */),
+  UnresolvedDropTable(Rc<TableIdentifier>),
+  UnresolvedFilter(Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
+  UnresolvedInsertInto(Rc<TableIdentifier>, Rc<Vec<String>> /* columns */, Rc<Plan> /* query */),
+  UnresolvedLimit(usize /* limit */, Rc<Plan> /* child */),
+  UnresolvedLocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
+  UnresolvedProject(Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
   UnresolvedTableScan(Rc<TableIdentifier> /* table identifier */, Option<Rc<String>> /* alias */),
 }
 
@@ -102,12 +109,19 @@ impl TreeNode<Plan> for Plan {
       Plan::DropSchema(_, _) => write!(f, "DropSchema"),
       Plan::DropTable(_) => write!(f, "DropTable"),
       Plan::Empty => write!(f, "Empty"),
-      Plan::Filter(_, _) => write!(f, "Filter"),
+      Plan::Filter(_, _, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _) => write!(f, "InsertInto"),
-      Plan::Limit(_, _) => write!(f, "Limit"),
-      Plan::LocalRelation(_) => write!(f, "LocalRelation"),
-      Plan::Project(_, _) => write!(f, "Project"),
+      Plan::Limit(_, _, _) => write!(f, "Limit"),
+      Plan::LocalRelation(_, _) => write!(f, "LocalRelation"),
+      Plan::Project(_, _, _) => write!(f, "Project"),
       Plan::TableScan(_, _) => write!(f, "TableScan"),
+      Plan::UnresolvedDropSchema(_, _) => write!(f, "UnresolvedDropSchema"),
+      Plan::UnresolvedDropTable(_) => write!(f, "UnresolvedDropTable"),
+      Plan::UnresolvedFilter(_, _) => write!(f, "UnresolvedFilter"),
+      Plan::UnresolvedInsertInto(_, _, _) => write!(f, "UnresolvedInsertInto"),
+      Plan::UnresolvedLimit(_, _) => write!(f, "UnresolvedLimit"),
+      Plan::UnresolvedLocalRelation(_) => write!(f, "UnresolvedLocalRelation"),
+      Plan::UnresolvedProject(_, _) => write!(f, "UnresolvedProject"),
       Plan::UnresolvedTableScan(_, _) => write!(f, "UnresolvedTableScan"),
     }
   }
@@ -125,12 +139,19 @@ impl TreeNode<Plan> for Plan {
       Plan::DropSchema(_, _) => Vec::new(),
       Plan::DropTable(_) => Vec::new(),
       Plan::Empty => Vec::new(),
-      Plan::Filter(_, ref child) => vec![child],
+      Plan::Filter(_, _, ref child) => vec![child],
       Plan::InsertInto(_, _, ref query) => vec![query],
-      Plan::Limit(_, ref child) => vec![child],
-      Plan::LocalRelation(_) => Vec::new(),
-      Plan::Project(_, ref child) => vec![child],
+      Plan::Limit(_, _, ref child) => vec![child],
+      Plan::LocalRelation(_, _) => Vec::new(),
+      Plan::Project(_, _, ref child) => vec![child],
       Plan::TableScan(_, _) => Vec::new(),
+      Plan::UnresolvedDropSchema(_, _) => Vec::new(),
+      Plan::UnresolvedDropTable(_) => Vec::new(),
+      Plan::UnresolvedFilter(_, ref child) => vec![child],
+      Plan::UnresolvedInsertInto(_, _, ref query) => vec![query],
+      Plan::UnresolvedLimit(_, ref child) => vec![child],
+      Plan::UnresolvedLocalRelation(_) => Vec::new(),
+      Plan::UnresolvedProject(_, ref child) => vec![child],
       Plan::UnresolvedTableScan(_, _) => Vec::new(),
     }
   }
@@ -144,35 +165,60 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateTable(ref ident, ref schema) => {
         Plan::CreateTable(ident.clone(), schema.clone())
       },
-      Plan::DropSchema(ref schema_name, cascade) => {
-        Plan::DropSchema(schema_name.clone(), *cascade)
+      Plan::DropSchema(ref schema_info, cascade) => {
+        Plan::DropSchema(schema_info.clone(), *cascade)
       },
-      Plan::DropTable(ref ident) => {
-        Plan::DropTable(ident.clone())
+      Plan::DropTable(ref table_info) => {
+        Plan::DropTable(table_info.clone())
       },
       Plan::Empty => {
         Plan::Empty
       },
-      Plan::Filter(ref expression, _) => {
+      Plan::Filter(ref schema, ref expression, _) => {
         let child = get_unary!("Filter", children);
-        Plan::Filter(expression.clone(), Rc::new(child))
+        Plan::Filter(schema.clone(), expression.clone(), Rc::new(child))
       },
-      Plan::InsertInto(ref table_ident, ref cols, ref query) => {
-        Plan::InsertInto(table_ident.clone(), cols.clone(), query.clone())
+      Plan::InsertInto(ref table_info, ref cols, _) => {
+        let child = get_unary!("InsertInto", children);
+        Plan::InsertInto(table_info.clone(), cols.clone(), Rc::new(child))
       },
-      Plan::Limit(limit, _) => {
+      Plan::Limit(ref schema, limit, _) => {
         let child = get_unary!("Limit", children);
-        Plan::Limit(*limit, Rc::new(child))
+        Plan::Limit(schema.clone(), *limit, Rc::new(child))
       },
-      Plan::LocalRelation(ref expressions) => {
-        Plan::LocalRelation(expressions.clone())
+      Plan::LocalRelation(ref schema, ref expressions) => {
+        Plan::LocalRelation(schema.clone(), expressions.clone())
       },
-      Plan::Project(expressions, _) => {
+      Plan::Project(ref schema, ref expressions, _) => {
         let child = get_unary!("Project", children);
-        Plan::Project(expressions.clone(), Rc::new(child))
+        Plan::Project(schema.clone(), expressions.clone(), Rc::new(child))
       },
       Plan::TableScan(ref info, ref table_alias) => {
         Plan::TableScan(info.clone(), table_alias.clone())
+      },
+      Plan::UnresolvedDropSchema(ref schema_name, cascade) => {
+        Plan::UnresolvedDropSchema(schema_name.clone(), *cascade)
+      },
+      Plan::UnresolvedDropTable(ref table_ident) => {
+        Plan::UnresolvedDropTable(table_ident.clone())
+      },
+      Plan::UnresolvedFilter(ref expressions, ref child) => {
+        Plan::UnresolvedFilter(expressions.clone(), child.clone())
+      },
+      Plan::UnresolvedInsertInto(ref table_ident, ref columns, _) => {
+        let child = get_unary!("InsertInto", children);
+        Plan::UnresolvedInsertInto(table_ident.clone(), columns.clone(), Rc::new(child))
+      },
+      Plan::UnresolvedLimit(limit, _) => {
+        let child = get_unary!("Limit", children);
+        Plan::UnresolvedLimit(*limit, Rc::new(child))
+      },
+      Plan::UnresolvedLocalRelation(ref expressions) => {
+        Plan::UnresolvedLocalRelation(expressions.clone())
+      },
+      Plan::UnresolvedProject(ref expressions, _) => {
+        let child = get_unary!("Project", children);
+        Plan::UnresolvedProject(expressions.clone(), Rc::new(child))
       },
       Plan::UnresolvedTableScan(ref table_ident, ref table_alias) => {
         Plan::UnresolvedTableScan(table_ident.clone(), table_alias.clone())
@@ -464,7 +510,7 @@ pub mod dsl {
   }
 
   pub fn drop_schema(schema: &str, is_cascade: bool) -> Plan {
-    Plan::DropSchema(Rc::new(schema.to_string()), is_cascade)
+    Plan::UnresolvedDropSchema(Rc::new(schema.to_string()), is_cascade)
   }
 
   pub fn drop_table(schema: Option<&str>, table: &str) -> Plan {
@@ -472,7 +518,7 @@ pub mod dsl {
       schema.map(|x| x.to_string()),
       table.to_string()
     );
-    Plan::DropTable(Rc::new(table_ident))
+    Plan::UnresolvedDropTable(Rc::new(table_ident))
   }
 
   pub fn empty() -> Plan {
@@ -480,7 +526,7 @@ pub mod dsl {
   }
 
   pub fn filter(expression: Expression, child: Plan) -> Plan {
-    Plan::Filter(Rc::new(expression), Rc::new(child))
+    Plan::UnresolvedFilter(Rc::new(expression), Rc::new(child))
   }
 
   pub fn from(schema: Option<&str>, table: &str, alias: Option<&str>) -> Plan {
@@ -498,7 +544,7 @@ pub mod dsl {
     cols: Vec<String>,
     expr: Vec<Vec<Expression>>
   ) -> Plan {
-    insert_into_select(schema, table, cols, Plan::LocalRelation(Rc::new(expr)))
+    insert_into_select(schema, table, cols, Plan::UnresolvedLocalRelation(Rc::new(expr)))
   }
 
   pub fn insert_into_select(
@@ -511,7 +557,7 @@ pub mod dsl {
       schema.map(|x| x.to_string()),
       table.to_string()
     );
-    Plan::InsertInto(
+    Plan::UnresolvedInsertInto(
       Rc::new(table_ident),
       Rc::new(cols),
       Rc::new(query)
@@ -519,11 +565,11 @@ pub mod dsl {
   }
 
   pub fn limit(value: usize, child: Plan) -> Plan {
-    Plan::Limit(value, Rc::new(child))
+    Plan::UnresolvedLimit(value, Rc::new(child))
   }
 
   pub fn project(expressions: Vec<Expression>, child: Plan) -> Plan {
-    Plan::Project(Rc::new(expressions), Rc::new(child))
+    Plan::UnresolvedProject(Rc::new(expressions), Rc::new(child))
   }
 }
 
