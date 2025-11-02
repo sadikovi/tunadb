@@ -555,7 +555,7 @@ impl<'a> Parser<'a> {
   #[inline]
   fn create_schema_statement(&mut self) -> Res<Plan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
-    Ok(Plan::CreateSchema(Rc::new(token.value(&self.sql).to_string())))
+    Ok(Plan::UnresolvedCreateSchema(Rc::new(token.value(&self.sql).to_string())))
   }
 
   #[inline]
@@ -613,7 +613,7 @@ impl<'a> Parser<'a> {
       },
     };
 
-    Ok(Plan::CreateTable(Rc::new(ident), Rc::new(schema)))
+    Ok(Plan::UnresolvedCreateTable(Rc::new(ident), Rc::new(schema)))
   }
 
   #[inline]

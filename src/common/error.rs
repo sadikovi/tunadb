@@ -9,6 +9,9 @@ pub enum Error {
   // SQL parser errors.
   SQLParseError(String /* error message */),
 
+  // SQL analysis errors.
+  SQLAnalysisError(String /* error message */),
+
   // SQL catalog errors.
   DuplicateFieldName(String /* field name */),
   InvalidIdentifier(String /* msg */),
