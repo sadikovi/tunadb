@@ -236,7 +236,7 @@ impl TreeNode<Plan> for Plan {
       Plan::UnresolvedDropTable(ref table_ident) => {
         Plan::UnresolvedDropTable(table_ident.clone())
       },
-      Plan::UnresolvedFilter(ref expressions, ref child) => {
+      Plan::UnresolvedFilter(ref expressions, _) => {
         let child = get_unary!("UnresolvedFilter", children);
         Plan::UnresolvedFilter(expressions.clone(), Rc::new(child))
       },

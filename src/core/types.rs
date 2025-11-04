@@ -14,7 +14,7 @@ const TYPE_STRUCT: u8 = 254;
 const TYPE_STRUCT_FIELD: u8 = 255;
 
 // Enum represents column type and/or table schema.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Type {
   BOOL, // bool
   INT, // i32
@@ -89,89 +89,8 @@ impl fmt::Display for Type {
   }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Fields {
-  fields: Vec<Field>,
-  index: HashMap<String, usize>,
-}
-
-impl Fields {
-  // Creates a new list of fields.
-  pub fn new(fields: Vec<Field>) -> Res<Self> {
-    Self::from(fields, false)
-  }
-
-  // Constructs `Fields` struct with an optional check on duplicates.
-  // The check is disabled when deserialising fields.
-  #[inline]
-  fn from(fields: Vec<Field>, ignore_duplicates: bool) -> Res<Self> {
-    let mut index = HashMap::new();
-    for i in 0..fields.len() {
-      let field = &fields[i];
-      if !index.contains_key(&field.name) {
-        // TODO: Improve clone of the string
-        index.insert(field.name.clone(), i);
-      } else if !ignore_duplicates {
-        return Err(Error::DuplicateFieldName(field.name.clone()))
-      }
-    }
-    Ok(Self { fields, index })
-  }
-
-  #[inline]
-  pub fn get(&self) -> &[Field] {
-    &self.fields
-  }
-
-  #[inline]
-  pub fn get_field(&self, name: &str) -> Option<&Field> {
-    match self.index.get(name) {
-      Some(idx) => Some(&self.fields[*idx]),
-      None => None,
-    }
-  }
-
-  #[inline]
-  pub fn len(&self) -> usize {
-    self.fields.len()
-  }
-}
-
-impl SerDe for Fields {
-  fn serialise(&self, writer: &mut Writer) {
-    // We only need to serialise fields, index is reconstructed.
-    writer.write_u32(self.fields.len() as u32);
-    for field in &self.fields {
-      field.serialise(writer);
-    }
-  }
-
-  fn deserialise(reader: &mut Reader) -> Self {
-    let len = reader.read_u32() as usize;
-    let mut fields = Vec::with_capacity(len);
-    for _ in 0..len {
-      fields.push(Field::deserialise(reader));
-    }
-    // TODO: Improve the error message.
-    Self::from(fields, true /* ignore_duplicates */).expect("Correct deserialisation")
-  }
-}
-
-impl fmt::Display for Fields {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "[")?;
-    for i in 0..self.fields.len() {
-      if i > 0 {
-        write!(f, ", ")?;
-      }
-      write!(f, "{}", &self.fields[i])?;
-    }
-    write!(f, "]")
-  }
-}
-
 // Field of a STRUCT.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Field {
   name: String,
   data_type: Type,
@@ -233,6 +152,90 @@ impl fmt::Display for Field {
     } else {
       write!(f, "{} {}", self.name, self.data_type)
     }
+  }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Fields {
+  fields: Vec<Field>,
+  index: HashMap<String, usize>,
+}
+
+impl Fields {
+  // Creates a new list of fields.
+  pub fn new(fields: Vec<Field>) -> Res<Self> {
+    Self::from(fields, false)
+  }
+
+  // Constructs `Fields` struct with an optional check on duplicates.
+  // The check is disabled when deserialising fields.
+  #[inline]
+  fn from(fields: Vec<Field>, ignore_duplicates: bool) -> Res<Self> {
+    let mut index = HashMap::new();
+    for i in 0..fields.len() {
+      let field = &fields[i];
+      let field_name = field.name.to_string();
+      if !index.contains_key(&field_name) {
+        index.insert(field_name, i);
+      } else if !ignore_duplicates {
+        return Err(Error::DuplicateFieldName(field_name))
+      }
+    }
+    Ok(Self { fields, index })
+  }
+
+  #[inline]
+  pub fn get(&self) -> &[Field] {
+    &self.fields
+  }
+
+  #[inline]
+  pub fn get_field(&self, name: &str) -> Option<&Field> {
+    match self.index.get(name) {
+      Some(idx) => Some(&self.fields[*idx]),
+      None => None,
+    }
+  }
+
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.fields.len()
+  }
+}
+
+impl SerDe for Fields {
+  fn serialise(&self, writer: &mut Writer) {
+    // We only need to serialise fields, index is reconstructed.
+    writer.write_u32(self.fields.len() as u32);
+    for field in &self.fields {
+      field.serialise(writer);
+    }
+  }
+
+  fn deserialise(reader: &mut Reader) -> Self {
+    let len = reader.read_u32() as usize;
+    let mut fields = Vec::with_capacity(len);
+    for _ in 0..len {
+      fields.push(Field::deserialise(reader));
+    }
+    match Self::from(fields, true /* ignore_duplicates */) {
+      Ok(res) => res,
+      // This error should never happen because we always serialise the correct schema.
+      Err(err) => unreachable!("Fields deserialisation failed with err {:?}", err),
+    }
+  }
+}
+
+impl fmt::Display for Fields {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "[")?;
+    for i in 0..self.fields.len() {
+      if i > 0 {
+        write!(f, ", ")?;
+      }
+      write!(f, "{}", &self.fields[i])?;
+    }
+    write!(f, "]")
   }
 }
 

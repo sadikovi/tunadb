@@ -45,7 +45,7 @@ impl SerDe for TableType {
   }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct SchemaInfo {
   schema_id: u64, // globally unique id
   schema_identifier: String,
@@ -80,7 +80,7 @@ impl SerDe for SchemaInfo {
 
 // Private struct that is used for serialisation/deserialisation.
 // We do not store schema identifier since it can change while schema id is unique.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct TableSerDeInfo {
   table_id: u64, // globally unique id
   schema_id: u64, // globally unique id
@@ -109,7 +109,7 @@ impl SerDe for TableSerDeInfo {
 }
 
 // Public version of `TableSerDeInfo`, contains schema information.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct TableInfo {
   schema_id: u64,
   schema_identifier: Rc<String>,
