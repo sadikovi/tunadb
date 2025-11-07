@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
 use crate::core::types::{Field, Fields, Type};
@@ -63,6 +62,11 @@ impl SchemaInfo {
   pub fn schema_identifier(&self) -> &str {
     &self.schema_identifier
   }
+
+  #[inline]
+  pub fn into_schema_identifier(self) -> String {
+    self.schema_identifier
+  }
 }
 
 impl SerDe for SchemaInfo {
@@ -81,67 +85,19 @@ impl SerDe for SchemaInfo {
 // Private struct that is used for serialisation/deserialisation.
 // We do not store schema identifier since it can change while schema id is unique.
 #[derive(Debug, PartialEq)]
-struct TableSerDeInfo {
-  table_id: u64, // globally unique id
+pub struct TableInfo {
   schema_id: u64, // globally unique id
+  table_id: u64, // globally unique id
   table_identifier: String, // unique within the schema
   table_type: TableType,
   table_fields: Fields,
 }
 
-impl SerDe for TableSerDeInfo {
-  fn serialise(&self, writer: &mut Writer) {
-    writer.write_u64(self.table_id);
-    writer.write_u64(self.schema_id);
-    writer.write_str(&self.table_identifier);
-    self.table_type.serialise(writer);
-    self.table_fields.serialise(writer);
-  }
-
-  fn deserialise(reader: &mut Reader) -> Self {
-    let table_id = reader.read_u64();
-    let schema_id = reader.read_u64();
-    let table_identifier = reader.read_str().to_string();
-    let table_type = TableType::deserialise(reader);
-    let table_fields = Fields::deserialise(reader);
-    Self { table_id, schema_id, table_identifier, table_type, table_fields }
-  }
-}
-
-// Public version of `TableSerDeInfo`, contains schema information.
-#[derive(Debug, PartialEq)]
-pub struct TableInfo {
-  schema_id: u64,
-  schema_identifier: Rc<String>,
-  table_id: u64,
-  table_identifier: String,
-  table_type: TableType,
-  table_fields: Fields,
-}
-
 impl TableInfo {
-  // Private constructor for table info.
-  fn from(schema_id: u64, schema_identifier: Rc<String>, table: TableSerDeInfo) -> Self {
-    Self {
-      schema_id: schema_id,
-      schema_identifier: schema_identifier,
-      table_id: table.table_id,
-      table_identifier: table.table_identifier,
-      table_type: table.table_type,
-      table_fields: table.table_fields,
-    }
-  }
-
   // Returns globally unique id for the schema.
   #[inline]
   pub fn schema_id(&self) -> u64 {
     self.schema_id
-  }
-
-  // Returns the schema identifier.
-  #[inline]
-  pub fn schema_identifier(&self) -> &str {
-    &self.schema_identifier
   }
 
   // Returns globally unique id for the table.
@@ -166,6 +122,25 @@ impl TableInfo {
   #[inline]
   pub fn table_fields(&self) -> &Fields {
     &self.table_fields
+  }
+}
+
+impl SerDe for TableInfo {
+  fn serialise(&self, writer: &mut Writer) {
+    writer.write_u64(self.schema_id);
+    writer.write_u64(self.table_id);
+    writer.write_str(&self.table_identifier);
+    self.table_type.serialise(writer);
+    self.table_fields.serialise(writer);
+  }
+
+  fn deserialise(reader: &mut Reader) -> Self {
+    let schema_id = reader.read_u64();
+    let table_id = reader.read_u64();
+    let table_identifier = reader.read_str().to_string();
+    let table_type = TableType::deserialise(reader);
+    let table_fields = Fields::deserialise(reader);
+    Self { table_id, schema_id, table_identifier, table_type, table_fields }
   }
 }
 
@@ -267,7 +242,12 @@ pub fn list_schemas(txn: &TransactionRef) -> Res<SchemaInfoIter> {
 // Catalog API: Drops the schema.
 // If `optional` is set to true, no operation is performed if the schema does not exist.
 // If `cascade` is set to true, everything in the schema is also dropped (both metadata and data).
-pub fn drop_schema(txn: &TransactionRef, schema_name: &str, cascade: bool, optional: bool) -> Res<()> {
+pub fn drop_schema(
+  txn: &TransactionRef,
+  schema_name: &str,
+  cascade: bool,
+  optional: bool
+) -> Res<()> {
   let schema_identifier = to_valid_identifier(schema_name)?;
   assert_information_schema(&schema_identifier)?;
   drop_schema_internal(&txn, schema_identifier, cascade, optional)
@@ -307,7 +287,12 @@ pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<TableInfoIter
 // Catalog API: Drops a table for the provided schema and table names.
 // The schema must exist.
 // If `optional` is set to true, the operation is ignored if the table does not exist.
-pub fn drop_table(txn: &TransactionRef, schema_name: &str, table_name: &str, optional: bool) -> Res<()> {
+pub fn drop_table(
+  txn: &TransactionRef,
+  schema_name: &str,
+  table_name: &str,
+  optional: bool
+) -> Res<()> {
   let schema = get_schema(&txn, schema_name)?;
   assert_information_schema(&schema.schema_identifier)?;
   let table_identifier = to_valid_identifier(table_name)?;
@@ -337,7 +322,11 @@ fn assert_information_schema(schema_identifier: &str) -> Res<()> {
 }
 
 #[inline]
-fn create_schema_internal(txn: &TransactionRef, schema_identifier: String, optional: bool) -> Res<()> {
+fn create_schema_internal(
+  txn: &TransactionRef,
+  schema_identifier: String,
+  optional: bool
+) -> Res<()> {
   let mut set = get_system_schemas(&txn)?;
   if set.exists(&schema_identifier.as_bytes()) {
     if !optional {
@@ -452,9 +441,9 @@ fn create_table_internal(
       Ok(()) // the table already exists
     }
   } else {
-    let table = TableSerDeInfo {
-      table_id: next_object_id(&txn),
+    let table = TableInfo {
       schema_id: schema.schema_id,
+      table_id: next_object_id(&txn),
       table_identifier: table_identifier,
       table_type: table_type,
       table_fields: table_fields,
@@ -474,8 +463,7 @@ fn get_table_internal(set: &Set, schema: SchemaInfo, table_identifier: String) -
   match set.get(&table_key) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
-      let table = TableSerDeInfo::deserialise(&mut reader);
-      Ok(TableInfo::from(schema.schema_id, Rc::new(schema.schema_identifier), table))
+      Ok(TableInfo::deserialise(&mut reader))
     },
     None => {
       Err(
@@ -496,7 +484,6 @@ fn list_tables_internal(set: &mut Set, schema: &SchemaInfo) -> Res<TableInfoIter
   Ok(
     TableInfoIter {
       schema_id: schema.schema_id,
-      schema_identifier: Rc::new(schema.schema_identifier.to_string()),
       iter: iter
     }
   )
@@ -505,7 +492,6 @@ fn list_tables_internal(set: &mut Set, schema: &SchemaInfo) -> Res<TableInfoIter
 // Iterator for `TableInfo`.
 pub struct TableInfoIter {
   schema_id: u64,
-  schema_identifier: Rc<String>, // must be Rc to clone for each table
   iter: BTreeIter,
 }
 
@@ -516,10 +502,10 @@ impl Iterator for TableInfoIter {
     match self.iter.next() {
       Some((_key, data)) => {
         let mut reader = Reader::from_buf(data);
-        let table = TableSerDeInfo::deserialise(&mut reader);
+        let table = TableInfo::deserialise(&mut reader);
         // We need to stop our search when the schema changes.
         if table.schema_id == self.schema_id {
-          Some(TableInfo::from(self.schema_id, self.schema_identifier.clone() /* Rc<String> */, table))
+          Some(table)
         } else {
           // We have seen all of the tables with this schema id.
           None
@@ -543,7 +529,7 @@ fn drop_table_internal(
   match set.get(&table_key) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
-      let table = TableSerDeInfo::deserialise(&mut reader);
+      let table = TableInfo::deserialise(&mut reader);
       // Delete the content of the table if it exists.
       if let Some(set) = get_set(&txn, &u64_u8!(table.table_id)) {
         drop_set(&txn, set);
@@ -620,25 +606,25 @@ pub mod tests {
 
   #[test]
   fn test_catalog_table_desc_serde() {
-    fn serde(table: &TableSerDeInfo) -> TableSerDeInfo {
+    fn serde(table: &TableInfo) -> TableInfo {
       let mut writer = Writer::new();
       table.serialise(&mut writer);
       let mut reader = Reader::from_buf(writer.to_vec());
-      TableSerDeInfo::deserialise(&mut reader)
+      TableInfo::deserialise(&mut reader)
     }
 
-    let table = TableSerDeInfo {
-      table_id: 0,
+    let table = TableInfo {
       schema_id: 0,
+      table_id: 0,
       table_identifier: String::from(""),
       table_type: TableType::SYSTEM_VIEW,
       table_fields: empty_fields(),
     };
     assert_eq!(serde(&table), table);
 
-    let table = TableSerDeInfo {
-      table_id: 123,
-      schema_id: 234,
+    let table = TableInfo {
+      schema_id: 123,
+      table_id: 234,
       table_identifier: String::from("TEST"),
       table_type: TableType::TABLE,
       table_fields: Fields::new(
