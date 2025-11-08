@@ -123,6 +123,11 @@ impl TableInfo {
   pub fn table_fields(&self) -> &Fields {
     &self.table_fields
   }
+
+  #[inline]
+  pub fn into_table_identifier(self) -> String {
+    self.table_identifier
+  }
 }
 
 impl SerDe for TableInfo {
@@ -269,8 +274,12 @@ pub fn create_table(
   create_table_internal(&txn, &schema, table_identifier, TableType::TABLE, table_fields, optional)
 }
 
-// Catalog API: Returns the table description for "schema.table".
-pub fn get_table(txn: &TransactionRef, schema_name: &str, table_name: &str) -> Res<TableInfo> {
+// Catalog API: Returns the schema and table info for "schema.table".
+pub fn get_table(
+  txn: &TransactionRef,
+  schema_name: &str,
+  table_name: &str
+) -> Res<(SchemaInfo, TableInfo)> {
   let schema = get_schema(&txn, schema_name)?;
   let table_identifier = to_valid_identifier(table_name)?;
   let set = get_system_tables(&txn)?;
@@ -278,10 +287,11 @@ pub fn get_table(txn: &TransactionRef, schema_name: &str, table_name: &str) -> R
 }
 
 // Catalog API: Returns the list of all tables in the provided schema.
-pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<TableInfoIter> {
+pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<(SchemaInfo, TableInfoIter)> {
   let schema = get_schema(&txn, schema_name)?;
   let mut set = get_system_tables(&txn)?;
-  list_tables_internal(&mut set, &schema)
+  let iter = list_tables_internal(&mut set, &schema)?;
+  Ok((schema, iter))
 }
 
 // Catalog API: Drops a table for the provided schema and table names.
@@ -458,12 +468,12 @@ fn create_table_internal(
 }
 
 #[inline]
-fn get_table_internal(set: &Set, schema: SchemaInfo, table_identifier: String) -> Res<TableInfo> {
+fn get_table_internal(set: &Set, schema: SchemaInfo, table_identifier: String) -> Res<(SchemaInfo, TableInfo)> {
   let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
   match set.get(&table_key) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
-      Ok(TableInfo::deserialise(&mut reader))
+      Ok((schema, TableInfo::deserialise(&mut reader)))
     },
     None => {
       Err(
@@ -657,12 +667,16 @@ pub mod tests {
       assert_eq!(schema.schema_id(), 0);
       assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
 
-      let table = get_table(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
+      let (schema, table) = get_table(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
+      assert_eq!(schema.schema_id(), 0);
+      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
       assert_eq!(table.table_id(), 1);
       assert_eq!(table.schema_id(), 0);
       assert_eq!(table.table_identifier(), "SCHEMATA");
 
-      let table = get_table(&txn, INFORMATION_SCHEMA, "TABLES").unwrap();
+      let (schema, table) = get_table(&txn, INFORMATION_SCHEMA, "TABLES").unwrap();
+      assert_eq!(schema.schema_id(), 0);
+      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
       assert_eq!(table.table_id(), 2);
       assert_eq!(table.schema_id(), 0);
       assert_eq!(table.table_identifier(), "TABLES");
@@ -911,7 +925,11 @@ pub mod tests {
       create_table(&txn, "test_schema", "table1", empty_fields(), false).unwrap();
     });
     dbc.with_txn(true, |txn| {
-      let table = get_table(&txn, "test_schema", "table1").unwrap();
+      let (schema, table) = get_table(&txn, "test_schema", "table1").unwrap();
+      assert_eq!(schema.schema_id(), 3);
+      assert_eq!(schema.schema_identifier(), "TEST_SCHEMA");
+      assert_eq!(table.schema_id(), 3);
+      assert_eq!(table.table_id(), 4);
       assert_eq!(table.table_identifier(), "TABLE1");
       assert_eq!(table.table_type(), TableType::TABLE);
     });
@@ -949,7 +967,9 @@ pub mod tests {
     });
 
     dbc.with_txn(true, |txn| {
-      let table = get_table(&txn, "test_schema", "table").unwrap();
+      let (schema, table) = get_table(&txn, "test_schema", "table").unwrap();
+      assert_eq!(schema.schema_id(), 3);
+      assert_eq!(schema.schema_identifier(), "TEST_SCHEMA");
       assert_eq!(table.table_id(), 4);
       assert_eq!(table.schema_id(), 3);
       assert_eq!(table.table_identifier(), "TABLE");
@@ -977,19 +997,22 @@ pub mod tests {
 
     // Verify that we only return tables for the selected schema.
     dbc.with_txn(true, |txn| {
-      let mut iter = list_tables(&txn, "schema1").unwrap();
+      let (schema, mut iter) = list_tables(&txn, "schema1").unwrap();
+      assert_eq!(schema.schema_identifier(), "SCHEMA1");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE1");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE2");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE3");
       assert_eq!(iter.next(), None);
 
-      let mut iter = list_tables(&txn, "schema2").unwrap();
+      let (schema, mut iter) = list_tables(&txn, "schema2").unwrap();
+      assert_eq!(schema.schema_identifier(), "SCHEMA2");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE4");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE5");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLE6");
       assert_eq!(iter.next(), None);
 
-      let mut iter = list_tables(&txn, INFORMATION_SCHEMA).unwrap();
+      let (schema, mut iter) = list_tables(&txn, INFORMATION_SCHEMA).unwrap();
+      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
       assert_eq!(iter.next().unwrap().table_identifier(), "SCHEMATA");
       assert_eq!(iter.next().unwrap().table_identifier(), "TABLES");
       assert_eq!(iter.next(), None);
@@ -1055,14 +1078,14 @@ pub mod tests {
 
     // Newly created table should not have a set.
     dbc.with_txn(true, |txn| {
-      let info = get_table(&txn, "schema", "table").unwrap();
+      let (_, info) = get_table(&txn, "schema", "table").unwrap();
       let set = get_table_data(&txn, &info);
       assert!(set.is_none());
     });
 
     // Create a set for a table.
     dbc.with_txn(true, |txn| {
-      let info = get_table(&txn, "schema", "table").unwrap();
+      let (_, info) = get_table(&txn, "schema", "table").unwrap();
       let set = create_table_data(&txn, &info);
       assert!(set.is_ok());
 
@@ -1073,7 +1096,7 @@ pub mod tests {
 
     // Get the set for an existing table.
     dbc.with_txn(true, |txn| {
-      let info = get_table(&txn, "schema", "table").unwrap();
+      let (_, info) = get_table(&txn, "schema", "table").unwrap();
       let set = get_table_data(&txn, &info);
       assert!(set.is_some());
     });

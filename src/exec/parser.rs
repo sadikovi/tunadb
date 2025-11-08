@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::core::types::{Field, Fields, Type};
-use crate::exec::plan::{Expression, Plan, TableIdentifier};
+use crate::exec::plan::{Expression, Plan};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
 // Parser for the SQL queries.
@@ -344,6 +344,35 @@ impl<'a> Parser<'a> {
     }
   }
 
+  // Returns a tuple of (schema, table) where schema is optional.
+  #[inline]
+  fn table_identifier(&mut self) -> Res<(Option<Rc<String>>, Rc<String>)> {
+    // We expect:
+    //   [schema].[table]
+    //   [table] (implies the currently selected schema)
+    let part1_token = self.consume(
+      TokenType::IDENTIFIER,
+      "Expected a table name or schema.table qualifier"
+    )?;
+
+    if self.matches(TokenType::DOT)? {
+      let part2_token = self.consume(
+        TokenType::IDENTIFIER,
+        "Expected a table name after the schema"
+      )?;
+
+      Ok(
+        (
+          Some(Rc::new(part1_token.value(&self.sql).to_string())),
+          Rc::new(part2_token.value(&self.sql).to_string())
+        )
+      )
+    } else {
+      // We have [table] with the current schema.
+      Ok((None, Rc::new(part1_token.value(&self.sql).to_string())))
+    }
+  }
+
   // Parses an optional alias.
   // The position is only advanced if the alias exists.
   #[inline]
@@ -389,46 +418,13 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn table_identifier(&mut self) -> Res<TableIdentifier> {
-    // We expect:
-    //   [schema].[table]
-    //   [table] (implies the currently selected schema)
-    let part1_token = self.consume(
-      TokenType::IDENTIFIER,
-      "Expected a table name or schema.table qualifier"
-    )?;
-
-    if self.matches(TokenType::DOT)? {
-      let part2_token = self.consume(
-        TokenType::IDENTIFIER,
-        "Expected a table name after the schema"
-      )?;
-
-      Ok(
-        TableIdentifier::new(
-          Some(part1_token.value(&self.sql).to_string()),
-          part2_token.value(&self.sql).to_string()
-        )
-      )
-    } else {
-      // We have [table] with the current schema.
-      Ok(
-        TableIdentifier::new(
-          None,
-          part1_token.value(&self.sql).to_string()
-        )
-      )
-    }
-  }
-
-  #[inline]
   fn from_statement(&mut self) -> Res<Plan> {
-    let table_ident = self.table_identifier()?;
+    let (schema_name, table_name) = self.table_identifier()?;
     // Parse optional alias:
     //   FROM table [alias]
     //   FROM table [AS alias]
     let table_alias = self.optional_alias()?;
-    Ok(Plan::UnresolvedTableScan(Rc::new(table_ident), table_alias))
+    Ok(Plan::UnresolvedTableScan(schema_name, table_name, table_alias))
   }
 
   #[inline]
@@ -475,7 +471,7 @@ impl<'a> Parser<'a> {
   fn insert_statement(&mut self) -> Res<Plan> {
     self.consume(TokenType::INTO, "Expected INTO keyword")?;
     // Extract the table name.
-    let table_ident = self.table_identifier()?;
+    let (schema_name, table_name) = self.table_identifier()?;
 
     // Parse the target columns.
     let mut columns = Vec::new();
@@ -549,7 +545,7 @@ impl<'a> Parser<'a> {
       );
     };
 
-    Ok(Plan::UnresolvedInsertInto(Rc::new(table_ident), Rc::new(columns), Rc::new(query)))
+    Ok(Plan::UnresolvedInsertInto(schema_name, table_name, Rc::new(columns), Rc::new(query)))
   }
 
   #[inline]
@@ -560,7 +556,7 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn create_table_statement(&mut self) -> Res<Plan> {
-    let ident = self.table_identifier()?;
+    let (schema_name, table_name) = self.table_identifier()?;
     let mut fields = Vec::new();
 
     self.consume(TokenType::PAREN_LEFT, "Expected '('")?;
@@ -613,7 +609,7 @@ impl<'a> Parser<'a> {
       },
     };
 
-    Ok(Plan::UnresolvedCreateTable(Rc::new(ident), Rc::new(schema)))
+    Ok(Plan::UnresolvedCreateTable(schema_name, table_name, Rc::new(schema)))
   }
 
   #[inline]
@@ -625,8 +621,8 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn drop_table_statement(&mut self) -> Res<Plan> {
-    let ident = self.table_identifier()?;
-    Ok(Plan::UnresolvedDropTable(Rc::new(ident)))
+    let (schema_name, table_name) = self.table_identifier()?;
+    Ok(Plan::UnresolvedDropTable(schema_name, table_name))
   }
 
   #[inline]
