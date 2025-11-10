@@ -64,7 +64,11 @@ pub enum Plan {
     Rc<Fields> /* table schema */,
   ),
   DropSchema(Rc<Fields> /* output */, Rc<SchemaInfo> /* schema info */, bool /* cascade */),
-  DropTable(Rc<Fields> /* output */, Rc<TableInfo> /* table info */),
+  DropTable(
+    Rc<Fields> /* output */,
+    Rc<SchemaInfo> /* schema info */,
+    Rc<TableInfo> /* table info */
+  ),
   Filter(Rc<Fields> /* output */, Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(
     Rc<Fields> /* output */,
@@ -75,7 +79,11 @@ pub enum Plan {
   Limit(Rc<Fields> /* output */, usize /* limit */, Rc<Plan> /* child */),
   LocalRelation(Rc<Fields> /* output */, Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Fields> /* output */, Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
-  TableScan(Rc<TableInfo> /* table info */, Option<Rc<String>> /* alias */),
+  TableScan(
+    Rc<Fields> /* output */,
+    Rc<TableInfo> /* table info */,
+    Option<Rc<String>> /* alias */
+  ),
   UnresolvedCreateSchema(Rc<String> /* schema name */),
   UnresolvedCreateTable(
     Option<Rc<String>> /* schema name */,
@@ -103,18 +111,18 @@ pub enum Plan {
 
 impl Plan {
   // Returns the fields/schema for the plan node.
-  pub fn output(&self) -> Res<&Fields> {
+  pub fn output(&self) -> Res<Rc<Fields>> {
     match self {
-      Plan::CreateSchema(ref output, _) => Ok(output),
-      Plan::CreateTable(ref output, _, _, _) => Ok(output),
-      Plan::DropSchema(ref output, _, _) => Ok(output),
-      Plan::DropTable(ref output, _) => Ok(output),
-      Plan::Filter(ref output, _, _) => Ok(output),
-      Plan::InsertInto(ref output, _, _, _) => Ok(output),
-      Plan::Limit(ref output, _, _) => Ok(output),
-      Plan::LocalRelation(ref output, _) => Ok(output),
-      Plan::Project(ref output, _, _) => Ok(output),
-      Plan::TableScan(ref info, _) => Ok(info.table_fields()),
+      Plan::CreateSchema(ref output, _) => Ok(output.clone()),
+      Plan::CreateTable(ref output, _, _, _) => Ok(output.clone()),
+      Plan::DropSchema(ref output, _, _) => Ok(output.clone()),
+      Plan::DropTable(ref output, _, _) => Ok(output.clone()),
+      Plan::Filter(ref output, _, _) => Ok(output.clone()),
+      Plan::InsertInto(ref output, _, _, _) => Ok(output.clone()),
+      Plan::Limit(ref output, _, _) => Ok(output.clone()),
+      Plan::LocalRelation(ref output, _) => Ok(output.clone()),
+      Plan::Project(ref output, _, _) => Ok(output.clone()),
+      Plan::TableScan(ref output, _, _) => Ok(output.clone()),
       Plan::UnresolvedCreateSchema(_) => Err(analysis_err!("UnresolvedCreateSchema")),
       Plan::UnresolvedCreateTable(_, _, _) => Err(analysis_err!("UnresolvedCreateTable")),
       Plan::UnresolvedDropSchema(_, _) => Err(analysis_err!("UnresolvedDropSchema")),
@@ -133,16 +141,25 @@ impl TreeNode<Plan> for Plan {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Plan::CreateSchema(_, _) => write!(f, "CreateSchema"),
+      Plan::CreateSchema(_, ref schema_name) => write!(f, "CreateSchema({})", schema_name),
       Plan::CreateTable(_, _, _, _) => write!(f, "CreateTable"),
-      Plan::DropSchema(_, _, _) => write!(f, "DropSchema"),
-      Plan::DropTable(_, _) => write!(f, "DropTable"),
+      Plan::DropSchema(_, ref schema_info, cascade) => {
+        write!(f, "DropSchema({}, {})", schema_info.schema_identifier(), cascade)
+      },
+      Plan::DropTable(_, ref schema_info, ref table_info) => {
+        write!(
+          f,
+          "DropTable[{}.{}]",
+          schema_info.schema_identifier(),
+          table_info.table_identifier()
+        )
+      },
       Plan::Filter(_, _, _) => write!(f, "Filter"),
       Plan::InsertInto(_, _, _, _) => write!(f, "InsertInto"),
       Plan::Limit(_, _, _) => write!(f, "Limit"),
       Plan::LocalRelation(_, _) => write!(f, "LocalRelation"),
       Plan::Project(_, _, _) => write!(f, "Project"),
-      Plan::TableScan(_, _) => write!(f, "TableScan"),
+      Plan::TableScan(_, _, _) => write!(f, "TableScan"),
       Plan::UnresolvedCreateSchema(_) => write!(f, "UnresolvedCreateSchema"),
       Plan::UnresolvedCreateTable(_, _, _) => write!(f, "UnresolvedCreateTable"),
       Plan::UnresolvedDropSchema(_, _) => write!(f, "UnresolvedDropSchema"),
@@ -167,13 +184,13 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateSchema(_, _) => Vec::new(),
       Plan::CreateTable(_, _, _, _) => Vec::new(),
       Plan::DropSchema(_, _, _) => Vec::new(),
-      Plan::DropTable(_, _) => Vec::new(),
+      Plan::DropTable(_, _, _) => Vec::new(),
       Plan::Filter(_, _, ref child) => vec![child],
       Plan::InsertInto(_, _, _, ref query) => vec![query],
       Plan::Limit(_, _, ref child) => vec![child],
       Plan::LocalRelation(_, _) => Vec::new(),
       Plan::Project(_, _, ref child) => vec![child],
-      Plan::TableScan(_, _) => Vec::new(),
+      Plan::TableScan(_, _, _) => Vec::new(),
       Plan::UnresolvedCreateSchema(_) => Vec::new(),
       Plan::UnresolvedCreateTable(_, _, _) => Vec::new(),
       Plan::UnresolvedDropSchema(_, _) => Vec::new(),
@@ -199,8 +216,8 @@ impl TreeNode<Plan> for Plan {
       Plan::DropSchema(ref output, ref schema_info, cascade) => {
         Plan::DropSchema(output.clone(), schema_info.clone(), *cascade)
       },
-      Plan::DropTable(ref output, ref table_info) => {
-        Plan::DropTable(output.clone(), table_info.clone())
+      Plan::DropTable(ref output, ref schema_info, ref table_info) => {
+        Plan::DropTable(output.clone(), schema_info.clone(), table_info.clone())
       },
       Plan::Filter(ref schema, ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -221,8 +238,8 @@ impl TreeNode<Plan> for Plan {
         let child = get_unary!("Project", children);
         Plan::Project(schema.clone(), expressions.clone(), Rc::new(child))
       },
-      Plan::TableScan(ref info, ref table_alias) => {
-        Plan::TableScan(info.clone(), table_alias.clone())
+      Plan::TableScan(ref output, ref info, ref table_alias) => {
+        Plan::TableScan(output.clone(), info.clone(), table_alias.clone())
       },
       Plan::UnresolvedCreateSchema(ref schema_name) => {
         Plan::UnresolvedCreateSchema(schema_name.clone())
@@ -242,7 +259,12 @@ impl TreeNode<Plan> for Plan {
       },
       Plan::UnresolvedInsertInto(ref schema_name, ref table_name, ref columns, _) => {
         let child = get_unary!("UnresolvedInsertInto", children);
-        Plan::UnresolvedInsertInto(schema_name.clone(), table_name.clone(), columns.clone(), Rc::new(child))
+        Plan::UnresolvedInsertInto(
+          schema_name.clone(),
+          table_name.clone(),
+          columns.clone(),
+          Rc::new(child)
+        )
       },
       Plan::UnresolvedLimit(limit, _) => {
         let child = get_unary!("UnresolvedLimit", children);

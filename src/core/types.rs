@@ -14,7 +14,7 @@ const TYPE_STRUCT: u8 = 254;
 const TYPE_STRUCT_FIELD: u8 = 255;
 
 // Enum represents column type and/or table schema.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Type {
   BOOL, // bool
   INT, // i32
@@ -90,7 +90,7 @@ impl fmt::Display for Type {
 }
 
 // Field of a STRUCT.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
   name: String,
   data_type: Type,
@@ -155,7 +155,7 @@ impl fmt::Display for Field {
   }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fields {
   fields: Vec<Field>,
   index: HashMap<String, usize>,
