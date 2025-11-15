@@ -1,44 +1,42 @@
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
 use crate::core::types::{Field, Fields, Type};
-use crate::core::util::to_valid_identifier;
 use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
 
-// Returns a unique table key to store in the set.
-// This allows us to locate a table using "exists" and "get" API while still being able to rename
+// Returns a unique relation key to store in the set.
+// This allows us to locate a relation using "exists" and "get" API while still being able to rename
 // the schema.
 #[inline]
-fn to_unique_table_key(schema_id: u64, table_identifier: &str) -> Vec<u8> {
+fn to_unique_relation_key(schema_id: u64, relation_name: &str) -> Vec<u8> {
   let id_bytes = &u64_u8!(schema_id);
-  let ident_bytes = table_identifier.as_bytes();
+  let ident_bytes = relation_name.as_bytes();
   let mut key = Vec::with_capacity(id_bytes.len() + ident_bytes.len());
   key.extend_from_slice(id_bytes);
   key.extend_from_slice(ident_bytes);
   key
 }
 
-// Table type to differentiate between base tables and views.
-// Used in query analysis.
+// Relation type to differentiate between base tables, views, etc.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(non_camel_case_types)]
-pub enum TableType {
+pub enum RelationType {
   TABLE /* 1 */,
   SYSTEM_VIEW /* 2 */,
 }
 
-impl SerDe for TableType {
+impl SerDe for RelationType {
   fn serialise(&self, writer: &mut Writer) {
     match self {
-      TableType::TABLE => writer.write_u8(1),
-      TableType::SYSTEM_VIEW => writer.write_u8(2),
+      RelationType::TABLE => writer.write_u8(1),
+      RelationType::SYSTEM_VIEW => writer.write_u8(2),
     }
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
     match reader.read_u8() {
-      1 => TableType::TABLE,
-      2 => TableType::SYSTEM_VIEW,
+      1 => RelationType::TABLE,
+      2 => RelationType::SYSTEM_VIEW,
       _ => unreachable!(),
     }
   }
@@ -47,7 +45,7 @@ impl SerDe for TableType {
 #[derive(Debug, PartialEq)]
 pub struct SchemaInfo {
   schema_id: u64, // globally unique id
-  schema_identifier: String,
+  schema_name: String,
 }
 
 impl SchemaInfo {
@@ -57,107 +55,109 @@ impl SchemaInfo {
     self.schema_id
   }
 
-  // Returns the schema identifier.
+  // Returns the schema name.
   #[inline]
-  pub fn schema_identifier(&self) -> &str {
-    &self.schema_identifier
+  pub fn schema_name(&self) -> &str {
+    &self.schema_name
   }
 
+  // Returns schema name consuming SchemaInfo.
   #[inline]
-  pub fn into_schema_identifier(self) -> String {
-    self.schema_identifier
+  pub fn into_schema_name(self) -> String {
+    self.schema_name
   }
 }
 
 impl SerDe for SchemaInfo {
   fn serialise(&self, writer: &mut Writer) {
     writer.write_u64(self.schema_id);
-    writer.write_str(&self.schema_identifier);
+    writer.write_str(&self.schema_name);
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
     let schema_id = reader.read_u64();
-    let schema_identifier = reader.read_str().to_string();
-    Self { schema_id, schema_identifier }
+    let schema_name = reader.read_str().to_string();
+    Self { schema_id, schema_name }
   }
 }
 
 // Private struct that is used for serialisation/deserialisation.
 // We do not store schema identifier since it can change while schema id is unique.
 #[derive(Debug, PartialEq)]
-pub struct TableInfo {
+pub struct RelationInfo {
   schema_id: u64, // globally unique id
-  table_id: u64, // globally unique id
-  table_identifier: String, // unique within the schema
-  table_type: TableType,
-  table_fields: Fields,
+  relation_id: u64, // globally unique id
+  relation_name: String, // unique within the schema
+  relation_type: RelationType,
+  relation_fields: Fields,
 }
 
-impl TableInfo {
+impl RelationInfo {
   // Returns globally unique id for the schema.
   #[inline]
   pub fn schema_id(&self) -> u64 {
     self.schema_id
   }
 
-  // Returns globally unique id for the table.
+  // Returns globally unique id for the relation.
   #[inline]
-  pub fn table_id(&self) -> u64 {
-    self.table_id
+  pub fn relation_id(&self) -> u64 {
+    self.relation_id
   }
 
-  // Returns the table identifier.
+  // Returns the relation name.
   #[inline]
-  pub fn table_identifier(&self) -> &str {
-    &self.table_identifier
+  pub fn relation_name(&self) -> &str {
+    &self.relation_name
   }
 
-  // Returns the table type.
+  // Returns the relation type.
   #[inline]
-  pub fn table_type(&self) -> TableType {
-    self.table_type
+  pub fn relation_type(&self) -> RelationType {
+    self.relation_type
   }
 
-  // Returns the table fields/schema.
+  // Returns the relation fields/schema.
   #[inline]
-  pub fn table_fields(&self) -> &Fields {
-    &self.table_fields
+  pub fn relation_fields(&self) -> &Fields {
+    &self.relation_fields
   }
 
+  // Returns relation name consuming RelationInfo.
   #[inline]
-  pub fn into_table_identifier(self) -> String {
-    self.table_identifier
+  pub fn into_relation_name(self) -> String {
+    self.relation_name
   }
 }
 
-impl SerDe for TableInfo {
+impl SerDe for RelationInfo {
   fn serialise(&self, writer: &mut Writer) {
     writer.write_u64(self.schema_id);
-    writer.write_u64(self.table_id);
-    writer.write_str(&self.table_identifier);
-    self.table_type.serialise(writer);
-    self.table_fields.serialise(writer);
+    writer.write_u64(self.relation_id);
+    writer.write_str(&self.relation_name);
+    self.relation_type.serialise(writer);
+    self.relation_fields.serialise(writer);
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
     let schema_id = reader.read_u64();
-    let table_id = reader.read_u64();
-    let table_identifier = reader.read_str().to_string();
-    let table_type = TableType::deserialise(reader);
-    let table_fields = Fields::deserialise(reader);
-    Self { table_id, schema_id, table_identifier, table_type, table_fields }
+    let relation_id = reader.read_u64();
+    let relation_name = reader.read_str().to_string();
+    let relation_type = RelationType::deserialise(reader);
+    let relation_fields = Fields::deserialise(reader);
+    Self { schema_id, relation_id, relation_name, relation_type, relation_fields }
   }
 }
 
 //===================================================================================
-// System tables.
+// System sets.
 // IDs must be longer than 8 bytes to avoid collision with object ids which are u64.
 //===================================================================================
 
 // Schema information.
 const SYSTEM_SCHEMAS: &[u8] = b"SYSTEM_SCHEMAS";
-// Table information.
-const SYSTEM_TABLES: &[u8] = b"SYSTEM_TABLES";
+// Relation information.
+const SYSTEM_RELATIONS: &[u8] = b"SYSTEM_RELATIONS";
 
 // Helper method to get SYSTEM_SCHEMAS.
 #[inline]
@@ -168,12 +168,12 @@ fn get_system_schemas(txn: &TransactionRef) -> Res<Set> {
   }
 }
 
-// Helper method to get SYSTEM_TABLES.
+// Helper method to get SYSTEM_RELATIONS.
 #[inline]
-fn get_system_tables(txn: &TransactionRef) -> Res<Set> {
-  match get_set(&txn, SYSTEM_TABLES) {
+fn get_system_relations(txn: &TransactionRef) -> Res<Set> {
+  match get_set(&txn, SYSTEM_RELATIONS) {
     Some(set) => Ok(set),
-    None => Err(internal_err!("SYSTEM_TABLES does not exist")),
+    None => Err(internal_err!("SYSTEM_RELATIONS does not exist")),
   }
 }
 
@@ -183,40 +183,40 @@ fn get_system_tables(txn: &TransactionRef) -> Res<Set> {
 
 const INFORMATION_SCHEMA: &str = "INFORMATION_SCHEMA";
 
-// Initialise catalog and system tables.
+// Initialise catalog and system relations.
 // This method must only be called once during the database setup.
 pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_set(&txn, SYSTEM_SCHEMAS)?;
-  create_set(&txn, SYSTEM_TABLES)?;
+  create_set(&txn, SYSTEM_RELATIONS)?;
 
-  create_schema_internal(&txn, INFORMATION_SCHEMA.to_string(), false)?;
+  create_schema_internal(&txn, INFORMATION_SCHEMA, false)?;
   let schema = get_schema(&txn, INFORMATION_SCHEMA)?;
 
-  create_table_internal(
+  create_relation_internal(
     &txn,
     &schema,
-    "SCHEMATA".to_string(),
-    TableType::SYSTEM_VIEW,
+    "SCHEMATA",
+    RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("SCHEMA_NAME", Type::TEXT, false)?,
+        Field::new("SCHEMA_NAME".to_string(), Type::TEXT, false),
       ]
-    )?,
+    ),
     false
   )?;
 
-  create_table_internal(
+  create_relation_internal(
     &txn,
     &schema,
-    "TABLES".to_string(),
-    TableType::SYSTEM_VIEW,
+    "RELATIONS",
+    RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("TABLE_SCHEMA", Type::TEXT, false)?,
-        Field::new("TABLE_NAME", Type::TEXT, false)?,
-        Field::new("TABLE_TYPE", Type::TEXT, false)?,
+        Field::new("RELATION_SCHEMA".to_string(), Type::TEXT, false),
+        Field::new("RELATION_NAME".to_string(), Type::TEXT, false),
+        Field::new("RELATION_TYPE".to_string(), Type::TEXT, false),
       ]
-    )?,
+    ),
     false
   )?;
 
@@ -226,16 +226,14 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
 // Catalog API: Creates schema with the provided name.
 // When `optional` is set to true, ignores the operation if the schema already exists.
 pub fn create_schema(txn: &TransactionRef, schema_name: &str, optional: bool) -> Res<()> {
-  let schema_identifier = to_valid_identifier(schema_name)?;
-  assert_information_schema(&schema_identifier)?;
-  create_schema_internal(&txn, schema_identifier, optional)
+  assert_information_schema(&schema_name)?;
+  create_schema_internal(&txn, &schema_name, optional)
 }
 
  // Catalog API: Returns schema info for the name if exists.
 pub fn get_schema(txn: &TransactionRef, schema_name: &str) -> Res<SchemaInfo> {
-  let schema_identifier = to_valid_identifier(schema_name)?;
   let set = get_system_schemas(&txn)?;
-  get_schema_internal(&set, schema_identifier)
+  get_schema_internal(&set, &schema_name)
 }
 
 // Catalog API: Returns the list of all schemas in the catalog.
@@ -253,78 +251,85 @@ pub fn drop_schema(
   cascade: bool,
   optional: bool
 ) -> Res<()> {
-  let schema_identifier = to_valid_identifier(schema_name)?;
-  assert_information_schema(&schema_identifier)?;
-  drop_schema_internal(&txn, schema_identifier, cascade, optional)
+  assert_information_schema(&schema_name)?;
+  drop_schema_internal(&txn, &schema_name, cascade, optional)
 }
 
-// Catalog API: Creates a table with the provided schema name and table name.
+// Catalog API: Creates a relation with the provided schema name and relation name.
 // The schema must exist.
-// If `optional` is set to true, the operation is ignored if the table already exists.
-pub fn create_table(
+// If `optional` is set to true, the operation is ignored if the relation already exists.
+pub fn create_relation(
   txn: &TransactionRef,
   schema_name: &str,
-  table_name: &str,
-  table_fields: Fields,
+  relation_name: &str,
+  relation_type: RelationType,
+  relation_fields: Fields,
   optional: bool
 ) -> Res<()> {
-  let schema = get_schema(&txn, schema_name)?;
-  assert_information_schema(&schema.schema_identifier)?;
-  let table_identifier = to_valid_identifier(table_name)?;
-  create_table_internal(&txn, &schema, table_identifier, TableType::TABLE, table_fields, optional)
+  assert_information_schema(&schema_name)?;
+  let schema = get_schema(&txn, &schema_name)?;
+  create_relation_internal(
+    &txn,
+    &schema,
+    &relation_name,
+    relation_type,
+    relation_fields,
+    optional
+  )
 }
 
-// Catalog API: Returns the schema and table info for "schema.table".
-pub fn get_table(
+// Catalog API: Returns the schema and relation info for "schema.relation".
+pub fn get_relation(
   txn: &TransactionRef,
   schema_name: &str,
-  table_name: &str
-) -> Res<(SchemaInfo, TableInfo)> {
-  let schema = get_schema(&txn, schema_name)?;
-  let table_identifier = to_valid_identifier(table_name)?;
-  let set = get_system_tables(&txn)?;
-  get_table_internal(&set, schema, table_identifier)
+  relation_name: &str
+) -> Res<(SchemaInfo, RelationInfo)> {
+  let schema = get_schema(&txn, &schema_name)?;
+  let set = get_system_relations(&txn)?;
+  get_relation_internal(&set, schema, relation_name)
 }
 
-// Catalog API: Returns the list of all tables in the provided schema.
-pub fn list_tables(txn: &TransactionRef, schema_name: &str) -> Res<(SchemaInfo, TableInfoIter)> {
+// Catalog API: Returns the list of all relations in the provided schema.
+pub fn list_relations(
+  txn: &TransactionRef,
+  schema_name: &str
+) -> Res<(SchemaInfo, RelationInfoIter)> {
   let schema = get_schema(&txn, schema_name)?;
-  let mut set = get_system_tables(&txn)?;
-  let iter = list_tables_internal(&mut set, &schema)?;
+  let mut set = get_system_relations(&txn)?;
+  let iter = list_relations_internal(&mut set, &schema)?;
   Ok((schema, iter))
 }
 
-// Catalog API: Drops a table for the provided schema and table names.
+// Catalog API: Drops a relation for the provided schema and relation names.
 // The schema must exist.
-// If `optional` is set to true, the operation is ignored if the table does not exist.
-pub fn drop_table(
+// If `optional` is set to true, the operation is ignored if the relation does not exist.
+pub fn drop_relation(
   txn: &TransactionRef,
   schema_name: &str,
-  table_name: &str,
+  relation_name: &str,
   optional: bool
 ) -> Res<()> {
-  let schema = get_schema(&txn, schema_name)?;
-  assert_information_schema(&schema.schema_identifier)?;
-  let table_identifier = to_valid_identifier(table_name)?;
-  drop_table_internal(&txn, &schema, table_identifier, optional)
+  assert_information_schema(&schema_name)?;
+  let schema = get_schema(&txn, &schema_name)?;
+  drop_relation_internal(&txn, &schema, &relation_name, optional)
 }
 
-// Catalog API: Returns table data.
-pub fn get_table_data(txn: &TransactionRef, table: &TableInfo) -> Option<Set> {
-  get_set(&txn, &u64_u8!(table.table_id))
+// Catalog API: Returns relation data.
+pub fn get_relation_data(txn: &TransactionRef, relation: &RelationInfo) -> Option<Set> {
+  get_set(&txn, &u64_u8!(relation.relation_id))
 }
 
-// Catalog API: Creates a new table data set.
-// The method returns an error if the set already exists so use `get_table_data` to check first.
-pub fn create_table_data(txn: &TransactionRef, table: &TableInfo) -> Res<Set> {
-  create_set(&txn, &u64_u8!(table.table_id))
+// Catalog API: Creates a new relation data set.
+// The method returns an error if the set already exists so use `get_relation_data` to check first.
+pub fn create_relation_data(txn: &TransactionRef, relation: &RelationInfo) -> Res<Set> {
+  create_set(&txn, &u64_u8!(relation.relation_id))
 }
 
 // Assert if the current schema is information schema.
 // We don't allow any modifications in the information schema.
 #[inline]
-fn assert_information_schema(schema_identifier: &str) -> Res<()> {
-  if schema_identifier == INFORMATION_SCHEMA {
+fn assert_information_schema(schema_name: &str) -> Res<()> {
+  if schema_name.eq_ignore_ascii_case(INFORMATION_SCHEMA) {
     Err(Error::OperationIsNotAllowed(format!("Cannot modify {}", INFORMATION_SCHEMA)))
   } else {
     Ok(())
@@ -334,38 +339,38 @@ fn assert_information_schema(schema_identifier: &str) -> Res<()> {
 #[inline]
 fn create_schema_internal(
   txn: &TransactionRef,
-  schema_identifier: String,
+  schema_name: &str,
   optional: bool
 ) -> Res<()> {
   let mut set = get_system_schemas(&txn)?;
-  if set.exists(&schema_identifier.as_bytes()) {
+  if set.exists(&schema_name.as_bytes()) {
     if !optional {
-      Err(Error::SchemaAlreadyExists(schema_identifier))
+      Err(Error::SchemaAlreadyExists(schema_name.to_string()))
     } else {
       Ok(()) // the schema already exists
     }
   } else {
     let schema = SchemaInfo {
       schema_id: next_object_id(&txn),
-      schema_identifier: schema_identifier
+      schema_name: schema_name.to_string(),
     };
     // Serialise to store in the set.
     let mut writer = Writer::new();
     schema.serialise(&mut writer);
-    // Store in the sys table, the key must be the schema identifier.
-    set.put(&schema.schema_identifier.as_bytes(), &writer.to_vec());
+    // The key must be the schema identifier.
+    set.put(&schema.schema_name.as_bytes(), &writer.to_vec());
     Ok(())
   }
 }
 
 #[inline]
-fn get_schema_internal(set: &Set, schema_identifier: String) -> Res<SchemaInfo> {
-  match set.get(&schema_identifier.as_bytes()) {
+fn get_schema_internal(set: &Set, schema_name: &str) -> Res<SchemaInfo> {
+  match set.get(&schema_name.as_bytes()) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
       Ok(SchemaInfo::deserialise(&mut reader))
     },
-    None => Err(Error::SchemaDoesNotExist(schema_identifier)),
+    None => Err(Error::SchemaDoesNotExist(schema_name.to_string())),
   }
 }
 
@@ -397,12 +402,12 @@ impl Iterator for SchemaInfoIter {
 #[inline]
 fn drop_schema_internal(
   txn: &TransactionRef,
-  schema_identifier: String,
+  schema_name: &str,
   cascade: bool,
   optional: bool
 ) -> Res<()> {
   let mut set = get_system_schemas(&txn)?;
-  let schema = match get_schema_internal(&set, schema_identifier) {
+  let schema = match get_schema_internal(&set, &schema_name) {
     Ok(schema) => schema,
     Err(err) => {
       return if !optional { Err(err) } else { Ok(()) };
@@ -410,114 +415,114 @@ fn drop_schema_internal(
   };
 
   // Drop all of the tables in the schema.
-  let mut tables = Vec::new();
+  let mut relations = Vec::new();
   {
-    let mut table_set = get_system_tables(&txn)?;
-    let mut iter = list_tables_internal(&mut table_set, &schema)?;
-    while let Some(table) = iter.next() {
-      // If the schema contains at least one table, we cannot drop it without "cascade" property.
+    let mut relation_set = get_system_relations(&txn)?;
+    let mut iter = list_relations_internal(&mut relation_set, &schema)?;
+    while let Some(relation) = iter.next() {
+      // If the schema contains at least one relation, we cannot drop it without "cascade".
       if !cascade {
-        return Err(Error::SchemaIsNotEmpty(schema.schema_identifier));
+        return Err(Error::SchemaIsNotEmpty(schema.into_schema_name()));
       }
-      tables.push(table)
+      relations.push(relation)
     }
   }
 
-  for table in tables {
-    drop_table_internal(&txn, &schema, table.table_identifier, false)?;
+  for relation in relations {
+    drop_relation_internal(&txn, &schema, relation.relation_name(), false)?;
   }
 
   // Drop the schema.
-  set.del(schema.schema_identifier.as_bytes());
+  set.del(schema.schema_name.as_bytes());
   Ok(())
 }
 
 #[inline]
-fn create_table_internal(
+fn create_relation_internal(
   txn: &TransactionRef,
   schema: &SchemaInfo,
-  table_identifier: String,
-  table_type: TableType,
-  table_fields: Fields,
+  relation_name: &str,
+  relation_type: RelationType,
+  relation_fields: Fields,
   optional: bool
 ) -> Res<()> {
-  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
+  let relation_key = to_unique_relation_key(schema.schema_id, &relation_name);
 
-  let mut set = get_system_tables(&txn)?;
-  if set.exists(&table_key) {
+  let mut set = get_system_relations(&txn)?;
+  if set.exists(&relation_key) {
     if !optional {
-      Err(Error::TableAlreadyExists(schema.schema_identifier.to_string(), table_identifier))
+      Err(
+        Error::RelationAlreadyExists(schema.schema_name().to_string(), relation_name.to_string())
+      )
     } else {
-      Ok(()) // the table already exists
+      Ok(()) // the relation already exists
     }
   } else {
-    let table = TableInfo {
+    let relation = RelationInfo {
       schema_id: schema.schema_id,
-      table_id: next_object_id(&txn),
-      table_identifier: table_identifier,
-      table_type: table_type,
-      table_fields: table_fields,
+      relation_id: next_object_id(&txn),
+      relation_name: relation_name.to_string(),
+      relation_type: relation_type,
+      relation_fields: relation_fields,
     };
     // Serialise to store in the set.
     let mut writer = Writer::new();
-    table.serialise(&mut writer);
-    // Store in the sys table, the key must be the "schema_id.table".
-    set.put(&table_key, &writer.to_vec());
+    relation.serialise(&mut writer);
+    set.put(&relation_key, &writer.to_vec());
     Ok(())
   }
 }
 
 #[inline]
-fn get_table_internal(set: &Set, schema: SchemaInfo, table_identifier: String) -> Res<(SchemaInfo, TableInfo)> {
-  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
-  match set.get(&table_key) {
+fn get_relation_internal(
+  set: &Set,
+  schema: SchemaInfo,
+  relation_name: &str
+) -> Res<(SchemaInfo, RelationInfo)> {
+  let relation_key = to_unique_relation_key(schema.schema_id, &relation_name);
+  match set.get(&relation_key) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
-      Ok((schema, TableInfo::deserialise(&mut reader)))
+      Ok((schema, RelationInfo::deserialise(&mut reader)))
     },
     None => {
-      Err(
-        Error::TableDoesNotExist(
-          schema.schema_identifier,
-          table_identifier
-        )
-      )
+      Err(Error::RelationDoesNotExist(schema.into_schema_name(), relation_name.to_string()))
     },
   }
 }
 
 #[inline]
-fn list_tables_internal(set: &mut Set, schema: &SchemaInfo) -> Res<TableInfoIter> {
-  // When listing, we use a dummy empty table name as the first key to locate the schema's tables.
-  let start_table_key = to_unique_table_key(schema.schema_id, "");
-  let iter = set.list(Some(&start_table_key), None);
+fn list_relations_internal(set: &mut Set, schema: &SchemaInfo) -> Res<RelationInfoIter> {
+  // We use a dummy empty relation name as the first key to locate the schema's relations.
+  let start_key = to_unique_relation_key(schema.schema_id, "");
+  let iter = set.list(Some(&start_key), None);
   Ok(
-    TableInfoIter {
+    RelationInfoIter {
       schema_id: schema.schema_id,
       iter: iter
     }
   )
 }
 
-// Iterator for `TableInfo`.
-pub struct TableInfoIter {
+// Iterator for `RelationInfo`.
+pub struct RelationInfoIter {
   schema_id: u64,
   iter: BTreeIter,
 }
 
-impl Iterator for TableInfoIter {
-  type Item = TableInfo;
+impl Iterator for RelationInfoIter {
+  type Item = RelationInfo;
 
   fn next(&mut self) -> Option<Self::Item> {
     match self.iter.next() {
       Some((_key, data)) => {
         let mut reader = Reader::from_buf(data);
-        let table = TableInfo::deserialise(&mut reader);
+        let relation = RelationInfo::deserialise(&mut reader);
         // We need to stop our search when the schema changes.
-        if table.schema_id == self.schema_id {
-          Some(table)
+        if relation.schema_id == self.schema_id {
+          Some(relation)
         } else {
-          // We have seen all of the tables with this schema id.
+          // We have seen all of the relations with this schema id.
           None
         }
       },
@@ -527,30 +532,32 @@ impl Iterator for TableInfoIter {
 }
 
 #[inline]
-fn drop_table_internal(
+fn drop_relation_internal(
   txn: &TransactionRef,
   schema: &SchemaInfo,
-  table_identifier: String,
+  relation_name: &str,
   optional: bool
 ) -> Res<()> {
-  let table_key = to_unique_table_key(schema.schema_id, &table_identifier);
+  let relation_key = to_unique_relation_key(schema.schema_id, &relation_name);
 
-  let mut set = get_system_tables(&txn)?;
-  match set.get(&table_key) {
+  let mut set = get_system_relations(&txn)?;
+  match set.get(&relation_key) {
     Some(data) => {
       let mut reader = Reader::from_buf(data);
-      let table = TableInfo::deserialise(&mut reader);
-      // Delete the content of the table if it exists.
-      if let Some(set) = get_set(&txn, &u64_u8!(table.table_id)) {
+      let relation = RelationInfo::deserialise(&mut reader);
+      // Delete the content of the relation if it exists.
+      if let Some(set) = get_set(&txn, &u64_u8!(relation.relation_id)) {
         drop_set(&txn, set);
       }
-      // Delete table metadata.
-      set.del(&table_key);
+      // Delete relation metadata.
+      set.del(&relation_key);
       Ok(())
     },
     None => {
       if !optional {
-        Err(Error::TableDoesNotExist(schema.schema_identifier.to_string(), table_identifier))
+        Err(
+          Error::RelationDoesNotExist(schema.schema_name().to_string(), relation_name.to_string())
+        )
       } else {
         Ok(())
       }
@@ -574,28 +581,28 @@ pub mod tests {
 
   // Returns an empty schema for tests.
   fn empty_fields() -> Fields {
-    Fields::new(vec![]).unwrap()
+    Fields::new(vec![])
   }
 
   #[test]
-  fn test_catalog_to_unique_table_key() {
-    assert_eq!(to_unique_table_key(0, ""), vec![0, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(to_unique_table_key(1, ""), vec![1, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(to_unique_table_key(1, "1"), vec![1, 0, 0, 0, 0, 0, 0, 0, 49]);
-    assert_eq!(to_unique_table_key(128, "abc"), vec![128, 0, 0, 0, 0, 0, 0, 0, 97, 98, 99]);
+  fn test_catalog_to_unique_relation_key() {
+    assert_eq!(to_unique_relation_key(0, ""), vec![0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(to_unique_relation_key(1, ""), vec![1, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(to_unique_relation_key(1, "1"), vec![1, 0, 0, 0, 0, 0, 0, 0, 49]);
+    assert_eq!(to_unique_relation_key(128, "abc"), vec![128, 0, 0, 0, 0, 0, 0, 0, 97, 98, 99]);
   }
 
   #[test]
   fn test_catalog_table_type_serde() {
-    fn serde(tpe: TableType) -> TableType {
+    fn serde(tpe: RelationType) -> RelationType {
       let mut writer = Writer::new();
       tpe.serialise(&mut writer);
       let mut reader = Reader::from_buf(writer.to_vec());
-      TableType::deserialise(&mut reader)
+      RelationType::deserialise(&mut reader)
     }
 
-    assert_eq!(serde(TableType::TABLE), TableType::TABLE);
-    assert_eq!(serde(TableType::SYSTEM_VIEW), TableType::SYSTEM_VIEW);
+    assert_eq!(serde(RelationType::TABLE), RelationType::TABLE);
+    assert_eq!(serde(RelationType::SYSTEM_VIEW), RelationType::SYSTEM_VIEW);
   }
 
   #[test]
@@ -607,51 +614,51 @@ pub mod tests {
       SchemaInfo::deserialise(&mut reader)
     }
 
-    let schema = SchemaInfo { schema_id: 0, schema_identifier: String::from("") };
+    let schema = SchemaInfo { schema_id: 0, schema_name: String::from("") };
     assert_eq!(serde(&schema), schema);
 
-    let schema = SchemaInfo { schema_id: 123, schema_identifier: String::from("ABC") };
+    let schema = SchemaInfo { schema_id: 123, schema_name: String::from("ABC") };
     assert_eq!(serde(&schema), schema);
   }
 
   #[test]
   fn test_catalog_table_desc_serde() {
-    fn serde(table: &TableInfo) -> TableInfo {
+    fn serde(relation: &RelationInfo) -> RelationInfo {
       let mut writer = Writer::new();
-      table.serialise(&mut writer);
+      relation.serialise(&mut writer);
       let mut reader = Reader::from_buf(writer.to_vec());
-      TableInfo::deserialise(&mut reader)
+      RelationInfo::deserialise(&mut reader)
     }
 
-    let table = TableInfo {
+    let relation = RelationInfo {
       schema_id: 0,
-      table_id: 0,
-      table_identifier: String::from(""),
-      table_type: TableType::SYSTEM_VIEW,
-      table_fields: empty_fields(),
+      relation_id: 0,
+      relation_name: String::from(""),
+      relation_type: RelationType::SYSTEM_VIEW,
+      relation_fields: empty_fields(),
     };
-    assert_eq!(serde(&table), table);
+    assert_eq!(serde(&relation), relation);
 
-    let table = TableInfo {
+    let relation = RelationInfo {
       schema_id: 123,
-      table_id: 234,
-      table_identifier: String::from("TEST"),
-      table_type: TableType::TABLE,
-      table_fields: Fields::new(
+      relation_id: 234,
+      relation_name: String::from("TEST"),
+      relation_type: RelationType::TABLE,
+      relation_fields: Fields::new(
         vec![
-          Field::new("c1", Type::INT, false).unwrap(),
-          Field::new("c2", Type::TEXT, false).unwrap(),
-          Field::new("c3", Type::STRUCT(empty_fields()), true).unwrap(),
+          Field::new("c1".to_string(), Type::INT, false),
+          Field::new("c2".to_string(), Type::TEXT, false),
+          Field::new("c3".to_string(), Type::STRUCT(empty_fields()), true),
         ]
-      ).unwrap(),
+      ),
     };
-    assert_eq!(serde(&table), table);
+    assert_eq!(serde(&relation), relation);
   }
 
   #[test]
   fn test_catalog_check_sys_tables_length() {
     assert!(SYSTEM_SCHEMAS.len() > 8);
-    assert!(SYSTEM_TABLES.len() > 8);
+    assert!(SYSTEM_RELATIONS.len() > 8);
   }
 
   #[test]
@@ -661,25 +668,25 @@ pub mod tests {
       init_catalog(&txn).unwrap();
     });
 
-    // All system table must be created.
+    // All system relations must be created.
     dbc.with_txn(true, |txn| {
       let schema = get_schema(&txn, INFORMATION_SCHEMA).unwrap();
       assert_eq!(schema.schema_id(), 0);
-      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
+      assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
 
-      let (schema, table) = get_table(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
+      let (schema, relation) = get_relation(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
       assert_eq!(schema.schema_id(), 0);
-      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
-      assert_eq!(table.table_id(), 1);
-      assert_eq!(table.schema_id(), 0);
-      assert_eq!(table.table_identifier(), "SCHEMATA");
+      assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
+      assert_eq!(relation.relation_id(), 1);
+      assert_eq!(relation.schema_id(), 0);
+      assert_eq!(relation.relation_name(), "SCHEMATA");
 
-      let (schema, table) = get_table(&txn, INFORMATION_SCHEMA, "TABLES").unwrap();
+      let (schema, relation) = get_relation(&txn, INFORMATION_SCHEMA, "RELATIONS").unwrap();
       assert_eq!(schema.schema_id(), 0);
-      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
-      assert_eq!(table.table_id(), 2);
-      assert_eq!(table.schema_id(), 0);
-      assert_eq!(table.table_identifier(), "TABLES");
+      assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
+      assert_eq!(relation.relation_id(), 2);
+      assert_eq!(relation.schema_id(), 0);
+      assert_eq!(relation.relation_name(), "RELATIONS");
     });
   }
 
@@ -702,11 +709,25 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", empty_fields(), false),
+        create_relation(
+          &txn,
+          INFORMATION_SCHEMA,
+          "test",
+          RelationType::TABLE,
+          empty_fields(),
+          false
+        ),
         err
       );
       assert_eq!(
-        create_table(&txn, INFORMATION_SCHEMA, "test", empty_fields(), true),
+        create_relation(
+          &txn,
+          INFORMATION_SCHEMA,
+          "test",
+          RelationType::TABLE,
+          empty_fields(),
+          true
+        ),
         err
       );
     });
@@ -743,7 +764,7 @@ pub mod tests {
       let mut counter = 0;
       let mut iter = list_schemas(&txn).unwrap();
       while let Some(desc) = iter.next() {
-        if desc.schema_identifier() != INFORMATION_SCHEMA {
+        if desc.schema_name() != INFORMATION_SCHEMA {
           counter += 1;
         }
       }
@@ -762,13 +783,13 @@ pub mod tests {
     });
     dbc.with_txn(true, |txn| {
       let schema = get_schema(&txn, "test1").unwrap();
-      assert_eq!(schema.schema_identifier(), "TEST1");
+      assert_eq!(schema.schema_name(), "test1");
 
       let schema = get_schema(&txn, "test2").unwrap();
-      assert_eq!(schema.schema_identifier(), "TEST2");
+      assert_eq!(schema.schema_name(), "test2");
 
       let schema = get_schema(&txn, "test3").unwrap();
-      assert_eq!(schema.schema_identifier(), "TEST3");
+      assert_eq!(schema.schema_name(), "test3");
 
       assert!(get_schema(&txn, "test4").is_err());
     });
@@ -871,20 +892,23 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", empty_fields(), false).unwrap();
-      create_table(&txn, "test_schema", "table2", empty_fields(), false).unwrap();
-      create_table(&txn, "test_schema", "table3", empty_fields(), false).unwrap();
+      create_relation(&txn, "test_schema", "table1", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "test_schema", "table2", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "test_schema", "table3", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
 
     // Drop schema with tables is not allowed.
     dbc.with_txn(true, |txn| {
       assert_eq!(
         drop_schema(&txn, "test_schema", false, false),
-        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_string()))
+        Err(Error::SchemaIsNotEmpty("test_schema".to_string()))
       );
       assert_eq!(
         drop_schema(&txn, "test_schema", false, true /* optional */),
-        Err(Error::SchemaIsNotEmpty("TEST_SCHEMA".to_string()))
+        Err(Error::SchemaIsNotEmpty("test_schema".to_string()))
       );
     });
 
@@ -894,11 +918,11 @@ pub mod tests {
       assert!(get_schema(&txn, "test_schema").is_err());
     });
     dbc.with_txn(true, |txn| {
-      // Only INFORMATION_SCHEMA tables must be present.
-      let mut set = get_system_tables(&txn).unwrap();
+      // Only INFORMATION_SCHEMA relations must be present.
+      let mut set = get_system_relations(&txn).unwrap();
       let mut iter = set.list(None, None);
-      assert_eq!(iter.next().unwrap().0, to_unique_table_key(0, "SCHEMATA"));
-      assert_eq!(iter.next().unwrap().0, to_unique_table_key(0, "TABLES"));
+      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, "RELATIONS"));
+      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, "SCHEMATA"));
       assert_eq!(iter.next(), None);
     });
   }
@@ -909,8 +933,8 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table", empty_fields(), false),
-        Err(Error::SchemaDoesNotExist("TEST_SCHEMA".to_string()))
+        create_relation(&txn, "test_schema", "table", RelationType::TABLE, empty_fields(), false),
+        Err(Error::SchemaDoesNotExist("test_schema".to_string()))
       );
     });
   }
@@ -919,41 +943,43 @@ pub mod tests {
   fn test_catalog_create_table() {
     let mut dbc = init_db();
 
-    // Create a new table.
+    // Create a new relation.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table1", empty_fields(), false).unwrap();
+      create_relation(&txn, "test_schema", "table1", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
     dbc.with_txn(true, |txn| {
-      let (schema, table) = get_table(&txn, "test_schema", "table1").unwrap();
+      let (schema, relation) = get_relation(&txn, "test_schema", "table1").unwrap();
       assert_eq!(schema.schema_id(), 3);
-      assert_eq!(schema.schema_identifier(), "TEST_SCHEMA");
-      assert_eq!(table.schema_id(), 3);
-      assert_eq!(table.table_id(), 4);
-      assert_eq!(table.table_identifier(), "TABLE1");
-      assert_eq!(table.table_type(), TableType::TABLE);
+      assert_eq!(schema.schema_name(), "test_schema");
+      assert_eq!(relation.schema_id(), 3);
+      assert_eq!(relation.relation_id(), 4);
+      assert_eq!(relation.relation_name(), "table1");
+      assert_eq!(relation.relation_type(), RelationType::TABLE);
     });
 
-    // Create table with the same name.
+    // Create relation with the same name.
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", empty_fields(), false),
-        Err(Error::TableAlreadyExists("TEST_SCHEMA".to_string(), "TABLE1".to_string()))
+        create_relation(&txn, "test_schema", "table1", RelationType::TABLE, empty_fields(), false),
+        Err(Error::RelationAlreadyExists("test_schema".to_string(), "table1".to_string()))
       );
       assert_eq!(
-        create_table(&txn, "test_schema", "table1", empty_fields(), true),
+        create_relation(&txn, "test_schema", "table1", RelationType::TABLE, empty_fields(), true),
         Ok(())
       );
     });
 
-    // Rollback - table should not be created.
+    // Rollback - relation should not be created.
     dbc.with_txn(false, |txn| {
-      create_table(&txn, "test_schema", "table2", empty_fields(), false).unwrap();
-      assert!(get_table(&txn, "test_schema", "table2").is_ok());
+      create_relation(&txn, "test_schema", "table2", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      assert!(get_relation(&txn, "test_schema", "table2").is_ok());
       txn.borrow_mut().rollback();
     });
     dbc.with_txn(true, |txn| {
-      assert!(get_table(&txn, "test_schema", "table2").is_err());
+      assert!(get_relation(&txn, "test_schema", "table2").is_err());
     });
   }
 
@@ -963,18 +989,19 @@ pub mod tests {
 
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "test_schema", false).unwrap();
-      create_table(&txn, "test_schema", "table", empty_fields(), false).unwrap();
+      create_relation(&txn, "test_schema", "table", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
 
     dbc.with_txn(true, |txn| {
-      let (schema, table) = get_table(&txn, "test_schema", "table").unwrap();
+      let (schema, relation) = get_relation(&txn, "test_schema", "table").unwrap();
       assert_eq!(schema.schema_id(), 3);
-      assert_eq!(schema.schema_identifier(), "TEST_SCHEMA");
-      assert_eq!(table.table_id(), 4);
-      assert_eq!(table.schema_id(), 3);
-      assert_eq!(table.table_identifier(), "TABLE");
-      assert_eq!(table.table_type(), TableType::TABLE);
-      assert_eq!(table.table_fields(), &empty_fields());
+      assert_eq!(schema.schema_name(), "test_schema");
+      assert_eq!(relation.relation_id(), 4);
+      assert_eq!(relation.schema_id(), 3);
+      assert_eq!(relation.relation_name(), "table");
+      assert_eq!(relation.relation_type(), RelationType::TABLE);
+      assert_eq!(relation.relation_fields(), &empty_fields());
     });
   }
 
@@ -985,36 +1012,42 @@ pub mod tests {
     // Create different schemas and tables.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema1", false).unwrap();
-      create_table(&txn, "schema1", "table1", empty_fields(), false).unwrap();
-      create_table(&txn, "schema1", "table2", empty_fields(), false).unwrap();
-      create_table(&txn, "schema1", "table3", empty_fields(), false).unwrap();
+      create_relation(&txn, "schema1", "table1", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "schema1", "table2", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "schema1", "table3", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
 
       create_schema(&txn, "schema2", false).unwrap();
-      create_table(&txn, "schema2", "table4", empty_fields(), false).unwrap();
-      create_table(&txn, "schema2", "table5", empty_fields(), false).unwrap();
-      create_table(&txn, "schema2", "table6", empty_fields(), false).unwrap();
+      create_relation(&txn, "schema2", "table4", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "schema2", "table5", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      create_relation(&txn, "schema2", "table6", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
 
     // Verify that we only return tables for the selected schema.
     dbc.with_txn(true, |txn| {
-      let (schema, mut iter) = list_tables(&txn, "schema1").unwrap();
-      assert_eq!(schema.schema_identifier(), "SCHEMA1");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE1");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE2");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE3");
+      let (schema, mut iter) = list_relations(&txn, "schema1").unwrap();
+      assert_eq!(schema.schema_name(), "schema1");
+      assert_eq!(iter.next().unwrap().relation_name(), "table1");
+      assert_eq!(iter.next().unwrap().relation_name(), "table2");
+      assert_eq!(iter.next().unwrap().relation_name(), "table3");
       assert_eq!(iter.next(), None);
 
-      let (schema, mut iter) = list_tables(&txn, "schema2").unwrap();
-      assert_eq!(schema.schema_identifier(), "SCHEMA2");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE4");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE5");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLE6");
+      let (schema, mut iter) = list_relations(&txn, "schema2").unwrap();
+      assert_eq!(schema.schema_name(), "schema2");
+      assert_eq!(iter.next().unwrap().relation_name(), "table4");
+      assert_eq!(iter.next().unwrap().relation_name(), "table5");
+      assert_eq!(iter.next().unwrap().relation_name(), "table6");
       assert_eq!(iter.next(), None);
 
-      let (schema, mut iter) = list_tables(&txn, INFORMATION_SCHEMA).unwrap();
-      assert_eq!(schema.schema_identifier(), INFORMATION_SCHEMA);
-      assert_eq!(iter.next().unwrap().table_identifier(), "SCHEMATA");
-      assert_eq!(iter.next().unwrap().table_identifier(), "TABLES");
+      let (schema, mut iter) = list_relations(&txn, INFORMATION_SCHEMA).unwrap();
+      assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
+      assert_eq!(iter.next().unwrap().relation_name(), "RELATIONS");
+      assert_eq!(iter.next().unwrap().relation_name(), "SCHEMATA");
       assert_eq!(iter.next(), None);
     });
   }
@@ -1027,42 +1060,45 @@ pub mod tests {
       create_schema(&txn, "schema", false).unwrap();
     });
 
-    // Drop table in the same transaction.
+    // Drop relation in the same transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table1", empty_fields(), false).unwrap();
-      drop_table(&txn, "schema", "table1", false).unwrap();
-      assert!(get_table(&txn, "schema", "table1").is_err());
+      create_relation(&txn, "schema", "table1", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
+      drop_relation(&txn, "schema", "table1", false).unwrap();
+      assert!(get_relation(&txn, "schema", "table1").is_err());
     });
 
-    // Drop table in a separate transaction.
+    // Drop relation in a separate transaction.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table2", empty_fields(), false).unwrap();
+      create_relation(&txn, "schema", "table2", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
     dbc.with_txn(true, |txn| {
-      drop_table(&txn, "schema", "table2", false).unwrap();
-      assert!(get_table(&txn, "schema", "table2").is_err());
+      drop_relation(&txn, "schema", "table2", false).unwrap();
+      assert!(get_relation(&txn, "schema", "table2").is_err());
     });
 
-    // Drop table - table does not exist.
+    // Drop relation - relation does not exist.
     dbc.with_txn(true, |txn| {
       assert_eq!(
-        drop_table(&txn, "schema", "table3", false),
-        Err(Error::TableDoesNotExist("SCHEMA".to_string(), "TABLE3".to_string()))
+        drop_relation(&txn, "schema", "table3", false),
+        Err(Error::RelationDoesNotExist("schema".to_string(), "table3".to_string()))
       );
-      assert_eq!(drop_table(&txn, "schema", "table3", true), Ok(()));
+      assert_eq!(drop_relation(&txn, "schema", "table3", true), Ok(()));
     });
 
-    // Rollback - table is not dropped.
+    // Rollback - relation is not dropped.
     dbc.with_txn(true, |txn| {
-      create_table(&txn, "schema", "table4", empty_fields(), false).unwrap();
+      create_relation(&txn, "schema", "table4", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
     dbc.with_txn(false, |txn| {
-      drop_table(&txn, "schema", "table4", false).unwrap();
-      assert!(get_table(&txn, "schema", "table4").is_err());
+      drop_relation(&txn, "schema", "table4", false).unwrap();
+      assert!(get_relation(&txn, "schema", "table4").is_err());
       txn.borrow_mut().rollback();
     });
     dbc.with_txn(true, |txn| {
-      assert!(get_table(&txn, "schema", "table4").is_ok());
+      assert!(get_relation(&txn, "schema", "table4").is_ok());
     });
   }
 
@@ -1073,31 +1109,32 @@ pub mod tests {
     // Setup.
     dbc.with_txn(true, |txn| {
       create_schema(&txn, "schema", false).unwrap();
-      create_table(&txn, "schema", "table", empty_fields(), false).unwrap();
+      create_relation(&txn, "schema", "table", RelationType::TABLE, empty_fields(), false)
+        .unwrap();
     });
 
-    // Newly created table should not have a set.
+    // Newly created relation should not have a set.
     dbc.with_txn(true, |txn| {
-      let (_, info) = get_table(&txn, "schema", "table").unwrap();
-      let set = get_table_data(&txn, &info);
+      let (_, info) = get_relation(&txn, "schema", "table").unwrap();
+      let set = get_relation_data(&txn, &info);
       assert!(set.is_none());
     });
 
-    // Create a set for a table.
+    // Create a set for a relation.
     dbc.with_txn(true, |txn| {
-      let (_, info) = get_table(&txn, "schema", "table").unwrap();
-      let set = create_table_data(&txn, &info);
+      let (_, info) = get_relation(&txn, "schema", "table").unwrap();
+      let set = create_relation_data(&txn, &info);
       assert!(set.is_ok());
 
       // Set exists in the transaction.
-      let mut set = get_table_data(&txn, &info).unwrap();
+      let mut set = get_relation_data(&txn, &info).unwrap();
       set.put(&[1], &[2]);
     });
 
-    // Get the set for an existing table.
+    // Get the set for an existing relation.
     dbc.with_txn(true, |txn| {
-      let (_, info) = get_table(&txn, "schema", "table").unwrap();
-      let set = get_table_data(&txn, &info);
+      let (_, info) = get_relation(&txn, "schema", "table").unwrap();
+      let set = get_relation_data(&txn, &info);
       assert!(set.is_some());
     });
   }

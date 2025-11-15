@@ -803,6 +803,13 @@ from
         (TokenType::IDENTIFIER, "b")
       ]
     );
+    assert_sql(
+      "1abc",
+      vec![
+        (TokenType::NUMBER, "1"),
+        (TokenType::IDENTIFIER, "abc")
+      ]
+    );
 
     // Escaped identifiers
     assert_sql("\"abc\"", vec![(TokenType::IDENTIFIER, "\"abc\"")]);

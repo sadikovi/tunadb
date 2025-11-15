@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::common::error::Res;
 use crate::core::trees::TreeNode;
 use crate::core::types::Fields;
-use crate::exec::catalog::{SchemaInfo, TableInfo};
+use crate::exec::catalog::{SchemaInfo, RelationInfo};
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -67,12 +67,12 @@ pub enum Plan {
   DropTable(
     Rc<Fields> /* output */,
     Rc<SchemaInfo> /* schema info */,
-    Rc<TableInfo> /* table info */
+    Rc<RelationInfo> /* table info */
   ),
   Filter(Rc<Fields> /* output */, Rc<Expression> /* filter expression */, Rc<Plan> /* child */),
   InsertInto(
     Rc<Fields> /* output */,
-    Rc<TableInfo> /* table info */,
+    Rc<RelationInfo> /* table info */,
     Rc<Fields> /* columns to insert */,
     Rc<Plan> /* query */
   ),
@@ -81,7 +81,7 @@ pub enum Plan {
   Project(Rc<Fields> /* output */, Rc<Vec<Expression>> /* expressions */, Rc<Plan> /* child */),
   TableScan(
     Rc<Fields> /* output */,
-    Rc<TableInfo> /* table info */,
+    Rc<RelationInfo> /* table info */,
     Option<Rc<String>> /* alias */
   ),
   UnresolvedCreateSchema(Rc<String> /* schema name */),
@@ -144,14 +144,14 @@ impl TreeNode<Plan> for Plan {
       Plan::CreateSchema(_, ref schema_name) => write!(f, "CreateSchema({})", schema_name),
       Plan::CreateTable(_, _, _, _) => write!(f, "CreateTable"),
       Plan::DropSchema(_, ref schema_info, cascade) => {
-        write!(f, "DropSchema({}, {})", schema_info.schema_identifier(), cascade)
+        write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
       },
       Plan::DropTable(_, ref schema_info, ref table_info) => {
         write!(
           f,
           "DropTable[{}.{}]",
-          schema_info.schema_identifier(),
-          table_info.table_identifier()
+          schema_info.schema_name(),
+          table_info.relation_name()
         )
       },
       Plan::Filter(_, _, _) => write!(f, "Filter"),

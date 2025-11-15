@@ -6,6 +6,40 @@ use crate::core::types::{Field, Fields, Type};
 use crate::exec::plan::{Expression, Plan};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
+// Returns true if the value is a singl-word identifier, i.e. not the escaped identifier.
+fn is_single_word_identifier(value: &str) -> bool {
+  for &b in value.as_bytes() {
+    let is_single_word =
+      b >= b'0' && b <= b'9' ||
+      b == b'_' ||
+      b >= b'A' && b <= b'Z' ||
+      b >= b'a' && b <= b'z';
+    if !is_single_word {
+      return false;
+    }
+  }
+
+  true
+}
+
+// Returns normalised identifier.
+fn str_to_norm_identifier(value: &str) -> String {
+  if is_single_word_identifier(value) {
+    value.to_lowercase()
+  } else {
+    value.to_string()
+  }
+}
+
+// Returns normalised identifier or self if no changes are needed.
+fn string_to_norm_identifier(mut value: String) -> String {
+  if is_single_word_identifier(&value) {
+    value.make_ascii_lowercase();
+  }
+
+  value
+}
+
 // Parser for the SQL queries.
 pub struct Parser<'a> {
   sql: &'a str,
@@ -133,7 +167,7 @@ impl<'a> Parser<'a> {
         if last_char == '"' {
           part.pop(); // removes the last double quote.
         }
-        parts.push(part);
+        parts.push(string_to_norm_identifier(part));
 
         if !self.matches(TokenType::DOT)? {
           return Ok(Expression::Identifier(Rc::new(parts)));
@@ -363,13 +397,13 @@ impl<'a> Parser<'a> {
 
       Ok(
         (
-          Some(Rc::new(part1_token.value(&self.sql).to_string())),
-          Rc::new(part2_token.value(&self.sql).to_string())
+          Some(Rc::new(str_to_norm_identifier(part1_token.value(&self.sql)))),
+          Rc::new(str_to_norm_identifier(part2_token.value(&self.sql)))
         )
       )
     } else {
       // We have [table] with the current schema.
-      Ok((None, Rc::new(part1_token.value(&self.sql).to_string())))
+      Ok((None, Rc::new(str_to_norm_identifier(part1_token.value(&self.sql)))))
     }
   }
 
@@ -378,12 +412,12 @@ impl<'a> Parser<'a> {
   #[inline]
   fn optional_alias(&mut self) -> Res<Option<Rc<String>>> {
     if self.check(TokenType::IDENTIFIER) {
-      let value = self.current.value(&self.sql).to_string();
+      let value = str_to_norm_identifier(self.current.value(&self.sql));
       self.advance()?;
       Ok(Some(Rc::new(value)))
     } else if self.matches(TokenType::AS)? {
       let token = self.consume(TokenType::IDENTIFIER, "Expected an identifier after AS")?;
-      let value = token.value(&self.sql).to_string();
+      let value = str_to_norm_identifier(token.value(&self.sql));
       Ok(Some(Rc::new(value)))
     } else {
       // There is no alias.
@@ -478,7 +512,7 @@ impl<'a> Parser<'a> {
     if self.matches(TokenType::PAREN_LEFT)? {
       loop {
         let col_name = self.consume(TokenType::IDENTIFIER, "Expected column name")?;
-        columns.push(col_name.value(&self.sql).to_string());
+        columns.push(str_to_norm_identifier(col_name.value(&self.sql)));
 
         if self.matches(TokenType::COMMA)? {
           // Continue parsing identifiers.
@@ -551,7 +585,7 @@ impl<'a> Parser<'a> {
   #[inline]
   fn create_schema_statement(&mut self) -> Res<Plan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
-    Ok(Plan::UnresolvedCreateSchema(Rc::new(token.value(&self.sql).to_string())))
+    Ok(Plan::UnresolvedCreateSchema(Rc::new(str_to_norm_identifier(token.value(&self.sql)))))
   }
 
   #[inline]
@@ -574,19 +608,9 @@ impl<'a> Parser<'a> {
         col_nullable = false;
       }
 
-      match Field::new(col_name.value(&self.sql), col_type, col_nullable) {
-        Ok(field) => {
-          fields.push(field);
-        },
-        Err(err) => {
-          return Err(
-            self.error_at(
-              &self.current,
-              &format!("Error while creating a field: {:?}", err)
-            )
-          );
-        },
-      }
+      fields.push(
+        Field::new(str_to_norm_identifier(col_name.value(&self.sql)), col_type, col_nullable)
+      );
 
       if self.matches(TokenType::COMMA)? {
         // Continue parsing fields.
@@ -597,26 +621,19 @@ impl<'a> Parser<'a> {
 
     self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
 
-    let schema = match Fields::new(fields) {
-      Ok(fields) => fields,
-      Err(err) => {
-        return Err(
-          self.error_at(
-            &self.current,
-            &format!("Error in table schema: {:?}", err)
-          )
-        );
-      },
-    };
-
-    Ok(Plan::UnresolvedCreateTable(schema_name, table_name, Rc::new(schema)))
+    Ok(Plan::UnresolvedCreateTable(schema_name, table_name, Rc::new(Fields::new(fields))))
   }
 
   #[inline]
   fn drop_schema_statement(&mut self) -> Res<Plan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
     let is_cascade = self.matches(TokenType::CASCADE)?;
-    Ok(Plan::UnresolvedDropSchema(Rc::new(token.value(&self.sql).to_string()), is_cascade))
+    Ok(
+      Plan::UnresolvedDropSchema(
+        Rc::new(str_to_norm_identifier(token.value(&self.sql))),
+        is_cascade
+      )
+    )
   }
 
   #[inline]
@@ -832,7 +849,40 @@ pub mod tests {
   }
 
   #[test]
+  fn test_parser_expressions_identifier_functions() {
+    // Escaped identifier values.
+    assert_eq!(str_to_norm_identifier(""), "".to_string());
+    assert_eq!(str_to_norm_identifier("_"), "_".to_string());
+    assert_eq!(str_to_norm_identifier("01234"), "01234".to_string());
+    assert_eq!(str_to_norm_identifier("abc def"), "abc def".to_string());
+    assert_eq!(str_to_norm_identifier("ABC DEF"), "ABC DEF".to_string());
+    assert_eq!(str_to_norm_identifier("_123"), "_123".to_string());
+    assert_eq!(str_to_norm_identifier("_abc"), "_abc".to_string());
+    assert_eq!(str_to_norm_identifier("1abc"), "1abc".to_string());
+    assert_eq!(str_to_norm_identifier(" abc"), " abc".to_string());
+
+    // Single-word identifiers.
+    assert_eq!(str_to_norm_identifier("summary"), "summary".to_string());
+    assert_eq!(str_to_norm_identifier("SUMMARY"), "summary".to_string());
+    assert_eq!(str_to_norm_identifier("SuMmArY"), "summary".to_string());
+    assert_eq!(str_to_norm_identifier("s123456"), "s123456".to_string());
+    assert_eq!(str_to_norm_identifier("S123456"), "s123456".to_string());
+    assert_eq!(str_to_norm_identifier("S1_2_3_4"), "s1_2_3_4".to_string());
+    assert_eq!(str_to_norm_identifier("aBcDeF_123"), "abcdef_123".to_string());
+    assert_eq!(str_to_norm_identifier("S"), "s".to_string());
+  }
+
+  #[test]
   fn test_parser_expressions_identifier() {
+    assert_plan(
+      "select 1abc1",
+      local(
+        vec![
+          alias(int(1), "abc1"),
+        ]
+      ),
+    );
+
     assert_plan(
       "select \"a b\", \"a \"\" b\", \"ab\"\"\"",
       local(
@@ -1026,7 +1076,7 @@ pub mod tests {
   #[test]
   fn test_parser_where() {
     assert_plan(
-      "select * from test where a",
+      "select * from TEST where a",
       filter(
         identifier("a"), // boolean column
         project(vec![star()], from(None, "test", None))
@@ -1034,7 +1084,7 @@ pub mod tests {
     );
 
     assert_plan(
-      "select * from test where 1 = 2 and a > b or c < d",
+      "select * from TEST where 1 = 2 and a > b or c < d",
       filter(
         or(
           and(
@@ -1105,6 +1155,14 @@ pub mod tests {
 
   #[test]
   fn test_parser_limit() {
+    assert_plan(
+      "select * from TEST_SCHEMA.TEST_TABLE as ABC limit 123",
+      limit(
+        123,
+        project(vec![star()], from(Some("test_schema"), "test_table", Some("abc")))
+      )
+    );
+
     assert_plan(
       "select * from test limit 123",
       limit(
@@ -1190,7 +1248,7 @@ pub mod tests {
   #[test]
   fn test_parser_insert_into_values() {
     assert_plan(
-      "insert into test_table values (1, 'a'), (2, 'b')",
+      "insert into TEST_TABLE values (1, 'a'), (2, 'b')",
       insert_into_values(
         None,
         "test_table",
@@ -1203,7 +1261,7 @@ pub mod tests {
     );
 
     assert_plan(
-      "insert into test_schema.test_table values (1, 'a'), (2, 'b')",
+      "insert into TEST_SCHEMA.TEST_TABLE values (1, 'a'), (2, 'b')",
       insert_into_values(
         Some("test_schema"),
         "test_table",
@@ -1232,7 +1290,7 @@ pub mod tests {
   #[test]
   fn test_parser_insert_into_select() {
     assert_plan(
-      "insert into test_schema.test_table select 1 as a, 2 as b",
+      "insert into TEST_SCHEMA.TEST_TABLE select 1 as a, 2 as b",
       insert_into_select(
         Some("test_schema"),
         "test_table",
@@ -1264,6 +1322,11 @@ pub mod tests {
 
   #[test]
   fn test_parser_create_schema() {
+    assert_plan(
+      "create schema TEST;",
+      create_schema("test")
+    );
+
     assert_plan(
       "create schema test;",
       create_schema("test")
@@ -1327,6 +1390,19 @@ pub mod tests {
   #[test]
   fn test_parser_create_table() {
     assert_plan(
+      "create table TEST_SCHEMA.TEST_TABLE (c0 int);",
+      create_table(
+        Some("test_schema"),
+        "test_table",
+        Fields::new(
+          vec![
+            Field::new("c0".to_string(), Type::INT, true),
+          ]
+        )
+      )
+    );
+
+    assert_plan(
       "create table test_schema.test_table (\n
         c0 bool, \n
         c1 int not null, \n
@@ -1340,20 +1416,25 @@ pub mod tests {
         "test_table",
         Fields::new(
           vec![
-            Field::new("c0", Type::BOOL, true).unwrap(),
-            Field::new("c1", Type::INT, false).unwrap(),
-            Field::new("c2", Type::BIGINT, true).unwrap(),
-            Field::new("c3", Type::FLOAT, false).unwrap(),
-            Field::new("c4", Type::DOUBLE, true).unwrap(),
-            Field::new("c5", Type::TEXT, true).unwrap(),
+            Field::new("c0".to_string(), Type::BOOL, true),
+            Field::new("c1".to_string(), Type::INT, false),
+            Field::new("c2".to_string(), Type::BIGINT, true),
+            Field::new("c3".to_string(), Type::FLOAT, false),
+            Field::new("c4".to_string(), Type::DOUBLE, true),
+            Field::new("c5".to_string(), Type::TEXT, true),
           ]
-        ).unwrap()
+        )
       )
     );
   }
 
   #[test]
   fn test_parser_drop_schema() {
+    assert_plan(
+      "drop schema TEST_SCHEMA;",
+      drop_schema("test_schema", false)
+    );
+
     assert_plan(
       "drop schema test_schema;",
       drop_schema("test_schema", false)
@@ -1367,6 +1448,11 @@ pub mod tests {
 
   #[test]
   fn test_parser_drop_table() {
+    assert_plan(
+      "drop table TEST_TABLE;",
+      drop_table(None, "test_table")
+    );
+
     assert_plan(
       "drop table test_table;",
       drop_table(None, "test_table")

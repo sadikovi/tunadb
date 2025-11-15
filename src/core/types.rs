@@ -1,8 +1,5 @@
-use std::collections::HashMap;
 use std::fmt;
-use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
-use crate::core::util::to_valid_identifier;
 
 const TYPE_BOOL: u8 = 1;
 const TYPE_INT: u8 = 2;
@@ -99,9 +96,8 @@ pub struct Field {
 
 impl Field {
   // Creates a new Field.
-  pub fn new(name: &str, data_type: Type, nullable: bool) -> Res<Self> {
-    let name = to_valid_identifier(name)?;
-    Ok(Self { name, data_type, nullable })
+  pub fn new(name: String, data_type: Type, nullable: bool) -> Self {
+    Self { name, data_type, nullable }
   }
 
   // Returns name of the field.
@@ -158,30 +154,12 @@ impl fmt::Display for Field {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fields {
   fields: Vec<Field>,
-  index: HashMap<String, usize>,
 }
 
 impl Fields {
   // Creates a new list of fields.
-  pub fn new(fields: Vec<Field>) -> Res<Self> {
-    Self::from(fields, false)
-  }
-
-  // Constructs `Fields` struct with an optional check on duplicates.
-  // The check is disabled when deserialising fields.
-  #[inline]
-  fn from(fields: Vec<Field>, ignore_duplicates: bool) -> Res<Self> {
-    let mut index = HashMap::new();
-    for i in 0..fields.len() {
-      let field = &fields[i];
-      let field_name = field.name.to_string();
-      if !index.contains_key(&field_name) {
-        index.insert(field_name, i);
-      } else if !ignore_duplicates {
-        return Err(Error::DuplicateFieldName(field_name))
-      }
-    }
-    Ok(Self { fields, index })
+  pub fn new(fields: Vec<Field>) -> Self {
+    Self { fields }
   }
 
   #[inline]
@@ -191,10 +169,13 @@ impl Fields {
 
   #[inline]
   pub fn get_field(&self, name: &str) -> Option<&Field> {
-    match self.index.get(name) {
-      Some(idx) => Some(&self.fields[*idx]),
-      None => None,
+    for field in &self.fields {
+      if field.name == name {
+        return Some(&field);
+      }
     }
+
+    None
   }
 
   #[inline]
@@ -218,11 +199,7 @@ impl SerDe for Fields {
     for _ in 0..len {
       fields.push(Field::deserialise(reader));
     }
-    match Self::from(fields, true /* ignore_duplicates */) {
-      Ok(res) => res,
-      // This error should never happen because we always serialise the correct schema.
-      Err(err) => unreachable!("Fields deserialisation failed with err {:?}", err),
-    }
+    Self::new(fields)
   }
 }
 
@@ -259,40 +236,40 @@ mod tests {
     test_types_convert_roundtrip(Type::FLOAT);
     test_types_convert_roundtrip(Type::DOUBLE);
     test_types_convert_roundtrip(Type::TEXT);
-    test_types_convert_roundtrip(Type::STRUCT(Fields::new(Vec::new()).unwrap()));
+    test_types_convert_roundtrip(Type::STRUCT(Fields::new(Vec::new())));
 
     // Struct type.
     let fields = vec![
-      Field::new("f0", Type::BOOL, true).unwrap(),
-      Field::new("f1", Type::INT, false).unwrap(),
-      Field::new("f2", Type::TEXT, true).unwrap(),
-      Field::new("f3", Type::BIGINT, false).unwrap(),
-      Field::new("f4", Type::FLOAT, true).unwrap(),
-      Field::new("f5", Type::DOUBLE, true).unwrap(),
+      Field::new("f0".to_string(), Type::BOOL, true),
+      Field::new("f1".to_string(), Type::INT, false),
+      Field::new("f2".to_string(), Type::TEXT, true),
+      Field::new("f3".to_string(), Type::BIGINT, false),
+      Field::new("f4".to_string(), Type::FLOAT, true),
+      Field::new("f5".to_string(), Type::DOUBLE, true),
     ];
-    test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields).unwrap()));
+    test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields)));
 
     // Nested types.
     let fields = vec![
-      Field::new("f1", Type::STRUCT(Fields::new(Vec::new()).unwrap()), true).unwrap(),
+      Field::new("f1".to_string(), Type::STRUCT(Fields::new(Vec::new())), true),
       Field::new(
-        "f2",
+        "f2".to_string(),
         Type::STRUCT(
           Fields::new(
             vec![
-              Field::new("f20", Type::BOOL, true).unwrap(),
-              Field::new("f21", Type::INT, false).unwrap(),
-              Field::new("f22", Type::TEXT, true).unwrap(),
-              Field::new("f23", Type::BIGINT, false).unwrap(),
-              Field::new("f24", Type::FLOAT, true).unwrap(),
-              Field::new("f25", Type::DOUBLE, false).unwrap(),
+              Field::new("f20".to_string(), Type::BOOL, true),
+              Field::new("f21".to_string(), Type::INT, false),
+              Field::new("f22".to_string(), Type::TEXT, true),
+              Field::new("f23".to_string(), Type::BIGINT, false),
+              Field::new("f24".to_string(), Type::FLOAT, true),
+              Field::new("f25".to_string(), Type::DOUBLE, false),
             ]
-          ).unwrap()
+          )
         ),
         true
-      ).unwrap(),
+      ),
     ];
-    test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields).unwrap()));
+    test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields)));
   }
 
   #[test]
@@ -303,7 +280,7 @@ mod tests {
     assert_eq!(Type::FLOAT.is_struct(), false);
     assert_eq!(Type::DOUBLE.is_struct(), false);
     assert_eq!(Type::TEXT.is_struct(), false);
-    assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).is_struct(), true);
+    assert_eq!(Type::STRUCT(Fields::new(vec![])).is_struct(), true);
   }
 
   #[test]
@@ -314,54 +291,59 @@ mod tests {
     assert_eq!(Type::FLOAT.num_fields(), 0);
     assert_eq!(Type::DOUBLE.num_fields(), 0);
     assert_eq!(Type::TEXT.num_fields(), 0);
-    assert_eq!(Type::STRUCT(Fields::new(vec![]).unwrap()).num_fields(), 0);
+    assert_eq!(Type::STRUCT(Fields::new(vec![])).num_fields(), 0);
     assert_eq!(
       Type::STRUCT(
         Fields::new(
           vec![
-            Field::new("a", Type::INT, false).unwrap(),
-            Field::new("b", Type::TEXT, false).unwrap(),
+            Field::new("a".to_string(), Type::INT, false),
+            Field::new("b".to_string(), Type::TEXT, false),
           ]
-        ).unwrap()
+        )
       ).num_fields(),
       2
     );
   }
 
   #[test]
-  fn test_types_field_requires_valid_identifier() {
-    assert!(Field::new("a b c", Type::INT, true).is_err());
-    assert!(Field::new("123", Type::INT, true).is_err());
-    assert!(Field::new("_", Type::INT, true).is_err());
-    assert!(Field::new("a+b", Type::INT, true).is_err());
+  fn test_types_field_not_valid_identifier() {
+    // We allow any field names, we don't check if the names are valid identifiers.
+    assert_eq!(Field::new("a b c".to_string(), Type::INT, true).name(), "a b c");
+    assert_eq!(Field::new("123".to_string(), Type::INT, true).name(), "123");
+    assert_eq!(Field::new("_".to_string(), Type::INT, true).name(), "_");
+    assert_eq!(Field::new("a+b".to_string(), Type::INT, true).name(), "a+b");
   }
 
   #[test]
   fn test_types_duplicate_field() {
+    // We allow duplicate fields to be stored, we return the first one.
     let fields = Fields::new(
       vec![
-        Field::new("f1", Type::INT, true).unwrap(),
-        Field::new("F1", Type::TEXT, false).unwrap(),
+        Field::new("f1".to_string(), Type::INT, true),
+        Field::new("F1".to_string(), Type::TEXT, false),
+        Field::new("F1".to_string(), Type::BOOL, false)
       ]
     );
-    assert_eq!(fields, Err(Error::DuplicateFieldName("F1".to_string())));
+
+    assert_eq!(fields.get_field("f1").map(|x| x.data_type()), Some(&Type::INT));
+    assert_eq!(fields.get_field("F1").map(|x| x.data_type()), Some(&Type::TEXT));
   }
 
   #[test]
   fn test_types_get_field_by_name() {
     let fields = Fields::new(
       vec![
-        Field::new("f1", Type::INT, true).unwrap(),
-        Field::new("f2", Type::TEXT, false).unwrap(),
+        Field::new("f1".to_string(), Type::INT, true),
+        Field::new("f2".to_string(), Type::TEXT, false),
       ]
-    ).unwrap();
+    );
 
-    assert!(fields.get_field("F1").is_some());
-    assert!(fields.get_field("F2").is_some());
-
-    assert!(fields.get_field("f1").is_none());
-    assert!(fields.get_field("f2").is_none());
+    assert!(fields.get_field("F1").is_none());
+    assert!(fields.get_field("F2").is_none());
     assert!(fields.get_field("F3").is_none());
+
+    assert!(fields.get_field("f1").is_some());
+    assert!(fields.get_field("f2").is_some());
   }
 
   #[test]
@@ -372,21 +354,21 @@ mod tests {
     assert_eq!(format!("{}", Type::FLOAT), "FLOAT");
     assert_eq!(format!("{}", Type::DOUBLE), "DOUBLE");
     assert_eq!(format!("{}", Type::TEXT), "TEXT");
-    assert_eq!(format!("{}", Type::STRUCT(Fields::new(vec![]).unwrap())), "STRUCT([])");
+    assert_eq!(format!("{}", Type::STRUCT(Fields::new(vec![]))), "STRUCT([])");
     assert_eq!(
       format!(
         "{}",
         Type::STRUCT(
           Fields::new(
             vec![
-              Field::new("f1", Type::INT, true).unwrap(),
-              Field::new("f2", Type::TEXT, false).unwrap(),
-              Field::new("f3", Type::STRUCT(Fields::new(vec![]).unwrap()), true).unwrap(),
+              Field::new("f1".to_string(), Type::INT, true),
+              Field::new("f2".to_string(), Type::TEXT, false),
+              Field::new("f3".to_string(), Type::STRUCT(Fields::new(vec![])), true),
             ]
-          ).unwrap()
+          )
         )
       ),
-      "STRUCT([F1 INT NULL, F2 TEXT, F3 STRUCT([]) NULL])"
+      "STRUCT([f1 INT NULL, f2 TEXT, f3 STRUCT([]) NULL])"
     );
   }
 }

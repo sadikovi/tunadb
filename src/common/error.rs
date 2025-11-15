@@ -13,15 +13,13 @@ pub enum Error {
   SQLAnalysisError(String /* error message */),
 
   // SQL catalog errors.
-  DuplicateFieldName(String /* field name */),
-  InvalidIdentifier(String /* msg */),
-  OperationIsNotAllowed(String /* msg */),
+  OperationIsNotAllowed(String /* error message */),
   SchemaAlreadyExists(String /* schema */),
   SchemaDoesNotExist(String /* schema */),
   SchemaIsNotEmpty(String /* schema */),
-  TableAlreadyExists(String /* schema */, String /* table */),
-  TableDoesNotExist(String /* schema */, String /* table */),
-  TableInvalidSchema(String /* msg */),
+  RelationAlreadyExists(String /* schema name */, String /* table name */),
+  RelationDoesNotExist(String /* schema name */, String /* relation name */),
+  RelationInvalidSchema(String /* error message */),
 
   // Internal errors.
 
