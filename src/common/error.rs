@@ -10,7 +10,12 @@ pub enum Error {
   SQLParseError(String /* error message */),
 
   // SQL analysis errors.
-  SQLAnalysisError(String /* error message */),
+  SQLAnalysisDuplicateField(String /* field name */),
+  SQLAnalysisUnresolvedPlan(String /* error message */),
+  SQLAnalysisSchemaAlreadyExists(String /* schema name */),
+  SQLAnalysisSchemaDoesNotExist(String /* schema name */),
+  SQLAnalysisTableAlreadyExists(String /* schema name */, String /* table name */),
+  SQLAnalysisTableDoesNotExist(String /* schema name */, String /* table name */),
 
   // SQL catalog errors.
   OperationIsNotAllowed(String /* error message */),

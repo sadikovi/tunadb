@@ -13,13 +13,6 @@ macro_rules! hex {
 // Error macros
 //==============
 
-macro_rules! analysis_err {
-  ($fmt:expr) =>
-    (crate::common::error::Error::SQLAnalysisError($fmt.to_string()));
-  ($fmt:expr, $($args:expr),*) =>
-    (crate::common::error::Error::SQLAnalysisError(format!($fmt, $($args),*)));
-}
-
 macro_rules! internal_err {
   ($fmt:expr) =>
     (crate::common::error::Error::InternalError($fmt.to_string()));

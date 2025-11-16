@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::core::types::{Field, Fields, Type};
-use crate::exec::plan::{Expression, Plan};
+use crate::exec::plan::{Expression, LogicalPlan};
 use crate::exec::scanner::{Scanner, Token, TokenType};
 
 // Returns true if the value is a singl-word identifier, i.e. not the escaped identifier.
@@ -452,42 +452,42 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn from_statement(&mut self) -> Res<Plan> {
+  fn from_statement(&mut self) -> Res<LogicalPlan> {
     let (schema_name, table_name) = self.table_identifier()?;
     // Parse optional alias:
     //   FROM table [alias]
     //   FROM table [AS alias]
     let table_alias = self.optional_alias()?;
-    Ok(Plan::UnresolvedTableScan(schema_name, table_name, table_alias))
+    Ok(LogicalPlan::UnresolvedTableScan(schema_name, table_name, table_alias))
   }
 
   #[inline]
-  fn where_statement(&mut self, plan: Plan) -> Res<Plan> {
+  fn where_statement(&mut self, plan: LogicalPlan) -> Res<LogicalPlan> {
     let expression = self.expression()?;
-    Ok(Plan::UnresolvedFilter(Rc::new(expression), Rc::new(plan)))
+    Ok(LogicalPlan::UnresolvedFilter(Rc::new(expression), Rc::new(plan)))
   }
 
   #[inline]
-  fn limit_statement(&mut self, plan: Plan) -> Res<Plan> {
+  fn limit_statement(&mut self, plan: LogicalPlan) -> Res<LogicalPlan> {
     // LIMIT <number>.
     let token = self.consume(TokenType::NUMBER, "Expected LIMIT value")?;
     match token.value(&self.sql).parse() {
-      Ok(value) => Ok(Plan::UnresolvedLimit(value, Rc::new(plan))),
+      Ok(value) => Ok(LogicalPlan::UnresolvedLimit(value, Rc::new(plan))),
       // We failed to parse the value for the limit node.
       Err(_) => Err(self.error_at(&token, "Invalid LIMIT number")),
     }
   }
 
   #[inline]
-  fn select_statement(&mut self) -> Res<Plan> {
+  fn select_statement(&mut self) -> Res<LogicalPlan> {
     // Parse the list of columns for projection.
     let expressions = self.expression_list()?;
 
     let mut plan = if self.matches(TokenType::FROM)? {
       let parent = self.from_statement()?;
-      Plan::UnresolvedProject(Rc::new(expressions), Rc::new(parent))
+      LogicalPlan::UnresolvedProject(Rc::new(expressions), Rc::new(parent))
     } else {
-      Plan::UnresolvedLocalRelation(Rc::new(vec![expressions]))
+      LogicalPlan::UnresolvedLocalRelation(Rc::new(vec![expressions]))
     };
 
     if self.matches(TokenType::WHERE)? {
@@ -502,7 +502,7 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn insert_statement(&mut self) -> Res<Plan> {
+  fn insert_statement(&mut self) -> Res<LogicalPlan> {
     self.consume(TokenType::INTO, "Expected INTO keyword")?;
     // Extract the table name.
     let (schema_name, table_name) = self.table_identifier()?;
@@ -567,7 +567,7 @@ impl<'a> Parser<'a> {
           break;
         }
       }
-      Plan::UnresolvedLocalRelation(Rc::new(rows))
+      LogicalPlan::UnresolvedLocalRelation(Rc::new(rows))
     } else if self.matches(TokenType::SELECT)? {
       self.select_statement()?
     } else {
@@ -579,17 +579,21 @@ impl<'a> Parser<'a> {
       );
     };
 
-    Ok(Plan::UnresolvedInsertInto(schema_name, table_name, Rc::new(columns), Rc::new(query)))
+    Ok(
+      LogicalPlan::UnresolvedInsertInto(schema_name, table_name, Rc::new(columns), Rc::new(query))
+    )
   }
 
   #[inline]
-  fn create_schema_statement(&mut self) -> Res<Plan> {
+  fn create_schema_statement(&mut self) -> Res<LogicalPlan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
-    Ok(Plan::UnresolvedCreateSchema(Rc::new(str_to_norm_identifier(token.value(&self.sql)))))
+    Ok(
+      LogicalPlan::UnresolvedCreateSchema(Rc::new(str_to_norm_identifier(token.value(&self.sql))))
+    )
   }
 
   #[inline]
-  fn create_table_statement(&mut self) -> Res<Plan> {
+  fn create_table_statement(&mut self) -> Res<LogicalPlan> {
     let (schema_name, table_name) = self.table_identifier()?;
     let mut fields = Vec::new();
 
@@ -621,15 +625,15 @@ impl<'a> Parser<'a> {
 
     self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
 
-    Ok(Plan::UnresolvedCreateTable(schema_name, table_name, Rc::new(Fields::new(fields))))
+    Ok(LogicalPlan::UnresolvedCreateTable(schema_name, table_name, Rc::new(Fields::new(fields))))
   }
 
   #[inline]
-  fn drop_schema_statement(&mut self) -> Res<Plan> {
+  fn drop_schema_statement(&mut self) -> Res<LogicalPlan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
     let is_cascade = self.matches(TokenType::CASCADE)?;
     Ok(
-      Plan::UnresolvedDropSchema(
+      LogicalPlan::UnresolvedDropSchema(
         Rc::new(str_to_norm_identifier(token.value(&self.sql))),
         is_cascade
       )
@@ -637,16 +641,16 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn drop_table_statement(&mut self) -> Res<Plan> {
+  fn drop_table_statement(&mut self) -> Res<LogicalPlan> {
     let (schema_name, table_name) = self.table_identifier()?;
-    Ok(Plan::UnresolvedDropTable(schema_name, table_name))
+    Ok(LogicalPlan::UnresolvedDropTable(schema_name, table_name))
   }
 
   #[inline]
-  fn statement(&mut self) -> Res<Plan> {
+  fn statement(&mut self) -> Res<LogicalPlan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture errors when there are extra tokens at the end of the statement.
-    let mut stmt: Option<Plan> = None;
+    let mut stmt: Option<LogicalPlan> = None;
 
     if self.matches(TokenType::CREATE)? {
       if self.matches(TokenType::SCHEMA)? {
@@ -693,7 +697,7 @@ impl<'a> Parser<'a> {
 
 // Returns a sequence of Plans corresponding to the input SQL string.
 // SQL string can contain one or more statements, each plan represents a statement/query.
-pub fn parse(sql: &str) -> Res<Vec<Plan>> {
+pub fn parse(sql: &str) -> Res<Vec<LogicalPlan>> {
   let mut scanner = Scanner::new(sql.as_bytes());
   let token = scanner.next_token();
 
@@ -718,7 +722,7 @@ pub mod tests {
   use crate::exec::plan::dsl::*;
 
   // Helper method to check the query plan.
-  fn assert_plans(query: &str, plans: Vec<Plan>) {
+  fn assert_plans(query: &str, plans: Vec<LogicalPlan>) {
     match parse(query) {
       Ok(v) => {
         assert_eq!(v.len(), plans.len());
@@ -735,7 +739,7 @@ pub mod tests {
     }
   }
 
-  fn assert_plan(query: &str, plan: Plan) {
+  fn assert_plan(query: &str, plan: LogicalPlan) {
     assert_plans(query, vec![plan]);
   }
 
