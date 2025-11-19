@@ -255,6 +255,7 @@ pub enum LogicalPlan {
   ),
   TableScan(
     Rc<Fields> /* output */,
+    Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
     Option<Rc<String>> /* alias */
   ),
@@ -296,7 +297,7 @@ impl LogicalPlan {
       LogicalPlan::Limit(ref output, _, _) => Ok(output.clone()),
       LogicalPlan::LocalRelation(ref output, _) => Ok(output.clone()),
       LogicalPlan::Project(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::TableScan(ref output, _, _) => Ok(output.clone()),
+      LogicalPlan::TableScan(ref output, _, _, _) => Ok(output.clone()),
       LogicalPlan::UnresolvedCreateSchema(_) => {
         Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateSchema".to_string()))
       },
@@ -354,8 +355,19 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::InsertInto(_, _, _, _) => write!(f, "InsertInto"),
       LogicalPlan::Limit(_, _, _) => write!(f, "Limit"),
       LogicalPlan::LocalRelation(_, _) => write!(f, "LocalRelation"),
-      LogicalPlan::Project(_, _, _) => write!(f, "Project"),
-      LogicalPlan::TableScan(_, _, _) => write!(f, "TableScan"),
+      LogicalPlan::Project(ref output, ref expressions, _) => {
+        write!(f, "Project({}, {:?})", output, expressions)
+      },
+      LogicalPlan::TableScan(ref output, ref schema_info, ref table_info, ref alias) => {
+        write!(
+          f,
+          "TableScan({}.{}, {:?}, {})",
+          schema_info.schema_name(),
+          table_info.relation_name(),
+          alias,
+          output
+        )
+      },
       LogicalPlan::UnresolvedCreateSchema(_) => write!(f, "UnresolvedCreateSchema"),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => write!(f, "UnresolvedCreateTable"),
       LogicalPlan::UnresolvedDropSchema(_, _) => write!(f, "UnresolvedDropSchema"),
@@ -386,7 +398,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::Limit(_, _, ref child) => vec![child],
       LogicalPlan::LocalRelation(_, _) => Vec::new(),
       LogicalPlan::Project(_, _, ref child) => vec![child],
-      LogicalPlan::TableScan(_, _, _) => Vec::new(),
+      LogicalPlan::TableScan(_, _, _, _) => Vec::new(),
       LogicalPlan::UnresolvedCreateSchema(_) => Vec::new(),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedDropSchema(_, _) => Vec::new(),
@@ -439,8 +451,13 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
         let child = get_unary!("Project", children);
         LogicalPlan::Project(schema.clone(), expressions.clone(), Rc::new(child))
       },
-      LogicalPlan::TableScan(ref output, ref info, ref table_alias) => {
-        LogicalPlan::TableScan(output.clone(), info.clone(), table_alias.clone())
+      LogicalPlan::TableScan(ref output, ref schema_info, ref table_info, ref table_alias) => {
+        LogicalPlan::TableScan(
+          output.clone(),
+          schema_info.clone(),
+          table_info.clone(),
+          table_alias.clone()
+        )
       },
       LogicalPlan::UnresolvedCreateSchema(ref schema_name) => {
         LogicalPlan::UnresolvedCreateSchema(schema_name.clone())
@@ -489,9 +506,9 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
   }
 }
 
-//========================
+//=========================
 // Plan and Expression DSL
-//========================
+//=========================
 
 pub mod dsl {
   use std::rc::Rc;
