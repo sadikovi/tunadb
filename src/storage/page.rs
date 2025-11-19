@@ -15,9 +15,9 @@ const FLAG_PAGE_IS_LEAF: u32 = 0x1;
 const FLAG_PAGE_IS_OVERFLOW: u32 = 0x2;
 const FLAG_PAGE_IS_INTERNAL: u32 = 0x4;
 
-//============
+//=============
 // Page header
-//============
+//=============
 
 // Page header:
 // - flags (4 bytes)
@@ -103,9 +103,9 @@ pub fn set_next_page(page: &mut [u8], page_id: u32) {
   write_u32!(&mut header[16..20], page_id);
 }
 
-//==========================
+//===========================
 // Shared page functionality
-//==========================
+//===========================
 
 // Returns slot for the given position.
 #[inline]
@@ -357,9 +357,9 @@ pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: 
   true
 }
 
-//==========
+//===========
 // Leaf page
-//==========
+//===========
 
 #[inline]
 pub fn leaf_init(page: &mut [u8]) {
@@ -782,9 +782,9 @@ pub fn bsearch(page: &[u8], key: &[u8], mngr: &mut dyn BlockManager) -> (usize, 
   }
 }
 
-//==============
+//===============
 // Overflow page
-//==============
+//===============
 
 #[inline]
 fn overflow_init(page: &mut [u8]) {
@@ -862,9 +862,9 @@ fn overflow_delete(mngr: &mut dyn BlockManager, mut page_id: u32) {
   }
 }
 
-//==============
+//===============
 // Internal page
-//==============
+//===============
 
 // Internal page structure is as follows:
 // [page header]

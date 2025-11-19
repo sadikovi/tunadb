@@ -135,9 +135,9 @@ impl Drop for Descriptor {
   }
 }
 
-//====================
+//=====================
 // Storage file layout
-//====================
+//=====================
 //
 // [HEADER][PAGE 0][PAGE 1]...[PAGE N]
 //
@@ -803,9 +803,9 @@ pub mod tests {
     StorageManager::builder().as_disk(path).with_page_size(page_size).build()
   }
 
-  //==============
+  //===============
   // Options tests
-  //==============
+  //===============
 
   #[test]
   fn test_storage_options_default() {
@@ -814,9 +814,9 @@ pub mod tests {
     assert_eq!(opts.page_size, DEFAULT_PAGE_SIZE);
   }
 
-  //============================
+  //=============================
   // StorageManagerBuilder tests
-  //============================
+  //=============================
 
   #[test]
   fn test_storage_storage_builder_mem() {
@@ -869,9 +869,9 @@ pub mod tests {
     StorageManagerBuilder::new().as_mem(0).with_page_size(MAX_PAGE_SIZE + 1).build();
   }
 
-  //=================
+  //==================
   // Descriptor tests
-  //=================
+  //==================
 
   #[test]
   #[should_panic(expected = "Write past EOF")]
@@ -1015,9 +1015,9 @@ pub mod tests {
     });
   }
 
-  //=====================
+  //======================
   // StorageManager tests
-  //=====================
+  //======================
 
   #[test]
   fn test_storage_manager_init_mem() {
@@ -1566,9 +1566,9 @@ pub mod tests {
     mngr.restore_from_free(100);
   }
 
-  //============================
+  //=============================
   // StorageManager fuzz testing
-  //============================
+  //=============================
 
   fn shuffle(input: &mut Vec<u32>) {
     input.shuffle(&mut thread_rng());

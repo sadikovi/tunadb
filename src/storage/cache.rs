@@ -7,9 +7,9 @@ use crate::storage::block::{BlockManager, BlockManagerStats};
 use crate::storage::page as pg;
 use crate::storage::smgr::{INVALID_PAGE_ID, StorageManager};
 
-//===========
+//============
 // Page cache
-//===========
+//============
 
 // Default memory for page cache.
 pub const DEFAULT_PAGE_CACHE_MEM: usize = 128 * 1024 * 1024;
@@ -486,9 +486,9 @@ impl BlockManager for PageCache {
   }
 }
 
-//=================
+//==================
 // No-op page cache
-//=================
+//==================
 
 // No-op page cache that delegates to the storage manager directly without any buffering.
 pub struct NoPageCache {
