@@ -1,18 +1,20 @@
 use std::fmt;
 use crate::common::serde::{Reader, SerDe, Writer};
 
-const TYPE_BOOL: u8 = 1;
-const TYPE_INT: u8 = 2;
-const TYPE_BIGINT: u8 = 3;
-const TYPE_FLOAT: u8 = 4;
-const TYPE_DOUBLE: u8 = 5;
-const TYPE_TEXT: u8 = 6;
+const TYPE_NULL: u8 = 1;
+const TYPE_BOOL: u8 = 2;
+const TYPE_INT: u8 = 3;
+const TYPE_BIGINT: u8 = 4;
+const TYPE_FLOAT: u8 = 5;
+const TYPE_DOUBLE: u8 = 6;
+const TYPE_TEXT: u8 = 7;
 const TYPE_STRUCT: u8 = 254;
 const TYPE_STRUCT_FIELD: u8 = 255;
 
 // Enum represents column type and/or table schema.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
+  NULL, // null
   BOOL, // bool
   INT, // i32
   BIGINT, // i64
@@ -45,6 +47,7 @@ impl Type {
 impl SerDe for Type {
   fn serialise(&self, writer: &mut Writer) {
     match self {
+      Type::NULL => writer.write_u8(TYPE_NULL),
       Type::BOOL => writer.write_u8(TYPE_BOOL),
       Type::INT => writer.write_u8(TYPE_INT),
       Type::BIGINT => writer.write_u8(TYPE_BIGINT),
@@ -60,6 +63,7 @@ impl SerDe for Type {
 
   fn deserialise(reader: &mut Reader) -> Self {
     match reader.read_u8() {
+      TYPE_NULL => Type::NULL,
       TYPE_BOOL => Type::BOOL,
       TYPE_INT => Type::INT,
       TYPE_BIGINT => Type::BIGINT,
@@ -75,6 +79,7 @@ impl SerDe for Type {
 impl fmt::Display for Type {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Type::NULL => write!(f, "NULL"),
       Type::BOOL => write!(f, "BOOL"),
       Type::INT => write!(f, "INT"),
       Type::BIGINT => write!(f, "BIGINT"),
@@ -230,6 +235,7 @@ mod tests {
 
   #[test]
   fn test_types_convert() {
+    test_types_convert_roundtrip(Type::NULL);
     test_types_convert_roundtrip(Type::BOOL);
     test_types_convert_roundtrip(Type::INT);
     test_types_convert_roundtrip(Type::BIGINT);
@@ -240,12 +246,13 @@ mod tests {
 
     // Struct type.
     let fields = vec![
-      Field::new("f0".to_string(), Type::BOOL, true),
-      Field::new("f1".to_string(), Type::INT, false),
-      Field::new("f2".to_string(), Type::TEXT, true),
-      Field::new("f3".to_string(), Type::BIGINT, false),
-      Field::new("f4".to_string(), Type::FLOAT, true),
-      Field::new("f5".to_string(), Type::DOUBLE, true),
+      Field::new("f0".to_string(), Type::NULL, true),
+      Field::new("f1".to_string(), Type::BOOL, true),
+      Field::new("f2".to_string(), Type::INT, false),
+      Field::new("f3".to_string(), Type::TEXT, true),
+      Field::new("f4".to_string(), Type::BIGINT, false),
+      Field::new("f5".to_string(), Type::FLOAT, true),
+      Field::new("f6".to_string(), Type::DOUBLE, true),
     ];
     test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields)));
 
@@ -257,12 +264,13 @@ mod tests {
         Type::STRUCT(
           Fields::new(
             vec![
-              Field::new("f20".to_string(), Type::BOOL, true),
-              Field::new("f21".to_string(), Type::INT, false),
-              Field::new("f22".to_string(), Type::TEXT, true),
-              Field::new("f23".to_string(), Type::BIGINT, false),
-              Field::new("f24".to_string(), Type::FLOAT, true),
-              Field::new("f25".to_string(), Type::DOUBLE, false),
+              Field::new("f20".to_string(), Type::NULL, false),
+              Field::new("f21".to_string(), Type::BOOL, true),
+              Field::new("f22".to_string(), Type::INT, false),
+              Field::new("f23".to_string(), Type::TEXT, true),
+              Field::new("f24".to_string(), Type::BIGINT, false),
+              Field::new("f25".to_string(), Type::FLOAT, true),
+              Field::new("f26".to_string(), Type::DOUBLE, false),
             ]
           )
         ),
@@ -274,6 +282,7 @@ mod tests {
 
   #[test]
   fn test_types_is_struct() {
+    assert_eq!(Type::NULL.is_struct(), false);
     assert_eq!(Type::BOOL.is_struct(), false);
     assert_eq!(Type::INT.is_struct(), false);
     assert_eq!(Type::BIGINT.is_struct(), false);
@@ -285,6 +294,7 @@ mod tests {
 
   #[test]
   fn test_types_num_fields() {
+    assert_eq!(Type::NULL.num_fields(), 0);
     assert_eq!(Type::BOOL.num_fields(), 0);
     assert_eq!(Type::INT.num_fields(), 0);
     assert_eq!(Type::BIGINT.num_fields(), 0);
@@ -348,6 +358,7 @@ mod tests {
 
   #[test]
   fn test_types_display() {
+    assert_eq!(format!("{}", Type::NULL), "NULL");
     assert_eq!(format!("{}", Type::BOOL), "BOOL");
     assert_eq!(format!("{}", Type::INT), "INT");
     assert_eq!(format!("{}", Type::BIGINT), "BIGINT");
