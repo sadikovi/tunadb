@@ -2,7 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::core::trees::TreeNode;
-use crate::core::types::Fields;
+use crate::core::types::{Fields, Type};
 use crate::exec::catalog::{SchemaInfo, RelationInfo};
 
 // Returns the unary child from `children` while asserting the `children` length.
@@ -59,6 +59,13 @@ pub enum Expression {
   Add(Rc<Expression>, Rc<Expression>),
   Alias(Rc<Expression>, Rc<String> /* alias name */),
   And(Rc<Expression>, Rc<Expression>),
+  ColumnRef(
+    u64 /* schema id */,
+    u64 /* table id */,
+    String /* column name */,
+    usize /* column index */,
+    Type /* column type */
+  ),
   Divide(Rc<Expression>, Rc<Expression>),
   Equals(Rc<Expression>, Rc<Expression>),
   GreaterThan(Rc<Expression>, Rc<Expression>),
@@ -81,6 +88,103 @@ pub enum Expression {
   UnaryMinus(Rc<Expression>),
 }
 
+impl Expression {
+  pub fn data_type(&self) -> Res<&Type> {
+    match self {
+      Expression::Add(ref left, ref right) => {
+        match (left.data_type()?, right.data_type()?) {
+          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
+          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
+          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
+          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
+          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
+          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
+          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
+          (&Type::INT, _) => Ok(&Type::INT),
+          (_, &Type::INT) => Ok(&Type::INT),
+          _ => todo!(),
+        }
+      },
+      Expression::Alias(ref child, _) => child.data_type(),
+      Expression::And(_, _) => Ok(&Type::BOOL),
+      Expression::ColumnRef(_, _, _, _, ref tpe) => Ok(tpe),
+      Expression::Divide(ref left, ref right) => {
+        match (left.data_type()?, right.data_type()?) {
+          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
+          (&Type::NULL, other) => Ok(other),
+          (other, &Type::NULL) => Ok(other),
+          (&Type::INT, &Type::INT) => Ok(&Type::DOUBLE),
+          (&Type::BIGINT, &Type::INT) => Ok(&Type::DOUBLE),
+          (&Type::INT, &Type::BIGINT) => Ok(&Type::DOUBLE),
+          (&Type::BIGINT, &Type::BIGINT) => Ok(&Type::DOUBLE),
+          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
+          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
+          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
+          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
+          _ => todo!(),
+        }
+      },
+      Expression::Equals(_, _) => Ok(&Type::BOOL),
+      Expression::GreaterThan(_, _) => Ok(&Type::BOOL),
+      Expression::GreaterThanEquals(_, _) => Ok(&Type::BOOL),
+      Expression::Identifier(ref parts) => {
+        Err(
+          Error::SQLAnalysisInvalidDataType(
+            format!("Identifier {:?} does not have a data type", parts)
+          )
+        )
+      },
+      Expression::LessThan(_, _) => Ok(&Type::BOOL),
+      Expression::LessThanEquals(_, _) => Ok(&Type::BOOL),
+      Expression::LiteralBool(_) => Ok(&Type::BOOL),
+      Expression::LiteralInt(_) => Ok(&Type::INT),
+      Expression::LiteralBigInt(_) => Ok(&Type::BIGINT),
+      Expression::LiteralFloat(_) => Ok(&Type::FLOAT),
+      Expression::LiteralDouble(_) => Ok(&Type::DOUBLE),
+      Expression::LiteralString(_) => Ok(&Type::TEXT),
+      Expression::Multiply(ref left, ref right) => {
+        match (left.data_type()?, right.data_type()?) {
+          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
+          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
+          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
+          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
+          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
+          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
+          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
+          (&Type::INT, _) => Ok(&Type::INT),
+          (_, &Type::INT) => Ok(&Type::INT),
+          _ => todo!(),
+        }
+      },
+      Expression::Null => Ok(&Type::NULL),
+      Expression::Or(_, _) => Ok(&Type::BOOL),
+      Expression::Star(ref parts) => {
+        Err(
+          Error::SQLAnalysisInvalidDataType(
+            format!("Star expression {:?} does not have a data type", parts)
+          )
+        )
+      },
+      Expression::Subtract(ref left, ref right) => {
+        match (left.data_type()?, right.data_type()?) {
+          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
+          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
+          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
+          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
+          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
+          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
+          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
+          (&Type::INT, _) => Ok(&Type::INT),
+          (_, &Type::INT) => Ok(&Type::INT),
+          _ => todo!(),
+        }
+      },
+      Expression::UnaryPlus(ref child) => child.data_type(),
+      Expression::UnaryMinus(ref child) => child.data_type(),
+    }
+  }
+}
+
 impl TreeNode<Expression> for Expression {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,6 +195,9 @@ impl TreeNode<Expression> for Expression {
         write!(f, " as {}", name)
       },
       Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
+      Expression::ColumnRef(ref schema_id, ref table_id, ref name, ref index, ref tpe) => {
+        write!(f, "{}#{}.{}#{}#{}", name, schema_id, table_id, index, tpe)
+      },
       Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
       Expression::GreaterThan(ref left, ref right) => display_binary!(f, left, ">", right),
@@ -125,6 +232,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Add(ref left, ref right) => vec![left, right],
       Expression::Alias(ref child, _) => vec![child],
       Expression::And(ref left, ref right) => vec![left, right],
+      Expression::ColumnRef(_, _, _, _, _) => Vec::new(),
       Expression::Divide(ref left, ref right) => vec![left, right],
       Expression::Equals(ref left, ref right) => vec![left, right],
       Expression::GreaterThan(ref left, ref right) => vec![left, right],
@@ -162,6 +270,9 @@ impl TreeNode<Expression> for Expression {
       Expression::And(_, _) => {
         let (left, right) = get_binary!("And", children);
         Expression::And(Rc::new(left), Rc::new(right))
+      },
+      Expression::ColumnRef(ref schema_id, ref table_id, ref name, ref index, ref tpe) => {
+        Expression::ColumnRef(*schema_id, *table_id, name.clone(), *index, tpe.clone())
       },
       Expression::Divide(_, _) => {
         let (left, right) = get_binary!("Divide", children);
@@ -688,8 +799,116 @@ pub mod dsl {
 
 #[cfg(test)]
 pub mod tests {
+  use super::*;
   use super::dsl::*;
   use crate::core::trees;
+
+  #[test]
+  fn test_plan_expression_type_promotion() {
+    assert_eq!(
+      Expression::Alias(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new("foo".to_string())
+      ).data_type(),
+      Ok(&Type::INT)
+    );
+    assert_eq!(
+      Expression::Add(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralBigInt(2)),
+      ).data_type(),
+      Ok(&Type::BIGINT)
+    );
+    assert_eq!(
+      Expression::And(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(&Type::DOUBLE)
+    );
+    assert_eq!(
+      Expression::Equals(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::GreaterThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::GreaterThanEquals(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::Null)
+      ).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::Identifier(Rc::new(vec!["foo".to_string()])).data_type(),
+      Err(
+        Error::SQLAnalysisInvalidDataType(
+          "Identifier [\"foo\"] does not have a data type".to_string()
+        )
+      )
+    );
+    assert_eq!(
+      Expression::LessThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::LessThanEquals(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(Expression::LiteralBool(true).data_type(), Ok(&Type::BOOL));
+    assert_eq!(Expression::LiteralInt(1i32).data_type(), Ok(&Type::INT));
+    assert_eq!(Expression::LiteralBigInt(1i64).data_type(), Ok(&Type::BIGINT));
+    assert_eq!(Expression::LiteralFloat(1f32).data_type(), Ok(&Type::FLOAT));
+    assert_eq!(Expression::LiteralDouble(1f64).data_type(), Ok(&Type::DOUBLE));
+    assert_eq!(Expression::LiteralString(Rc::new("foo".to_string())).data_type(), Ok(&Type::TEXT));
+    assert_eq!(
+      Expression::Multiply(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralFloat(1f32)),
+      ).data_type(),
+      Ok(&Type::FLOAT)
+    );
+    assert_eq!(Expression::Null.data_type(), Ok(&Type::NULL));
+    assert_eq!(
+      Expression::Or(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(&Type::BOOL)
+    );
+    assert_eq!(
+      Expression::Star(Rc::new(vec!["foo".to_string()])).data_type(),
+      Err(
+        Error::SQLAnalysisInvalidDataType(
+          "Star expression [\"foo\"] does not have a data type".to_string()
+        )
+      )
+    );
+    assert_eq!(
+      Expression::Subtract(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralDouble(2f64)),
+      ).data_type(),
+      Ok(&Type::DOUBLE)
+    );
+    assert_eq!(
+      Expression::UnaryPlus(Rc::new(Expression::LiteralInt(1))).data_type(),
+      Ok(&Type::INT)
+    );
+    assert_eq!(
+      Expression::UnaryMinus(Rc::new(Expression::LiteralFloat(1.1))).data_type(),
+      Ok(&Type::FLOAT)
+    );
+  }
 
   #[test]
   fn test_plan_display() {
