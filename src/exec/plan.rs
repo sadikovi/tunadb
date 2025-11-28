@@ -54,17 +54,16 @@ macro_rules! display_binary {
   }}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
   Add(Rc<Expression>, Rc<Expression>),
   Alias(Rc<Expression>, Rc<String> /* alias name */),
   And(Rc<Expression>, Rc<Expression>),
   ColumnRef(
-    u64 /* schema id */,
-    u64 /* table id */,
-    String /* column name */,
+    Rc<SchemaInfo> /* schema info */,
+    Rc<RelationInfo> /* table info */,
+    Option<Rc<String>> /* alias */,
     usize /* column index */,
-    Type /* column type */
   ),
   Divide(Rc<Expression>, Rc<Expression>),
   Equals(Rc<Expression>, Rc<Expression>),
@@ -102,12 +101,20 @@ impl Expression {
           (_, &Type::BIGINT) => Ok(&Type::BIGINT),
           (&Type::INT, _) => Ok(&Type::INT),
           (_, &Type::INT) => Ok(&Type::INT),
-          _ => todo!(),
+          (left, right) => {
+            Err(
+              Error::SQLAnalysisExpressionDataType(
+                format!("Cannot reconcile data types {} and {}", left, right)
+              )
+            )
+          },
         }
       },
       Expression::Alias(ref child, _) => child.data_type(),
       Expression::And(_, _) => Ok(&Type::BOOL),
-      Expression::ColumnRef(_, _, _, _, ref tpe) => Ok(tpe),
+      Expression::ColumnRef(_, ref table_info, _, ref idx) => {
+        Ok(table_info.relation_fields().get()[*idx].data_type())
+      },
       Expression::Divide(ref left, ref right) => {
         match (left.data_type()?, right.data_type()?) {
           (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
@@ -121,7 +128,13 @@ impl Expression {
           (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
           (&Type::FLOAT, _) => Ok(&Type::FLOAT),
           (_, &Type::FLOAT) => Ok(&Type::FLOAT),
-          _ => todo!(),
+          (left, right) => {
+            Err(
+              Error::SQLAnalysisExpressionDataType(
+                format!("Cannot reconcile data types {} and {}", left, right)
+              )
+            )
+          },
         }
       },
       Expression::Equals(_, _) => Ok(&Type::BOOL),
@@ -129,7 +142,7 @@ impl Expression {
       Expression::GreaterThanEquals(_, _) => Ok(&Type::BOOL),
       Expression::Identifier(ref parts) => {
         Err(
-          Error::SQLAnalysisInvalidDataType(
+          Error::SQLAnalysisUnresolvedExpression(
             format!("Identifier {:?} does not have a data type", parts)
           )
         )
@@ -153,14 +166,20 @@ impl Expression {
           (_, &Type::BIGINT) => Ok(&Type::BIGINT),
           (&Type::INT, _) => Ok(&Type::INT),
           (_, &Type::INT) => Ok(&Type::INT),
-          _ => todo!(),
+          (left, right) => {
+            Err(
+              Error::SQLAnalysisExpressionDataType(
+                format!("Cannot reconcile data types {} and {}", left, right)
+              )
+            )
+          },
         }
       },
       Expression::Null => Ok(&Type::NULL),
       Expression::Or(_, _) => Ok(&Type::BOOL),
       Expression::Star(ref parts) => {
         Err(
-          Error::SQLAnalysisInvalidDataType(
+          Error::SQLAnalysisUnresolvedExpression(
             format!("Star expression {:?} does not have a data type", parts)
           )
         )
@@ -176,11 +195,60 @@ impl Expression {
           (_, &Type::BIGINT) => Ok(&Type::BIGINT),
           (&Type::INT, _) => Ok(&Type::INT),
           (_, &Type::INT) => Ok(&Type::INT),
-          _ => todo!(),
+          (left, right) => {
+            Err(
+              Error::SQLAnalysisExpressionDataType(
+                format!("Cannot reconcile data types {} and {}", left, right)
+              )
+            )
+          },
         }
       },
       Expression::UnaryPlus(ref child) => child.data_type(),
       Expression::UnaryMinus(ref child) => child.data_type(),
+    }
+  }
+
+  pub fn nullable(&self) -> Res<bool> {
+    match self {
+      Expression::Add(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::Alias(ref child, _) => child.nullable(),
+      Expression::And(_, _) => Ok(false),
+      Expression::ColumnRef(_, ref table_info, _, ref idx) => {
+        Ok(table_info.relation_fields().get()[*idx].nullable())
+      },
+      Expression::Divide(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::Equals(_, _) => Ok(false),
+      Expression::GreaterThan(_, _) => Ok(false),
+      Expression::GreaterThanEquals(_, _) => Ok(false),
+      Expression::Identifier(ref parts) => {
+        Err(
+          Error::SQLAnalysisUnresolvedExpression(
+            format!("Identifier {:?} does not have nullable status", parts)
+          )
+        )
+      },
+      Expression::LessThan(_, _) => Ok(false),
+      Expression::LessThanEquals(_, _) => Ok(false),
+      Expression::LiteralBool(_) => Ok(false),
+      Expression::LiteralInt(_) => Ok(false),
+      Expression::LiteralBigInt(_) => Ok(false),
+      Expression::LiteralFloat(_) => Ok(false),
+      Expression::LiteralDouble(_) => Ok(false),
+      Expression::LiteralString(_) => Ok(false),
+      Expression::Multiply(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::Null => Ok(true),
+      Expression::Or(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::Star(ref parts) => {
+        Err(
+          Error::SQLAnalysisUnresolvedExpression(
+            format!("Star expression {:?} does not have nullable status", parts)
+          )
+        )
+      },
+      Expression::Subtract(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::UnaryPlus(ref child) => child.nullable(),
+      Expression::UnaryMinus(ref child) => child.nullable(),
     }
   }
 }
@@ -195,8 +263,10 @@ impl TreeNode<Expression> for Expression {
         write!(f, " as {}", name)
       },
       Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
-      Expression::ColumnRef(ref schema_id, ref table_id, ref name, ref index, ref tpe) => {
-        write!(f, "{}#{}.{}#{}#{}", name, schema_id, table_id, index, tpe)
+      Expression::ColumnRef(_, ref table_info, _, ref index) => {
+        let name = table_info.relation_fields().get()[*index].name();
+        let tpe = table_info.relation_fields().get()[*index].data_type();
+        write!(f, "{}#{}#{}", name, index, tpe)
       },
       Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
@@ -232,7 +302,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Add(ref left, ref right) => vec![left, right],
       Expression::Alias(ref child, _) => vec![child],
       Expression::And(ref left, ref right) => vec![left, right],
-      Expression::ColumnRef(_, _, _, _, _) => Vec::new(),
+      Expression::ColumnRef(_, _, _, _) => Vec::new(),
       Expression::Divide(ref left, ref right) => vec![left, right],
       Expression::Equals(ref left, ref right) => vec![left, right],
       Expression::GreaterThan(ref left, ref right) => vec![left, right],
@@ -271,8 +341,8 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("And", children);
         Expression::And(Rc::new(left), Rc::new(right))
       },
-      Expression::ColumnRef(ref schema_id, ref table_id, ref name, ref index, ref tpe) => {
-        Expression::ColumnRef(*schema_id, *table_id, name.clone(), *index, tpe.clone())
+      Expression::ColumnRef(ref schema_info, ref table_info, ref alias, ref index) => {
+        Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), *index)
       },
       Expression::Divide(_, _) => {
         let (left, right) = get_binary!("Divide", children);
@@ -333,42 +403,27 @@ impl TreeNode<Expression> for Expression {
 
 #[derive(Debug, PartialEq)]
 pub enum LogicalPlan {
-  CreateSchema(Rc<Fields> /* output */, Rc<String> /* schema name */),
+  CreateSchema(Rc<String> /* schema name */),
   CreateTable(
-    Rc<Fields> /* output */,
     Rc<String> /* schema name */,
     Rc<String> /* table name */,
     Rc<Fields> /* table schema */,
   ),
-  DropSchema(Rc<Fields> /* output */, Rc<SchemaInfo> /* schema info */, bool /* cascade */),
-  DropTable(
-    Rc<Fields> /* output */,
-    Rc<SchemaInfo> /* schema info */,
-    Rc<RelationInfo> /* table info */
-  ),
-  Filter(
-    Rc<Fields> /* output */,
-    Rc<Expression> /* filter expression */,
-    Rc<LogicalPlan> /* child */
-  ),
+  DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
+  DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+  Filter(Rc<Expression> /* filter expression */, Rc<LogicalPlan> /* child */),
   InsertInto(
-    Rc<Fields> /* output */,
     Rc<RelationInfo> /* table info */,
     Rc<Fields> /* columns to insert */,
-    Rc<LogicalPlan> /* query */
+    Rc<LogicalPlan> /* query */,
   ),
-  Limit(Rc<Fields> /* output */, usize /* limit */, Rc<LogicalPlan> /* child */),
-  LocalRelation(Rc<Fields> /* output */, Rc<Vec<Vec<Expression>>> /* expressions */),
-  Project(
-    Rc<Fields> /* output */,
-    Rc<Vec<Expression>> /* expressions */,
-    Rc<LogicalPlan> /* child */
-  ),
+  Limit(usize /* limit */, Rc<LogicalPlan> /* child */),
+  LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
+  Project(Rc<Vec<Expression>> /* expressions */, Rc<LogicalPlan> /* child */),
   TableScan(
-    Rc<Fields> /* output */,
     Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
-    Option<Rc<String>> /* alias */
+    Option<Rc<String>> /* alias */,
   ),
   UnresolvedCreateSchema(Rc<String> /* schema name */),
   UnresolvedCreateTable(
@@ -397,48 +452,29 @@ pub enum LogicalPlan {
 
 impl LogicalPlan {
   // Returns the fields/schema for the plan node.
-  pub fn output(&self) -> Res<Rc<Fields>> {
+  pub fn output(&self) -> Res<Vec<Expression>> {
     match self {
-      LogicalPlan::CreateSchema(ref output, _) => Ok(output.clone()),
-      LogicalPlan::CreateTable(ref output, _, _, _) => Ok(output.clone()),
-      LogicalPlan::DropSchema(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::DropTable(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::Filter(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::InsertInto(ref output, _, _, _) => Ok(output.clone()),
-      LogicalPlan::Limit(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::LocalRelation(ref output, _) => Ok(output.clone()),
-      LogicalPlan::Project(ref output, _, _) => Ok(output.clone()),
-      LogicalPlan::TableScan(ref output, _, _, _) => Ok(output.clone()),
-      LogicalPlan::UnresolvedCreateSchema(_) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateSchema".to_string()))
+      LogicalPlan::Filter(_, ref child) => child.output(),
+      LogicalPlan::Limit(_, ref child) => child.output(),
+      LogicalPlan::LocalRelation(ref expressions) => {
+        if expressions.len() > 0 {
+          Ok(expressions[0].to_vec())
+        } else {
+          Ok(Vec::new())
+        }
       },
-      LogicalPlan::UnresolvedCreateTable(_, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateTable".to_string()))
+      LogicalPlan::Project(ref expressions, _) => Ok(expressions.to_vec()),
+      LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
+        let fields = table_info.relation_fields().get();
+        let mut expressions = Vec::new();
+        for idx in 0..fields.len() {
+          expressions.push(
+            Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), idx)
+          );
+        }
+        Ok(expressions)
       },
-      LogicalPlan::UnresolvedDropSchema(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropSchema".to_string()))
-      },
-      LogicalPlan::UnresolvedDropTable(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropTable".to_string()))
-      },
-      LogicalPlan::UnresolvedFilter(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedFilter".to_string()))
-      },
-      LogicalPlan::UnresolvedInsertInto(_, _, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedInsertInto".to_string()))
-      },
-      LogicalPlan::UnresolvedLimit(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLimit".to_string()))
-      },
-      LogicalPlan::UnresolvedLocalRelation(_) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLocalRelation".to_string()))
-      },
-      LogicalPlan::UnresolvedProject(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedProject".to_string()))
-      },
-      LogicalPlan::UnresolvedTableScan(_, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedTableScan".to_string()))
-      },
+      _ => Ok(Vec::new()),
     }
   }
 }
@@ -447,14 +483,14 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
   #[inline]
   fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      LogicalPlan::CreateSchema(_, ref schema_name) => write!(f, "CreateSchema({})", schema_name),
-      LogicalPlan::CreateTable(_, ref schema_name, ref table_name, ref fields) => {
+      LogicalPlan::CreateSchema(ref schema_name) => write!(f, "CreateSchema({})", schema_name),
+      LogicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
         write!(f, "CreateTable({}.{}, {})", schema_name, table_name, fields)
       },
-      LogicalPlan::DropSchema(_, ref schema_info, cascade) => {
+      LogicalPlan::DropSchema(ref schema_info, cascade) => {
         write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
       },
-      LogicalPlan::DropTable(_, ref schema_info, ref table_info) => {
+      LogicalPlan::DropTable(ref schema_info, ref table_info) => {
         write!(
           f,
           "DropTable({}.{})",
@@ -462,21 +498,20 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
           table_info.relation_name()
         )
       },
-      LogicalPlan::Filter(_, _, _) => write!(f, "Filter"),
-      LogicalPlan::InsertInto(_, _, _, _) => write!(f, "InsertInto"),
-      LogicalPlan::Limit(_, _, _) => write!(f, "Limit"),
-      LogicalPlan::LocalRelation(_, _) => write!(f, "LocalRelation"),
-      LogicalPlan::Project(ref output, ref expressions, _) => {
-        write!(f, "Project({}, {:?})", output, expressions)
+      LogicalPlan::Filter(_, _) => write!(f, "Filter"),
+      LogicalPlan::InsertInto(_, _, _) => write!(f, "InsertInto"),
+      LogicalPlan::Limit(_, _) => write!(f, "Limit"),
+      LogicalPlan::LocalRelation(_) => write!(f, "LocalRelation"),
+      LogicalPlan::Project(ref expressions, _) => {
+        write!(f, "Project({:?})", expressions)
       },
-      LogicalPlan::TableScan(ref output, ref schema_info, ref table_info, ref alias) => {
+      LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
         write!(
           f,
-          "TableScan({}.{}, {:?}, {})",
+          "TableScan({}.{}, {:?})",
           schema_info.schema_name(),
           table_info.relation_name(),
-          alias,
-          output
+          alias
         )
       },
       LogicalPlan::UnresolvedCreateSchema(_) => write!(f, "UnresolvedCreateSchema"),
@@ -500,16 +535,16 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
   #[inline]
   fn children(&self) -> Vec<&LogicalPlan> {
     match self {
-      LogicalPlan::CreateSchema(_, _) => Vec::new(),
-      LogicalPlan::CreateTable(_, _, _, _) => Vec::new(),
-      LogicalPlan::DropSchema(_, _, _) => Vec::new(),
-      LogicalPlan::DropTable(_, _, _) => Vec::new(),
-      LogicalPlan::Filter(_, _, ref child) => vec![child],
-      LogicalPlan::InsertInto(_, _, _, ref query) => vec![query],
-      LogicalPlan::Limit(_, _, ref child) => vec![child],
-      LogicalPlan::LocalRelation(_, _) => Vec::new(),
-      LogicalPlan::Project(_, _, ref child) => vec![child],
-      LogicalPlan::TableScan(_, _, _, _) => Vec::new(),
+      LogicalPlan::CreateSchema(_) => Vec::new(),
+      LogicalPlan::CreateTable(_, _, _) => Vec::new(),
+      LogicalPlan::DropSchema(_, _) => Vec::new(),
+      LogicalPlan::DropTable(_, _) => Vec::new(),
+      LogicalPlan::Filter(_, ref child) => vec![child],
+      LogicalPlan::InsertInto(_, _, ref query) => vec![query],
+      LogicalPlan::Limit(_, ref child) => vec![child],
+      LogicalPlan::LocalRelation(_) => Vec::new(),
+      LogicalPlan::Project(_, ref child) => vec![child],
+      LogicalPlan::TableScan(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedCreateSchema(_) => Vec::new(),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedDropSchema(_, _) => Vec::new(),
@@ -526,49 +561,39 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
   #[inline]
   fn copy(&self, mut children: Vec<LogicalPlan>) -> LogicalPlan {
     match self {
-      LogicalPlan::CreateSchema(ref output, ref schema_name) => {
-        LogicalPlan::CreateSchema(output.clone(), schema_name.clone())
+      LogicalPlan::CreateSchema(ref schema_name) => {
+        LogicalPlan::CreateSchema(schema_name.clone())
       },
-      LogicalPlan::CreateTable(ref output, ref schema_name, ref table_name, ref schema) => {
-        LogicalPlan::CreateTable(
-          output.clone(),
-          schema_name.clone(),
-          table_name.clone(),
-          schema.clone()
-        )
+      LogicalPlan::CreateTable(ref schema_name, ref table_name, ref schema) => {
+        LogicalPlan::CreateTable(schema_name.clone(), table_name.clone(), schema.clone())
       },
-      LogicalPlan::DropSchema(ref output, ref schema_info, cascade) => {
-        LogicalPlan::DropSchema(output.clone(), schema_info.clone(), *cascade)
+      LogicalPlan::DropSchema(ref schema_info, cascade) => {
+        LogicalPlan::DropSchema(schema_info.clone(), *cascade)
       },
-      LogicalPlan::DropTable(ref output, ref schema_info, ref table_info) => {
-        LogicalPlan::DropTable(output.clone(), schema_info.clone(), table_info.clone())
+      LogicalPlan::DropTable(ref schema_info, ref table_info) => {
+        LogicalPlan::DropTable(schema_info.clone(), table_info.clone())
       },
-      LogicalPlan::Filter(ref schema, ref expression, _) => {
+      LogicalPlan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
-        LogicalPlan::Filter(schema.clone(), expression.clone(), Rc::new(child))
+        LogicalPlan::Filter(expression.clone(), Rc::new(child))
       },
-      LogicalPlan::InsertInto(ref output, ref table_info, ref cols, _) => {
+      LogicalPlan::InsertInto(ref table_info, ref cols, _) => {
         let child = get_unary!("InsertInto", children);
-        LogicalPlan::InsertInto(output.clone(), table_info.clone(), cols.clone(), Rc::new(child))
+        LogicalPlan::InsertInto(table_info.clone(), cols.clone(), Rc::new(child))
       },
-      LogicalPlan::Limit(ref schema, limit, _) => {
+      LogicalPlan::Limit(limit, _) => {
         let child = get_unary!("Limit", children);
-        LogicalPlan::Limit(schema.clone(), *limit, Rc::new(child))
+        LogicalPlan::Limit(*limit, Rc::new(child))
       },
-      LogicalPlan::LocalRelation(ref schema, ref expressions) => {
-        LogicalPlan::LocalRelation(schema.clone(), expressions.clone())
+      LogicalPlan::LocalRelation(ref expressions) => {
+        LogicalPlan::LocalRelation(expressions.clone())
       },
-      LogicalPlan::Project(ref schema, ref expressions, _) => {
+      LogicalPlan::Project(ref expressions, _) => {
         let child = get_unary!("Project", children);
-        LogicalPlan::Project(schema.clone(), expressions.clone(), Rc::new(child))
+        LogicalPlan::Project(expressions.clone(), Rc::new(child))
       },
-      LogicalPlan::TableScan(ref output, ref schema_info, ref table_info, ref table_alias) => {
-        LogicalPlan::TableScan(
-          output.clone(),
-          schema_info.clone(),
-          table_info.clone(),
-          table_alias.clone()
-        )
+      LogicalPlan::TableScan(ref schema_info, ref table_info, ref table_alias) => {
+        LogicalPlan::TableScan(schema_info.clone(), table_info.clone(), table_alias.clone())
       },
       LogicalPlan::UnresolvedCreateSchema(ref schema_name) => {
         LogicalPlan::UnresolvedCreateSchema(schema_name.clone())
@@ -851,7 +876,7 @@ pub mod tests {
     assert_eq!(
       Expression::Identifier(Rc::new(vec!["foo".to_string()])).data_type(),
       Err(
-        Error::SQLAnalysisInvalidDataType(
+        Error::SQLAnalysisUnresolvedExpression(
           "Identifier [\"foo\"] does not have a data type".to_string()
         )
       )
@@ -888,7 +913,7 @@ pub mod tests {
     assert_eq!(
       Expression::Star(Rc::new(vec!["foo".to_string()])).data_type(),
       Err(
-        Error::SQLAnalysisInvalidDataType(
+        Error::SQLAnalysisUnresolvedExpression(
           "Star expression [\"foo\"] does not have a data type".to_string()
         )
       )
