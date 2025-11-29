@@ -443,6 +443,7 @@ pub enum LogicalPlan {
   UnresolvedLimit(usize /* limit */, Rc<LogicalPlan> /* child */),
   UnresolvedLocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   UnresolvedProject(Rc<Vec<Expression>> /* expressions */, Rc<LogicalPlan> /* child */),
+  UnresolvedSubquery(Option<Rc<String>> /* alias */, Rc<LogicalPlan> /* child */),
   UnresolvedTableScan(
     Option<Rc<String>> /* optional schema name */,
     Rc<String> /* table name */,
@@ -454,7 +455,12 @@ impl LogicalPlan {
   // Returns the fields/schema for the plan node.
   pub fn output(&self) -> Res<Vec<Expression>> {
     match self {
+      LogicalPlan::CreateSchema(_) => Ok(Vec::new()),
+      LogicalPlan::CreateTable(_, _, _) => Ok(Vec::new()),
+      LogicalPlan::DropSchema(_, _) => Ok(Vec::new()),
+      LogicalPlan::DropTable(_, _) => Ok(Vec::new()),
       LogicalPlan::Filter(_, ref child) => child.output(),
+      LogicalPlan::InsertInto(_, _, _) => Ok(Vec::new()),
       LogicalPlan::Limit(_, ref child) => child.output(),
       LogicalPlan::LocalRelation(ref expressions) => {
         if expressions.len() > 0 {
@@ -474,7 +480,17 @@ impl LogicalPlan {
         }
         Ok(expressions)
       },
-      _ => Ok(Vec::new()),
+      LogicalPlan::UnresolvedCreateSchema(_) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedCreateTable(_, _, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedDropSchema(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedDropTable(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedFilter(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedInsertInto(_, _, _, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedLimit(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedLocalRelation(_) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedProject(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedSubquery(_, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedTableScan(_, _, _) => Ok(Vec::new()),
     }
   }
 }
@@ -523,6 +539,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedLimit(_, _) => write!(f, "UnresolvedLimit"),
       LogicalPlan::UnresolvedLocalRelation(_) => write!(f, "UnresolvedLocalRelation"),
       LogicalPlan::UnresolvedProject(_, _) => write!(f, "UnresolvedProject"),
+      LogicalPlan::UnresolvedSubquery(_, _) => write!(f, "UnresolvedSubquery"),
       LogicalPlan::UnresolvedTableScan(_, _, _) => write!(f, "UnresolvedTableScan"),
     }
   }
@@ -554,6 +571,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedLimit(_, ref child) => vec![child],
       LogicalPlan::UnresolvedLocalRelation(_) => Vec::new(),
       LogicalPlan::UnresolvedProject(_, ref child) => vec![child],
+      LogicalPlan::UnresolvedSubquery(_, ref child) => vec![child],
       LogicalPlan::UnresolvedTableScan(_, _, _) => Vec::new(),
     }
   }
@@ -630,6 +648,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedProject(ref expressions, _) => {
         let child = get_unary!("UnresolvedProject", children);
         LogicalPlan::UnresolvedProject(expressions.clone(), Rc::new(child))
+      },
+      LogicalPlan::UnresolvedSubquery(ref alias, _) => {
+        let child = get_unary!("UnresolvedSubquery", children);
+        LogicalPlan::UnresolvedSubquery(alias.clone(), Rc::new(child))
       },
       LogicalPlan::UnresolvedTableScan(ref schema_name, ref table_name, ref table_alias) => {
         LogicalPlan::UnresolvedTableScan(
@@ -819,6 +841,10 @@ pub mod dsl {
 
   pub fn project(expressions: Vec<Expression>, child: LogicalPlan) -> LogicalPlan {
     LogicalPlan::UnresolvedProject(Rc::new(expressions), Rc::new(child))
+  }
+
+  pub fn subquery(child: LogicalPlan, alias: Option<&str>) -> LogicalPlan {
+    LogicalPlan::UnresolvedSubquery(alias.map(|x| Rc::new(x.to_string())), Rc::new(child))
   }
 }
 

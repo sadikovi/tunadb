@@ -453,12 +453,23 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn from_statement(&mut self) -> Res<LogicalPlan> {
-    let (schema_name, table_name) = self.table_identifier()?;
-    // Parse optional alias:
-    //   FROM table [alias]
-    //   FROM table [AS alias]
-    let table_alias = self.optional_alias()?;
-    Ok(LogicalPlan::UnresolvedTableScan(schema_name, table_name, table_alias))
+    // FROM <table reference>
+    //   (Subquery)
+    //   Table reference
+    if self.matches(TokenType::PAREN_LEFT)? {
+      self.matches(TokenType::SELECT)?;
+      let plan = self.select_statement()?;
+      self.matches(TokenType::PAREN_RIGHT)?;
+      let alias = self.optional_alias()?;
+      Ok(LogicalPlan::UnresolvedSubquery(alias, Rc::new(plan)))
+    } else {
+      let (schema_name, table_name) = self.table_identifier()?;
+      // Parse optional alias:
+      //   FROM table [alias]
+      //   FROM table [AS alias]
+      let table_alias = self.optional_alias()?;
+      Ok(LogicalPlan::UnresolvedTableScan(schema_name, table_name, table_alias))
+    }
   }
 
   #[inline]
@@ -1041,6 +1052,64 @@ pub mod tests {
           star(),
         ],
         from(Some("test_schema"), "test_table", None)
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_from_project() {
+    assert_plan(
+      "select * from (select a, b from foo.bar)",
+      project(
+        vec![
+          star(),
+        ],
+        subquery(
+          project(
+            vec![
+              identifier("a"),
+              identifier("b"),
+            ],
+            from(Some("foo"), "bar", None)
+          ),
+          None
+        )
+      )
+    );
+
+    assert_plan(
+      "select * from (select 1 as a, 2 as b)",
+      project(
+        vec![
+          star(),
+        ],
+        subquery(
+          local(
+            vec![
+              alias(int(1), "a"),
+              alias(int(2), "b"),
+            ]
+          ),
+          None
+        )
+      )
+    );
+
+    assert_plan(
+      "select foo.* from (select 1 as a, 2 as b) as foo",
+      project(
+        vec![
+          qualified_star(vec!["foo"]),
+        ],
+        subquery(
+          local(
+            vec![
+              alias(int(1), "a"),
+              alias(int(2), "b"),
+            ]
+          ),
+          Some("foo")
+        )
       )
     );
   }
