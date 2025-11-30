@@ -170,7 +170,8 @@ impl<'a> Parser<'a> {
         parts.push(string_to_norm_identifier(part));
 
         if !self.matches(TokenType::DOT)? {
-          return Ok(Expression::Identifier(Rc::new(parts)));
+          let identifier_name = parts.pop().expect("Identifier should have at least one part");
+          return Ok(Expression::Identifier(Rc::new(parts), Rc::new(identifier_name)));
         }
 
         // For the cases "identifer.*".
@@ -916,11 +917,11 @@ pub mod tests {
       "select a.b.c, 'a.b.c', \"a.b.c\", \"a\".\"b\".\"c\", \"a.b\".c",
       local(
         vec![
-          qualified_identifier(vec!["a", "b", "c"]),
+          qualified_identifier(vec!["a", "b"], "c"),
           string("a.b.c"),
           identifier("a.b.c"),
-          qualified_identifier(vec!["a", "b", "c"]),
-          qualified_identifier(vec!["a.b", "c"]),
+          qualified_identifier(vec!["a", "b"], "c"),
+          qualified_identifier(vec!["a.b"], "c"),
         ]
       ),
     );

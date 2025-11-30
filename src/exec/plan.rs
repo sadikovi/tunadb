@@ -102,7 +102,7 @@ pub enum Expression {
   Equals(Rc<Expression>, Rc<Expression>),
   GreaterThan(Rc<Expression>, Rc<Expression>),
   GreaterThanEquals(Rc<Expression>, Rc<Expression>),
-  Identifier(Rc<Vec<String>> /* identifier parts */),
+  Identifier(Rc<Vec<String>> /* identifier parts/origin */, Rc<String> /* name */),
   LessThan(Rc<Expression>, Rc<Expression>),
   LessThanEquals(Rc<Expression>, Rc<Expression>),
   LiteralBool(bool),
@@ -114,7 +114,7 @@ pub enum Expression {
   Multiply(Rc<Expression>, Rc<Expression>),
   Null,
   Or(Rc<Expression>, Rc<Expression>),
-  Star(Rc<Vec<String>> /* identifier parts */),
+  Star(Rc<Vec<String>> /* identifier parts/origin */),
   Subtract(Rc<Expression>, Rc<Expression>),
   UnaryPlus(Rc<Expression>),
   UnaryMinus(Rc<Expression>),
@@ -173,10 +173,15 @@ impl Expression {
       Expression::Equals(_, _) => Ok(&Type::BOOL),
       Expression::GreaterThan(_, _) => Ok(&Type::BOOL),
       Expression::GreaterThanEquals(_, _) => Ok(&Type::BOOL),
-      Expression::Identifier(ref parts) => {
+      Expression::Identifier(ref parts, ref name) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
-            format!("Identifier {:?} does not have a data type", parts)
+            format!(
+              "Identifier {}{}{} does not have a data type",
+              parts.join("."),
+              if parts.len() == 0 { "" } else { "." },
+              name
+            )
           )
         )
       },
@@ -213,7 +218,11 @@ impl Expression {
       Expression::Star(ref parts) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
-            format!("Star expression {:?} does not have a data type", parts)
+            format!(
+              "Star expression {}{}* does not have a data type",
+              parts.join("."),
+              if parts.len() == 0 { "" } else { "." }
+            )
           )
         )
       },
@@ -254,10 +263,15 @@ impl Expression {
       Expression::Equals(_, _) => Ok(false),
       Expression::GreaterThan(_, _) => Ok(false),
       Expression::GreaterThanEquals(_, _) => Ok(false),
-      Expression::Identifier(ref parts) => {
+      Expression::Identifier(ref parts, ref name) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
-            format!("Identifier {:?} does not have nullable status", parts)
+            format!(
+              "Identifier {}{}{} does not have nullable status",
+              parts.join("."),
+              if parts.len() == 0 { "" } else { "." },
+              name
+            )
           )
         )
       },
@@ -275,7 +289,7 @@ impl Expression {
       Expression::Star(ref parts) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
-            format!("Star expression {:?} does not have nullable status", parts)
+            format!("Star expression {} does not have nullable status", parts.join("."))
           )
         )
       },
@@ -305,7 +319,9 @@ impl TreeNode<Expression> for Expression {
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
       Expression::GreaterThan(ref left, ref right) => display_binary!(f, left, ">", right),
       Expression::GreaterThanEquals(ref left, ref right) => display_binary!(f, left, ">=", right),
-      Expression::Identifier(ref parts) => write!(f, "${}", parts.join(".")),
+      Expression::Identifier(ref parts, ref name) => {
+        write!(f, "${}{}{}", parts.join("."), if parts.len() == 0 { "" } else { "." }, name)
+      },
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
       Expression::LiteralBool(value) => write!(f, "{}", value),
@@ -317,7 +333,9 @@ impl TreeNode<Expression> for Expression {
       Expression::Multiply(ref left, ref right) => display_binary!(f, left, "x", right),
       Expression::Null => write!(f, "null"),
       Expression::Or(ref left, ref right) => display_binary!(f, left, "or", right),
-      Expression::Star(ref parts) => write!(f, "{}.*", parts.join(".")),
+      Expression::Star(ref parts) => {
+        write!(f, "${}{}*", parts.join("."), if parts.len() == 0 { "" } else { "." })
+      },
       Expression::Subtract(ref left, ref right) => display_binary!(f, left, "-", right),
       Expression::UnaryPlus(ref child) => display_unary!(f, "+", child),
       Expression::UnaryMinus(ref child) => display_unary!(f, "-", child),
@@ -340,7 +358,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Equals(ref left, ref right) => vec![left, right],
       Expression::GreaterThan(ref left, ref right) => vec![left, right],
       Expression::GreaterThanEquals(ref left, ref right) => vec![left, right],
-      Expression::Identifier(_) => Vec::new(),
+      Expression::Identifier(_, _) => Vec::new(),
       Expression::LessThan(ref left, ref right) => vec![left, right],
       Expression::LessThanEquals(ref left, ref right) => vec![left, right],
       Expression::LiteralBool(_) => Vec::new(),
@@ -393,7 +411,7 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("GreaterThanEquals", children);
         Expression::GreaterThanEquals(Rc::new(left), Rc::new(right))
       },
-      Expression::Identifier(parts) => Expression::Identifier(parts.clone()),
+      Expression::Identifier(parts, name) => Expression::Identifier(parts.clone(), name.clone()),
       Expression::LessThan(_, _) => {
         let (left, right) = get_binary!("LessThan", children);
         Expression::LessThan(Rc::new(left), Rc::new(right))
@@ -765,12 +783,15 @@ pub mod dsl {
 
   // Expressions.
 
-  pub fn qualified_identifier(parts: Vec<&str>) -> Expression {
-    Expression::Identifier(Rc::new(parts.into_iter().map(|x| x.to_string()).collect()))
+  pub fn qualified_identifier(parts: Vec<&str>, name: &str) -> Expression {
+    Expression::Identifier(
+      Rc::new(parts.into_iter().map(|x| x.to_string()).collect()),
+      Rc::new(name.to_string())
+    )
   }
 
   pub fn identifier(name: &str) -> Expression {
-    qualified_identifier(vec![name])
+    qualified_identifier(Vec::new(), name)
   }
 
   pub fn boolean(value: bool) -> Expression {
@@ -991,10 +1012,21 @@ pub mod tests {
       Ok(&Type::BOOL)
     );
     assert_eq!(
-      Expression::Identifier(Rc::new(vec!["foo".to_string()])).data_type(),
+      Expression::Identifier(
+        Rc::new(vec!["foo".to_string()]),
+        Rc::new("bar".to_string())
+      ).data_type(),
       Err(
         Error::SQLAnalysisUnresolvedExpression(
-          "Identifier [\"foo\"] does not have a data type".to_string()
+          "Identifier foo.bar does not have a data type".to_string()
+        )
+      )
+    );
+    assert_eq!(
+      Expression::Identifier(Rc::new(Vec::new()), Rc::new("bar".to_string())).data_type(),
+      Err(
+        Error::SQLAnalysisUnresolvedExpression(
+          "Identifier bar does not have a data type".to_string()
         )
       )
     );
@@ -1031,7 +1063,15 @@ pub mod tests {
       Expression::Star(Rc::new(vec!["foo".to_string()])).data_type(),
       Err(
         Error::SQLAnalysisUnresolvedExpression(
-          "Star expression [\"foo\"] does not have a data type".to_string()
+          "Star expression foo.* does not have a data type".to_string()
+        )
+      )
+    );
+    assert_eq!(
+      Expression::Star(Rc::new(Vec::new())).data_type(),
+      Err(
+        Error::SQLAnalysisUnresolvedExpression(
+          "Star expression * does not have a data type".to_string()
         )
       )
     );
@@ -1076,8 +1116,8 @@ pub mod tests {
     let expr = and(equals(int(1), int(2)), less_than(identifier("a"), string("abc")));
     assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))\n");
 
-    let expr = equals(alias(qualified_identifier(vec!["a", "b"]), "col"), string("abc"));
-    assert_eq!(trees::plan_output(&expr), "($a.b as col) = (abc)\n");
+    let expr = equals(alias(qualified_identifier(vec!["a", "b"], "c"), "col"), string("abc"));
+    assert_eq!(trees::plan_output(&expr), "($a.b.c as col) = (abc)\n");
 
     let expr = equals(alias(identifier("a"), "A"), _minus(int(2)));
     assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");
