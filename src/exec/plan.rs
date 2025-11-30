@@ -54,6 +54,39 @@ macro_rules! display_binary {
   }}
 }
 
+// Contains metadata for one or more expressions.
+pub struct ExpressionContext {
+  // Origin of the expression, e.g. `schema.table` or `alias` path to find the expression.
+  // Does not include expression name.
+  origin: Vec<String>,
+}
+
+impl ExpressionContext {
+  // Creates new expression context from origin.
+  fn new(origin: Vec<String>) -> Self {
+    Self { origin }
+  }
+
+  // Returns true if the suffix is a subset or the context origin or is empty.
+  pub fn matches_suffix(&self, suffix: &[String]) -> bool {
+    let origin_len = self.origin.len();
+    let suffix_len = suffix.len();
+
+    // Suffix must be within origin.
+    if suffix_len > origin_len {
+      return false;
+    }
+
+    for i in 0..suffix_len {
+      if &suffix[i] != &self.origin[origin_len - suffix_len + i] {
+        return false;
+      }
+    }
+
+    true
+  }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
   Add(Rc<Expression>, Rc<Expression>),
@@ -420,6 +453,7 @@ pub enum LogicalPlan {
   Limit(usize /* limit */, Rc<LogicalPlan> /* child */),
   LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<LogicalPlan> /* child */),
+  Subquery(Rc<String> /* alias */, Rc<LogicalPlan> /* child */),
   TableScan(
     Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
@@ -452,8 +486,8 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
-  // Returns the fields/schema for the plan node.
-  pub fn output(&self) -> Res<Vec<Expression>> {
+  // Returns the list of expressions that produce the output fields/schema for the plan node.
+  pub fn output(&self) -> Res<Vec<(Rc<ExpressionContext>, Expression)>> {
     match self {
       LogicalPlan::CreateSchema(_) => Ok(Vec::new()),
       LogicalPlan::CreateTable(_, _, _) => Ok(Vec::new()),
@@ -464,33 +498,86 @@ impl LogicalPlan {
       LogicalPlan::Limit(_, ref child) => child.output(),
       LogicalPlan::LocalRelation(ref expressions) => {
         if expressions.len() > 0 {
-          Ok(expressions[0].to_vec())
+          let ctx = Rc::new(ExpressionContext::new(Vec::new()));
+          let mut output = Vec::new();
+          for expr in &expressions[0] {
+            output.push((ctx.clone(), expr.clone()));
+          }
+          Ok(output)
         } else {
           Ok(Vec::new())
         }
       },
-      LogicalPlan::Project(ref expressions, _) => Ok(expressions.to_vec()),
+      LogicalPlan::Project(ref expressions, _) => {
+        let ctx = Rc::new(ExpressionContext::new(Vec::new()));
+        let mut output = Vec::new();
+        for expr in expressions.as_ref() {
+          output.push((ctx.clone(), expr.clone()));
+        }
+        Ok(output)
+      },
+      LogicalPlan::Subquery(ref alias, ref child) => {
+        let ctx = Rc::new(ExpressionContext::new(vec![alias.to_string()]));
+        let mut output = child.output()?;
+        for i in 0..output.len() {
+          output[i].0 = ctx.clone();
+        }
+        Ok(output)
+      },
       LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
+        let ctx = Rc::new(
+          ExpressionContext::new(
+            vec![
+              schema_info.schema_name().to_string(),
+              table_info.relation_name().to_string(),
+            ]
+          )
+        );
         let fields = table_info.relation_fields().get();
         let mut expressions = Vec::new();
         for idx in 0..fields.len() {
           expressions.push(
-            Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), idx)
+            (
+              ctx.clone(),
+              Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), idx)
+            )
           );
         }
         Ok(expressions)
       },
-      LogicalPlan::UnresolvedCreateSchema(_) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedCreateTable(_, _, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedDropSchema(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedDropTable(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedFilter(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedInsertInto(_, _, _, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedLimit(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedLocalRelation(_) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedProject(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedSubquery(_, _) => Ok(Vec::new()),
-      LogicalPlan::UnresolvedTableScan(_, _, _) => Ok(Vec::new()),
+      LogicalPlan::UnresolvedCreateSchema(_) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateSchema".to_string()))
+      },
+      LogicalPlan::UnresolvedCreateTable(_, _, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateTable".to_string()))
+      },
+      LogicalPlan::UnresolvedDropSchema(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropSchema".to_string()))
+      },
+      LogicalPlan::UnresolvedDropTable(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropTable".to_string()))
+      },
+      LogicalPlan::UnresolvedFilter(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedFilter".to_string()))
+      },
+      LogicalPlan::UnresolvedInsertInto(_, _, _, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedInsertInto".to_string()))
+      },
+      LogicalPlan::UnresolvedLimit(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLimit".to_string()))
+      },
+      LogicalPlan::UnresolvedLocalRelation(_) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLocalRelation".to_string()))
+      },
+      LogicalPlan::UnresolvedProject(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedProject".to_string()))
+      },
+      LogicalPlan::UnresolvedSubquery(_, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedSubquery".to_string()))
+      },
+      LogicalPlan::UnresolvedTableScan(_, _, _) => {
+        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedTableScan".to_string()))
+      },
     }
   }
 }
@@ -518,9 +605,8 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::InsertInto(_, _, _) => write!(f, "InsertInto"),
       LogicalPlan::Limit(_, _) => write!(f, "Limit"),
       LogicalPlan::LocalRelation(_) => write!(f, "LocalRelation"),
-      LogicalPlan::Project(ref expressions, _) => {
-        write!(f, "Project({:?})", expressions)
-      },
+      LogicalPlan::Project(ref expressions, _) => write!(f, "Project({:?})", expressions),
+      LogicalPlan::Subquery(ref alias, _) => write!(f, "Subquery({})", alias),
       LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
         write!(
           f,
@@ -561,6 +647,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::Limit(_, ref child) => vec![child],
       LogicalPlan::LocalRelation(_) => Vec::new(),
       LogicalPlan::Project(_, ref child) => vec![child],
+      LogicalPlan::Subquery(_, ref child) => vec![child],
       LogicalPlan::TableScan(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedCreateSchema(_) => Vec::new(),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => Vec::new(),
@@ -609,6 +696,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::Project(ref expressions, _) => {
         let child = get_unary!("Project", children);
         LogicalPlan::Project(expressions.clone(), Rc::new(child))
+      },
+      LogicalPlan::Subquery(ref alias, _) => {
+        let child = get_unary!("Subquery", children);
+        LogicalPlan::Subquery(alias.clone(), Rc::new(child))
       },
       LogicalPlan::TableScan(ref schema_info, ref table_info, ref table_alias) => {
         LogicalPlan::TableScan(schema_info.clone(), table_info.clone(), table_alias.clone())
@@ -959,6 +1050,25 @@ pub mod tests {
       Expression::UnaryMinus(Rc::new(Expression::LiteralFloat(1.1))).data_type(),
       Ok(&Type::FLOAT)
     );
+  }
+
+  #[test]
+  fn test_plan_expression_context_matches_suffix() {
+    let ctx = ExpressionContext::new(Vec::new());
+    assert!(ctx.matches_suffix(&[]));
+
+    let ctx = ExpressionContext::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert!(ctx.matches_suffix(&[]));
+    assert!(ctx.matches_suffix(&["c".to_string()]));
+    assert!(ctx.matches_suffix(&["b".to_string(), "c".to_string()]));
+    assert!(ctx.matches_suffix(&["a".to_string(), "b".to_string(), "c".to_string()]));
+
+    assert!(!ctx.matches_suffix(&["".to_string()]));
+    assert!(!ctx.matches_suffix(&["a".to_string()]));
+    assert!(!ctx.matches_suffix(&["b".to_string()]));
+    assert!(!ctx.matches_suffix(&["a".to_string(), "b".to_string()]));
+    assert!(!ctx.matches_suffix(&["c".to_string(), "b".to_string()]));
+    assert!(!ctx.matches_suffix(&["c".to_string(), "b".to_string(), "a".to_string()]));
   }
 
   #[test]
