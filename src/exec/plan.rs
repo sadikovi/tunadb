@@ -54,6 +54,8 @@ macro_rules! display_binary {
   }}
 }
 
+const DEFAULT_EXPRESSION_NAME: &str = "?col?";
+
 // Contains metadata for one or more expressions.
 pub struct ExpressionContext {
   // Origin of the expression, e.g. `schema.table` or `alias` path to find the expression.
@@ -121,6 +123,39 @@ pub enum Expression {
 }
 
 impl Expression {
+  // Returns expression name.
+  pub fn name(&self) -> &str {
+    match self {
+      Expression::Add(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Alias(_, ref name) => name,
+      Expression::And(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::ColumnRef(_, ref table_info, _, ref idx) => {
+        table_info.relation_fields().get()[*idx].name()
+      },
+      Expression::Divide(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Equals(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::GreaterThan(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::GreaterThanEquals(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Identifier(_, ref name) => name,
+      Expression::LessThan(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::LessThanEquals(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralBool(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralInt(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralBigInt(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralFloat(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralDouble(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::LiteralString(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::Multiply(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Null => DEFAULT_EXPRESSION_NAME,
+      Expression::Or(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Star(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::Subtract(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::UnaryPlus(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::UnaryMinus(_) => DEFAULT_EXPRESSION_NAME,
+    }
+  }
+
+  // Returns expression data type or promoted data type.
   pub fn data_type(&self) -> Res<&Type> {
     match self {
       Expression::Add(ref left, ref right) => {
@@ -251,6 +286,7 @@ impl Expression {
     }
   }
 
+  // Returns true if the expression is nullable.
   pub fn nullable(&self) -> Res<bool> {
     match self {
       Expression::Add(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
