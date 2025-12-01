@@ -349,7 +349,7 @@ impl TreeNode<Expression> for Expression {
       Expression::ColumnRef(_, ref table_info, _, ref index) => {
         let name = table_info.relation_fields().get()[*index].name();
         let tpe = table_info.relation_fields().get()[*index].data_type();
-        write!(f, "{}#{}#{}", name, index, tpe)
+        write!(f, "{}:{}:{}", name, index, tpe)
       },
       Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
       Expression::Equals(ref left, ref right) => display_binary!(f, left, "=", right),
@@ -655,11 +655,38 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
           table_info.relation_name()
         )
       },
-      LogicalPlan::Filter(_, _) => write!(f, "Filter"),
+      LogicalPlan::Filter(ref expression, _) => {
+        write!(f, "Filter(")?;
+        expression.display(f)?;
+        write!(f, ")")
+      },
       LogicalPlan::InsertInto(_, _, _) => write!(f, "InsertInto"),
-      LogicalPlan::Limit(_, _) => write!(f, "Limit"),
-      LogicalPlan::LocalRelation(_) => write!(f, "LocalRelation"),
-      LogicalPlan::Project(ref expressions, _) => write!(f, "Project({:?})", expressions),
+      LogicalPlan::Limit(ref limit, _) => write!(f, "Limit({})", limit),
+      LogicalPlan::LocalRelation(ref expressions) => {
+        write!(f, "LocalRelation(")?;
+        for i in 0..expressions.len() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          for j in 0..expressions[i].len() {
+            if j > 0 {
+              write!(f, ", ")?;
+            }
+            expressions[i][j].display(f)?;
+          }
+        }
+        write!(f, ")")
+      },
+      LogicalPlan::Project(ref expressions, _) => {
+        write!(f, "Project(")?;
+        for i in 0..expressions.len() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          expressions[i].display(f)?;
+        }
+        write!(f, ")")
+      },
       LogicalPlan::Subquery(ref alias, _) => write!(f, "Subquery({})", alias),
       LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
         write!(
