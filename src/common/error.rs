@@ -11,6 +11,7 @@ pub enum Error {
 
   // SQL analysis errors.
   SQLAnalysisDuplicateField(String /* field name */),
+  SQLAnalysisUnknownField(String /* field name */),
   SQLAnalysisExpressionDataType(String /* error message */),
   SQLAnalysisUnresolvedExpression(String /* error message */),
   SQLAnalysisUnresolvedPlan(String /* error message */),

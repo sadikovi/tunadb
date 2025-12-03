@@ -500,8 +500,9 @@ pub enum LogicalPlan {
   DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
   Filter(Rc<Expression> /* filter expression */, Rc<LogicalPlan> /* child */),
   InsertInto(
+    Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
-    Rc<Fields> /* columns to insert */,
+    Rc<Vec<String>> /* columns to insert */,
     Rc<LogicalPlan> /* query */,
   ),
   Limit(usize /* limit */, Rc<LogicalPlan> /* child */),
@@ -548,7 +549,7 @@ impl LogicalPlan {
       LogicalPlan::DropSchema(_, _) => Ok(Vec::new()),
       LogicalPlan::DropTable(_, _) => Ok(Vec::new()),
       LogicalPlan::Filter(_, ref child) => child.output(),
-      LogicalPlan::InsertInto(_, _, _) => Ok(Vec::new()),
+      LogicalPlan::InsertInto(_, _, _, _) => Ok(Vec::new()),
       LogicalPlan::Limit(_, ref child) => child.output(),
       LogicalPlan::LocalRelation(ref expressions) => {
         if expressions.len() > 0 {
@@ -660,7 +661,15 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
         expression.display(f)?;
         write!(f, ")")
       },
-      LogicalPlan::InsertInto(_, _, _) => write!(f, "InsertInto"),
+      LogicalPlan::InsertInto(ref schema_info, ref table_info, ref cols, _) => {
+        write!(
+          f,
+          "InsertInto({}.{}, {:?})",
+          schema_info.schema_name(),
+          table_info.relation_name(),
+          cols
+        )
+      },
       LogicalPlan::Limit(ref limit, _) => write!(f, "Limit({})", limit),
       LogicalPlan::LocalRelation(ref expressions) => {
         write!(f, "LocalRelation(")?;
@@ -724,7 +733,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::DropSchema(_, _) => Vec::new(),
       LogicalPlan::DropTable(_, _) => Vec::new(),
       LogicalPlan::Filter(_, ref child) => vec![child],
-      LogicalPlan::InsertInto(_, _, ref query) => vec![query],
+      LogicalPlan::InsertInto(_, _, _, ref query) => vec![query],
       LogicalPlan::Limit(_, ref child) => vec![child],
       LogicalPlan::LocalRelation(_) => Vec::new(),
       LogicalPlan::Project(_, ref child) => vec![child],
@@ -763,9 +772,14 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
         let child = get_unary!("Filter", children);
         LogicalPlan::Filter(expression.clone(), Rc::new(child))
       },
-      LogicalPlan::InsertInto(ref table_info, ref cols, _) => {
+      LogicalPlan::InsertInto(ref schema_info, ref table_info, ref cols, _) => {
         let child = get_unary!("InsertInto", children);
-        LogicalPlan::InsertInto(table_info.clone(), cols.clone(), Rc::new(child))
+        LogicalPlan::InsertInto(
+          schema_info.clone(),
+          table_info.clone(),
+          cols.clone(),
+          Rc::new(child)
+        )
       },
       LogicalPlan::Limit(limit, _) => {
         let child = get_unary!("Limit", children);
