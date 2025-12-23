@@ -37,6 +37,7 @@ pub enum TokenType {
   BY,
   CASCADE,
   CASE,
+  CAST,
   CREATE,
   DISTINCT,
   DROP,
@@ -289,6 +290,8 @@ impl<'a> Scanner<'a> {
       TokenType::CASCADE
     } else if self.match_keyword(b"CASE") {
       TokenType::CASE
+    } else if self.match_keyword(b"CAST") {
+      TokenType::CAST
     } else if self.match_keyword(b"CREATE") {
       TokenType::CREATE
     } else if self.match_keyword(b"DISTINCT") {
@@ -819,6 +822,24 @@ from
     assert_sql("\" \"\" \"", vec![(TokenType::IDENTIFIER, "\" \"\" \"")]);
 
     assert_sql("\"\"\"", vec![(TokenType::ERROR, "\"\"\"")]);
+  }
+
+  #[test]
+  fn test_scanner_cast() {
+    assert_sql(
+      "select cast(foo as bigint) from schema",
+      vec![
+        (TokenType::SELECT, "select"),
+        (TokenType::CAST, "cast"),
+        (TokenType::PAREN_LEFT, "("),
+        (TokenType::IDENTIFIER, "foo"),
+        (TokenType::AS, "as"),
+        (TokenType::IDENTIFIER, "bigint"),
+        (TokenType::PAREN_RIGHT, ")"),
+        (TokenType::FROM, "from"),
+        (TokenType::SCHEMA, "schema"),
+      ]
+    );
   }
 
   #[test]

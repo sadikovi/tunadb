@@ -140,6 +140,29 @@ impl<'a> Parser<'a> {
   // Expressions
   //=============
 
+  // Special function to parse the type.
+  #[inline]
+  fn column_type(&mut self) -> Res<Type> {
+    let token = self.consume(TokenType::IDENTIFIER, "Expected column type")?;
+    let type_str = token.value(&self.sql);
+
+    if type_str.eq_ignore_ascii_case("BOOL") {
+      Ok(Type::BOOL)
+    } else if type_str.eq_ignore_ascii_case("INT") {
+      Ok(Type::INT)
+    } else if type_str.eq_ignore_ascii_case("BIGINT") {
+      Ok(Type::BIGINT)
+    } else if type_str.eq_ignore_ascii_case("FLOAT") {
+      Ok(Type::FLOAT)
+    } else if type_str.eq_ignore_ascii_case("DOUBLE") {
+      Ok(Type::DOUBLE)
+    } else if type_str.eq_ignore_ascii_case("TEXT") {
+      Ok(Type::TEXT)
+    } else {
+      Err(self.error_at(&self.current, &format!("Unknown column type '{}'", type_str)))
+    }
+  }
+
   #[inline]
   fn primary(&mut self) -> Res<Expression> {
     // Global star.
@@ -349,35 +372,27 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn cast(&mut self) -> Res<Expression> {
+    if self.matches(TokenType::CAST)? {
+      self.consume(TokenType::PAREN_LEFT, "Expected '('")?;
+      let expr = self.logical_or()?;
+      self.consume(TokenType::AS, "Expected 'AS'")?;
+      let tpe = self.column_type()?;
+      self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
+      Ok(Expression::Cast(Rc::new(expr), Rc::new(tpe)))
+    } else {
+      self.logical_or()
+    }
+  }
+
+  #[inline]
   fn expression(&mut self) -> Res<Expression> {
-    self.logical_or()
+    self.cast()
   }
 
   //============
   // Statements
   //============
-
-  #[inline]
-  fn column_type(&mut self) -> Res<Type> {
-    let token = self.consume(TokenType::IDENTIFIER, "Expected column type")?;
-    let type_str = token.value(&self.sql);
-
-    if type_str.eq_ignore_ascii_case("BOOL") {
-      Ok(Type::BOOL)
-    } else if type_str.eq_ignore_ascii_case("INT") {
-      Ok(Type::INT)
-    } else if type_str.eq_ignore_ascii_case("BIGINT") {
-      Ok(Type::BIGINT)
-    } else if type_str.eq_ignore_ascii_case("FLOAT") {
-      Ok(Type::FLOAT)
-    } else if type_str.eq_ignore_ascii_case("DOUBLE") {
-      Ok(Type::DOUBLE)
-    } else if type_str.eq_ignore_ascii_case("TEXT") {
-      Ok(Type::TEXT)
-    } else {
-      Err(self.error_at(&self.current, &format!("Unknown column type '{}'", type_str)))
-    }
-  }
 
   // Returns a tuple of (schema, table) where schema is optional.
   #[inline]
@@ -1021,6 +1036,22 @@ pub mod tests {
           alias(identifier("d"), "col4"),
         ]
       )
+    );
+  }
+
+  #[test]
+  fn test_parser_expressions_cast() {
+    assert_plan(
+      "select cast(1 as bool)",
+      local(vec![cast(int(1), Type::BOOL)])
+    );
+    assert_plan(
+      "select cast('1' as int)",
+      local(vec![cast(string("1"), Type::INT)])
+    );
+    assert_plan(
+      "select cast(foo as bigint)",
+      local(vec![cast(identifier("foo"), Type::BIGINT)])
     );
   }
 

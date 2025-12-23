@@ -3,6 +3,7 @@ use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::core::trees::TreeNode;
 use crate::core::types::{Fields, Type};
+use crate::exec::DEFAULT_EXPRESSION_NAME;
 use crate::exec::catalog::{SchemaInfo, RelationInfo};
 
 // Returns the unary child from `children` while asserting the `children` length.
@@ -54,8 +55,6 @@ macro_rules! display_binary {
   }}
 }
 
-const DEFAULT_EXPRESSION_NAME: &str = "?col?";
-
 // Contains metadata for one or more expressions.
 pub struct ExpressionContext {
   // Origin of the expression, e.g. `schema.table` or `alias` path to find the expression.
@@ -94,6 +93,7 @@ pub enum Expression {
   Add(Rc<Expression>, Rc<Expression>),
   Alias(Rc<Expression>, Rc<String> /* alias name */),
   And(Rc<Expression>, Rc<Expression>),
+  Cast(Rc<Expression>, Rc<Type>),
   ColumnRef(
     Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
@@ -129,6 +129,7 @@ impl Expression {
       Expression::Add(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Alias(_, ref name) => name,
       Expression::And(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Cast(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         table_info.relation_fields().get()[*idx].name()
       },
@@ -180,6 +181,7 @@ impl Expression {
       },
       Expression::Alias(ref child, _) => child.data_type(),
       Expression::And(_, _) => Ok(&Type::BOOL),
+      Expression::Cast(_, ref tpe) => Ok(tpe),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         Ok(table_info.relation_fields().get()[*idx].data_type())
       },
@@ -292,6 +294,7 @@ impl Expression {
       Expression::Add(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Alias(ref child, _) => child.nullable(),
       Expression::And(_, _) => Ok(false),
+      Expression::Cast(ref expr, _) => expr.nullable(),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         Ok(table_info.relation_fields().get()[*idx].nullable())
       },
@@ -346,6 +349,11 @@ impl TreeNode<Expression> for Expression {
         write!(f, " as {}", name)
       },
       Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
+      Expression::Cast(ref expr, ref tpe) => {
+        write!(f, "cast(")?;
+        expr.display(f)?;
+        write!(f, "{})", tpe)
+      },
       Expression::ColumnRef(_, ref table_info, _, ref index) => {
         let name = table_info.relation_fields().get()[*index].name();
         let tpe = table_info.relation_fields().get()[*index].data_type();
@@ -389,6 +397,7 @@ impl TreeNode<Expression> for Expression {
       Expression::Add(ref left, ref right) => vec![left, right],
       Expression::Alias(ref child, _) => vec![child],
       Expression::And(ref left, ref right) => vec![left, right],
+      Expression::Cast(ref expr, _) => vec![expr],
       Expression::ColumnRef(_, _, _, _) => Vec::new(),
       Expression::Divide(ref left, ref right) => vec![left, right],
       Expression::Equals(ref left, ref right) => vec![left, right],
@@ -428,6 +437,7 @@ impl TreeNode<Expression> for Expression {
         let (left, right) = get_binary!("And", children);
         Expression::And(Rc::new(left), Rc::new(right))
       },
+      Expression::Cast(ref expr, ref tpe) => Expression::Cast(expr.clone(), tpe.clone()),
       Expression::ColumnRef(ref schema_info, ref table_info, ref alias, ref index) => {
         Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), *index)
       },
@@ -856,7 +866,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
 
 pub mod dsl {
   use std::rc::Rc;
-  use super::{Expression, Fields, LogicalPlan};
+  use super::{Expression, Fields, LogicalPlan, Type};
 
   // Expressions.
 
@@ -913,6 +923,10 @@ pub mod dsl {
 
   pub fn add(left: Expression, right: Expression) -> Expression {
     Expression::Add(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn cast(expr: Expression, tpe: Type) -> Expression {
+    Expression::Cast(Rc::new(expr), Rc::new(tpe))
   }
 
   pub fn subtract(left: Expression, right: Expression) -> Expression {
@@ -1072,6 +1086,13 @@ pub mod tests {
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
       Ok(&Type::DOUBLE)
+    );
+    assert_eq!(
+      Expression::Cast(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Type::BIGINT),
+      ).data_type(),
+      Ok(&Type::BIGINT)
     );
     assert_eq!(
       Expression::Equals(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),

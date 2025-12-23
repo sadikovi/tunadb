@@ -5,8 +5,8 @@ use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
 
 // Returns a unique relation key to store in the set.
-// This allows us to locate a relation using "exists" and "get" API while still being able to rename
-// the schema.
+// This allows us to locate a relation using "exists" and "get" API while still being able to
+// rename the schema.
 #[inline]
 fn to_unique_relation_key(schema_id: u64, relation_name: &str) -> Vec<u8> {
   let id_bytes = &u64_u8!(schema_id);
