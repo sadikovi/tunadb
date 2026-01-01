@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::core::types::{Field, Fields, Type};
 use crate::exec::plan::{Expression, LogicalPlan};
 use crate::exec::scanner::{Scanner, Token, TokenType};
+use crate::exec::types::{Field, Fields, Type};
 
 // Returns true if the value is a singl-word identifier, i.e. not the escaped identifier.
 fn is_single_word_identifier(value: &str) -> bool {

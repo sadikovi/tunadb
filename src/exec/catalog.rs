@@ -1,6 +1,6 @@
 use crate::common::error::{Error, Res};
 use crate::common::serde::{Reader, SerDe, Writer};
-use crate::core::types::{Field, Fields, Type};
+use crate::exec::types::{Field, Fields, Type};
 use crate::storage::btree::BTreeIter;
 use crate::storage::txn::{Set, TransactionRef, create_set, drop_set, get_set, next_object_id};
 

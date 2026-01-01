@@ -1,10 +1,10 @@
 use std::fmt;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::core::trees::TreeNode;
-use crate::core::types::{Fields, Type};
 use crate::exec::DEFAULT_EXPRESSION_NAME;
 use crate::exec::catalog::{SchemaInfo, RelationInfo};
+use crate::exec::trees::TreeNode;
+use crate::exec::types::{Fields, Type};
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -1055,7 +1055,7 @@ pub mod dsl {
 pub mod tests {
   use super::*;
   use super::dsl::*;
-  use crate::core::trees;
+  use crate::exec::trees;
 
   #[test]
   fn test_plan_expression_type_promotion() {
