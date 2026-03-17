@@ -138,10 +138,9 @@ impl PageCache {
     if cap >= self.max_mem {
       return false;
     }
-    let new_cap = if cap == 0 { self.page_size } else { cap << 1 };
-    let mut new_buf = vec![0u8; new_cap.min(self.max_mem)];
-    // TODO: improve performance.
-    write_bytes!(&mut new_buf[..self.buf.len()], &self.buf[..]);
+    let new_cap = (if cap == 0 { self.page_size } else { cap << 1 }).min(self.max_mem);
+    let mut new_buf = vec![0u8; new_cap];
+    new_buf[..self.buf.len()].copy_from_slice(&self.buf[..]);
     self.buf = new_buf;
     true
   }

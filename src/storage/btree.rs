@@ -260,8 +260,8 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]
           BTreeDel::Update(child_id, child_num_slots, next_smallest_key) => {
             pg::internal_set_ptr(page, ptr, child_id);
             // Update the next smallest key.
-            // TODO: optimise key comparison.
-            if exists && pg::internal_get_key(&page, pos, mngr) == key {
+            // bsearch guarantees key == internal_get_key(page, pos) when exists == true.
+            if exists {
               if let Some(smallest_key) = next_smallest_key.as_ref() {
                 // Update the key. Because we can only delete and re-insert the key, we also
                 // need to update the pointer that is stored together with the key.

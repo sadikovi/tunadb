@@ -14,7 +14,7 @@ use crate::common::error::Res;
 
 enum Descriptor {
   // File-based storage.
-  Disk { fd: File },
+  Disk { fd: File, len: u64 },
   // In-memory storage.
   Mem { data: Vec<u8> },
 }
@@ -23,7 +23,9 @@ impl Descriptor {
   // Creates a new descriptor backed by a file.
   fn disk(path: &str) -> Self {
     let fd = OpenOptions::new().read(true).write(true).create(true).open(path);
-    Descriptor::Disk { fd: res!(fd, "Failed to open {}", path) }
+    let fd = res!(fd, "Failed to open {}", path);
+    let len = res!(fd.metadata()).len();
+    Descriptor::Disk { fd, len }
   }
 
   // Creates a new in-memory descriptor.
@@ -38,7 +40,7 @@ impl Descriptor {
     assert!(pos + buf.len() as u64 <= self.len(), "Read past EOF: pos {} len {}", pos, buf.len());
 
     match self {
-      Descriptor::Disk { fd } => {
+      Descriptor::Disk { fd, .. } => {
         res!(fd.seek(SeekFrom::Start(pos)), "Failed to seek to pos {}", pos);
         res!(fd.read_exact(buf), "Failed to read exactly {} bytes at pos {}", buf.len(), pos);
       },
@@ -58,10 +60,13 @@ impl Descriptor {
     assert!(pos <= self.len(), "Write past EOF: pos {} len {}", pos, buf.len());
 
     match self {
-      Descriptor::Disk { fd } => {
+      Descriptor::Disk { fd, len } => {
         res!(fd.seek(SeekFrom::Start(pos)), "Failed to seek to pos {}", pos);
         res!(fd.write_all(buf), "Failed to write {} bytes at pos {}", buf.len(), pos);
-        res!(fd.flush(), "Failed to flush the file descriptor");
+        let new_end = pos + buf.len() as u64;
+        if new_end > *len {
+          *len = new_end;
+        }
       },
       Descriptor::Mem { data } => {
         let pos = pos as usize;
@@ -81,19 +86,20 @@ impl Descriptor {
 
   // Truncates to the provided length, `len` must be less than or equal to length.
   #[inline]
-  fn truncate(&mut self, len: u64) {
+  fn truncate(&mut self, new_len: u64) {
     let curr_len = self.len();
-    assert!(len <= curr_len, "Failed to truncate to len {}, curr_len {}", len, curr_len);
+    assert!(new_len <= curr_len, "Failed to truncate to len {}, curr_len {}", new_len, curr_len);
 
     match self {
-      Descriptor::Disk { fd } => {
-        if len < curr_len {
-          res!(fd.set_len(len), "Failed to set file length as {} bytes", len);
+      Descriptor::Disk { fd, len } => {
+        if new_len < curr_len {
+          res!(fd.set_len(new_len), "Failed to set file length as {} bytes", new_len);
+          *len = new_len;
         }
       },
       Descriptor::Mem { data } => {
-        if len < curr_len {
-          data.truncate(len as usize);
+        if new_len < curr_len {
+          data.truncate(new_len as usize);
         }
       },
     }
@@ -103,7 +109,7 @@ impl Descriptor {
   #[inline]
   fn len(&self) -> u64 {
     match self {
-      Descriptor::Disk { fd } => res!(fd.metadata().map(|m| m.len())),
+      Descriptor::Disk { len, .. } => *len,
       Descriptor::Mem { data } => data.len() as u64,
     }
   }
@@ -124,7 +130,7 @@ impl Descriptor {
 impl Drop for Descriptor {
   fn drop(&mut self) {
     match self {
-      Descriptor::Disk { fd } => {
+      Descriptor::Disk { fd, .. } => {
         // Sync the content of the file to disk including all of the OS internal metadata.
         res!(fd.sync_all());
       },
