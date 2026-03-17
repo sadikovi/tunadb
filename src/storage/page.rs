@@ -28,8 +28,15 @@ const FLAG_PAGE_IS_INTERNAL: u32 = 0x4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageType {
+  // Leaf pages store the actual key-value data and form the bottom level of the B+ tree.
+  // Each leaf cell holds a key, a value, and an optional overflow pointer for large data.
   Leaf,
+  // Overflow pages hold key or value data that is too large to fit inline in a leaf or
+  // internal cell. They form a singly-linked chain; the first page id in the chain is
+  // stored in the cell that owns the data.
   Overflow,
+  // Internal pages store separator keys and child page pointers, forming the upper levels
+  // of the B+ tree. They guide searches down to the correct leaf page but hold no values.
   Internal,
 }
 
@@ -138,7 +145,7 @@ fn free_space(page: &[u8]) -> usize {
 // Returns the maximum number of bytes available for a cell in either a leaf or an internal page
 // assuming that we need to fit PAGE_MIN_SLOTS cells.
 //
-// This takes 4 bytes of slots into account, i.e. 4 * SLOT_SIZE is already accounted by.
+// This takes 4 bytes of slots into account, i.e. 4 * SLOT_SIZE is already accounted for.
 #[inline]
 fn max_slot_plus_cell_len(page: &[u8]) -> usize {
   free_space(page).min((page.len() - PAGE_HEADER_SIZE) / PAGE_MIN_SLOTS)

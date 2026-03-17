@@ -243,7 +243,7 @@ impl PageCache {
           let cell = pg::internal_get_cell_mut(buf, i);
           let overflow_pid = u8_u32!(&cell[12..16]);
           if is_virtual_page_id(overflow_pid) {
-            let pid = vid_to_pid.get(&overflow_pid).expect("Not all leaf pages were resolved");
+            let pid = vid_to_pid.get(&overflow_pid).expect("Not all overflow pages were resolved");
             write_u32!(&mut cell[12..16], pid);
           }
         }

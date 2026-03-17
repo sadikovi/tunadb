@@ -298,7 +298,7 @@ fn recur_del(root: u32, key: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]
                   mngr.free(sib_id);
                 }
               } else if ptr < pg::num_slots(&page) {
-                // Check the left sibling page.
+                // Check the right sibling page.
                 let sib_id = pg::internal_get_ptr(&page, ptr + 1);
                 mngr.load(sib_id, &mut sib_page);
 
