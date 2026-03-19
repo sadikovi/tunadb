@@ -354,8 +354,10 @@ fn create_schema_internal(
       schema_id: next_object_id(&txn),
       schema_name: schema_name.to_string(),
     };
-    // Serialise to store in the set.
-    let mut writer = Writer::new();
+    // Serialise to store in the set. Pre-allocate 256 bytes to avoid Vec reallocations
+    // during serialisation — schema rows are small and this covers all realistic cases
+    // in a single allocation.
+    let mut writer = Writer::with_capacity(256);
     schema.serialise(&mut writer);
     // The key must be the schema identifier.
     set.put(&schema.schema_name.as_bytes(), &writer.to_vec());
@@ -465,8 +467,10 @@ fn create_relation_internal(
       relation_type: relation_type,
       relation_fields: relation_fields,
     };
-    // Serialise to store in the set.
-    let mut writer = Writer::new();
+    // Serialise to store in the set. Pre-allocate 256 bytes to avoid Vec reallocations
+    // during serialisation — relation rows include variable-length fields but 256 bytes
+    // covers all realistic cases in a single allocation.
+    let mut writer = Writer::with_capacity(256);
     relation.serialise(&mut writer);
     set.put(&relation_key, &writer.to_vec());
     Ok(())

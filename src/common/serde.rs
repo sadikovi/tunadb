@@ -20,6 +20,11 @@ impl Writer {
     Self { buf: Vec::new() }
   }
 
+  // Creates a new writer pre-sized to avoid reallocations when the output size is known.
+  pub fn with_capacity(capacity: usize) -> Self {
+    Self { buf: Vec::with_capacity(capacity) }
+  }
+
   // Ensures that the version is added at the beginning.
   #[inline]
   fn ensure_version(&mut self) {
