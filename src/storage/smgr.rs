@@ -513,9 +513,7 @@ impl StorageManager {
 
     // We need to make sure we don't add any duplicate pages, check below.
     for pid in &self.free_list {
-      if self.free_set.contains(pid) {
-        self.free_set.remove(pid);
-      }
+      self.free_set.remove(pid);
     }
 
     // Move all of the marked as free pages into the free list.

@@ -72,7 +72,7 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, pag
         }
       },
       pg::PageType::Internal => {
-        let mut right_page = page.to_vec(); // we reuse right_page as a temporary buffer
+        let mut right_page = vec![0u8; mngr.page_size()]; // we reuse right_page as a temporary buffer
         let ptr = if exists { pos + 1 } else { pos };
 
         match recur_put(pg::internal_get_ptr(&page, ptr), key, val, mngr, &mut right_page) {
