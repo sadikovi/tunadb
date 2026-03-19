@@ -629,16 +629,26 @@ pub fn leaf_split(left: &mut [u8], right: &mut [u8], pos: usize) {
   let cnt = num_slots(&left);
 
   // Insert cells into the right page starting from `pos`.
-  let mut j = 0;
   for i in pos..cnt {
     let buf = leaf_get_cell(&left, i);
-    leaf_ins_cell(right, j, buf);
-    j += 1;
+    leaf_ins_cell(right, i - pos, buf);
   }
 
-  // Delete all of the cells after `pos`.
-  for i in (pos..cnt).rev() {
-    leaf_del_cell(left, i);
+  // We cannot delete cells pos..cnt one by one because leaf_del_cell compacts the data
+  // area on each call (copy_within over the entire region below the deleted cell), making
+  // the loop O(n * page_size). Instead, snapshot the raw bytes of the kept cells (0..pos)
+  // into a flat buffer, reinitialise left, and re-insert from the snapshot. Each byte is
+  // copied exactly twice — once into the buffer, once back — giving O(n) total work.
+  let mut kept = Vec::new();
+  for i in 0..pos {
+    kept.extend_from_slice(leaf_get_cell(&left, i));
+  }
+  leaf_init(left);
+  let mut off = 0;
+  for j in 0..pos {
+    let cell_len = leaf_get_cell_len(&kept, off);
+    leaf_ins_cell(left, j, &kept[off..off + cell_len]);
+    off += cell_len;
   }
 }
 
