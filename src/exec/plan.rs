@@ -1,10 +1,12 @@
 use std::fmt;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::exec::DEFAULT_EXPRESSION_NAME;
 use crate::exec::catalog::{SchemaInfo, RelationInfo};
 use crate::exec::trees::TreeNode;
 use crate::exec::types::{Fields, Type};
+
+pub const DEFAULT_EXPRESSION_NAME: &str = "?col?";
+pub const DEFAULT_SUBQUERY_NAME: &str = "?subquery?";
 
 // Returns the unary child from `children` while asserting the `children` length.
 macro_rules! get_unary {
@@ -61,26 +63,92 @@ fn identifier_display_name(parts: &[String], name: &str) -> String {
 }
 
 #[inline]
-fn promote_arithmetic_type(left: Type, right: Type) -> Res<Type> {
+pub fn can_numeric_and_null_upcast(from: &Type, to: &Type) -> bool {
+  if from == to {
+    return true;
+  }
+
+  match (from, to) {
+    (&Type::INT, &Type::BIGINT) |
+    (&Type::INT, &Type::FLOAT) |
+    (&Type::INT, &Type::DOUBLE) => true,
+    (&Type::BIGINT, &Type::FLOAT) |
+    (&Type::BIGINT, &Type::DOUBLE) => true,
+    (&Type::FLOAT, &Type::DOUBLE) => true,
+    (&Type::NULL, _) => true,
+    _ => false,
+  }
+}
+
+#[inline]
+fn can_numeric_and_null_downcast(from: &Type, to: &Type) -> bool {
+  if from == to {
+    return true;
+  }
+
+  match (from, to) {
+    (&Type::BIGINT, &Type::INT) => true,
+    (&Type::DOUBLE, &Type::FLOAT) |
+    (&Type::DOUBLE, &Type::BIGINT) |
+    (&Type::DOUBLE, &Type::INT) => true,
+    (&Type::FLOAT, &Type::BIGINT) |
+    (&Type::FLOAT, &Type::INT) => true,
+    _ => false,
+  }
+}
+
+#[inline]
+fn can_upcast(from: &Type, to: &Type) -> bool {
+  can_numeric_and_null_upcast(from, to) ||
+  match (from, to) {
+    (&Type::INT, &Type::TEXT) => true,
+    (&Type::BIGINT, &Type::TEXT) => true,
+    (&Type::FLOAT, &Type::TEXT) => true,
+    (&Type::DOUBLE, &Type::TEXT) => true,
+    (&Type::BOOL, &Type::TEXT) => true,
+    _ => false,
+  }
+}
+
+#[inline]
+fn can_downcast(from: &Type, to: &Type) -> bool {
+  can_numeric_and_null_downcast(from, to) ||
+  match (from, to) {
+    (&Type::TEXT, &Type::INT) |
+    (&Type::TEXT, &Type::BIGINT) |
+    (&Type::TEXT, &Type::FLOAT) |
+    (&Type::TEXT, &Type::DOUBLE) |
+    (&Type::TEXT, &Type::BOOL) => true,
+    _ => false,
+  }
+}
+
+#[inline]
+pub fn can_cast(from: &Type, to: &Type) -> bool {
+  can_upcast(from, to) || can_downcast(from, to)
+}
+
+#[inline]
+pub fn promote_arithmetic_type(left: &Type, right: &Type) -> Res<Type> {
   match (left, right) {
-    (Type::NULL, Type::NULL) => Ok(Type::NULL),
-    (Type::INT, Type::INT) | (Type::INT, Type::NULL) |
-    (Type::NULL, Type::INT) => Ok(Type::INT),
+    (&Type::NULL, &Type::NULL) => Ok(Type::NULL),
+    (&Type::INT, &Type::INT) | (&Type::INT, &Type::NULL) |
+    (&Type::NULL, &Type::INT) => Ok(Type::INT),
 
-    (Type::BIGINT, Type::INT) | (Type::INT, Type::BIGINT) |
-    (Type::BIGINT, Type::NULL) | (Type::NULL, Type::BIGINT) |
-    (Type::BIGINT, Type::BIGINT) => Ok(Type::BIGINT),
+    (&Type::BIGINT, &Type::INT) | (&Type::INT, &Type::BIGINT) |
+    (&Type::BIGINT, &Type::NULL) | (&Type::NULL, &Type::BIGINT) |
+    (&Type::BIGINT, &Type::BIGINT) => Ok(Type::BIGINT),
 
-    (Type::FLOAT, Type::INT) | (Type::INT, Type::FLOAT) |
-    (Type::FLOAT, Type::BIGINT) | (Type::BIGINT, Type::FLOAT) |
-    (Type::FLOAT, Type::NULL) | (Type::NULL, Type::FLOAT) |
-    (Type::FLOAT, Type::FLOAT) => Ok(Type::FLOAT),
+    (&Type::FLOAT, &Type::INT) | (&Type::INT, &Type::FLOAT) |
+    (&Type::FLOAT, &Type::BIGINT) | (&Type::BIGINT, &Type::FLOAT) |
+    (&Type::FLOAT, &Type::NULL) | (&Type::NULL, &Type::FLOAT) |
+    (&Type::FLOAT, &Type::FLOAT) => Ok(Type::FLOAT),
 
-    (Type::DOUBLE, Type::INT) | (Type::INT, Type::DOUBLE) |
-    (Type::DOUBLE, Type::BIGINT) | (Type::BIGINT, Type::DOUBLE) |
-    (Type::DOUBLE, Type::FLOAT) | (Type::FLOAT, Type::DOUBLE) |
-    (Type::DOUBLE, Type::NULL) | (Type::NULL, Type::DOUBLE) |
-    (Type::DOUBLE, Type::DOUBLE) => Ok(Type::DOUBLE),
+    (&Type::DOUBLE, &Type::INT) | (&Type::INT, &Type::DOUBLE) |
+    (&Type::DOUBLE, &Type::BIGINT) | (&Type::BIGINT, &Type::DOUBLE) |
+    (&Type::DOUBLE, &Type::FLOAT) | (&Type::FLOAT, &Type::DOUBLE) |
+    (&Type::DOUBLE, &Type::NULL) | (&Type::NULL, &Type::DOUBLE) |
+    (&Type::DOUBLE, &Type::DOUBLE) => Ok(Type::DOUBLE),
 
     (left, right) => {
       Err(
@@ -207,7 +275,7 @@ impl Expression {
   pub fn data_type(&self) -> Res<Type> {
     match self {
       Expression::Add(ref left, ref right) => {
-        promote_arithmetic_type(left.data_type()?, right.data_type()?)
+        promote_arithmetic_type(&left.data_type()?, &right.data_type()?)
       },
       Expression::Alias(ref child, _) => child.data_type(),
       Expression::And(_, _) => Ok(Type::BOOL),
@@ -217,7 +285,7 @@ impl Expression {
         Ok(table_info.relation_fields().get()[*idx].data_type().clone())
       },
       Expression::Divide(ref left, ref right) => {
-        promote_arithmetic_type(left.data_type()?, right.data_type()?)
+        promote_arithmetic_type(&left.data_type()?, &right.data_type()?)
       },
       Expression::Equals(_, _) => Ok(Type::BOOL),
       Expression::GreaterThan(_, _) => Ok(Type::BOOL),
@@ -243,7 +311,7 @@ impl Expression {
       Expression::LiteralDouble(_) => Ok(Type::DOUBLE),
       Expression::LiteralString(_) => Ok(Type::TEXT),
       Expression::Multiply(ref left, ref right) => {
-        promote_arithmetic_type(left.data_type()?, right.data_type()?)
+        promote_arithmetic_type(&left.data_type()?, &right.data_type()?)
       },
       Expression::Not(_) => Ok(Type::BOOL),
       Expression::NotEquals(_, _) => Ok(Type::BOOL),
@@ -260,7 +328,7 @@ impl Expression {
         )
       },
       Expression::Subtract(ref left, ref right) => {
-        promote_arithmetic_type(left.data_type()?, right.data_type()?)
+        promote_arithmetic_type(&left.data_type()?, &right.data_type()?)
       },
       Expression::UnaryPlus(ref child) => child.data_type(),
       Expression::UnaryMinus(ref child) => child.data_type(),
@@ -1477,6 +1545,200 @@ pub mod tests {
       let result = trees::transform_up(&expr, &NoopRule).unwrap();
       assert_eq!(result, expr);
     }
+  }
+
+  #[test]
+  fn test_plan_can_cast() {
+    // Identity: T → T is always valid.
+    assert!(can_cast(&Type::NULL, &Type::NULL));
+    assert!(can_cast(&Type::BOOL, &Type::BOOL));
+    assert!(can_cast(&Type::INT, &Type::INT));
+    assert!(can_cast(&Type::BIGINT, &Type::BIGINT));
+    assert!(can_cast(&Type::FLOAT, &Type::FLOAT));
+    assert!(can_cast(&Type::DOUBLE, &Type::DOUBLE));
+    assert!(can_cast(&Type::TEXT, &Type::TEXT));
+
+    // §4.1 Widening: always succeed at runtime.
+    assert!(can_cast(&Type::NULL, &Type::BOOL));
+    assert!(can_cast(&Type::NULL, &Type::INT));
+    assert!(can_cast(&Type::NULL, &Type::BIGINT));
+    assert!(can_cast(&Type::NULL, &Type::FLOAT));
+    assert!(can_cast(&Type::NULL, &Type::DOUBLE));
+    assert!(can_cast(&Type::NULL, &Type::TEXT));
+    assert!(can_cast(&Type::INT, &Type::BIGINT));
+    assert!(can_cast(&Type::INT, &Type::FLOAT));
+    assert!(can_cast(&Type::INT, &Type::DOUBLE));
+    assert!(can_cast(&Type::INT, &Type::TEXT));
+    assert!(can_cast(&Type::BIGINT, &Type::FLOAT));
+    assert!(can_cast(&Type::BIGINT, &Type::DOUBLE));
+    assert!(can_cast(&Type::BIGINT, &Type::TEXT));
+    assert!(can_cast(&Type::FLOAT, &Type::DOUBLE));
+    assert!(can_cast(&Type::FLOAT, &Type::TEXT));
+    assert!(can_cast(&Type::DOUBLE, &Type::TEXT));
+    assert!(can_cast(&Type::BOOL, &Type::TEXT));
+
+    // §4.2 Narrowing: validated at analysis, may fail at runtime.
+    assert!(can_cast(&Type::BIGINT, &Type::INT));
+    assert!(can_cast(&Type::DOUBLE, &Type::FLOAT));
+    assert!(can_cast(&Type::DOUBLE, &Type::BIGINT));
+    assert!(can_cast(&Type::DOUBLE, &Type::INT));
+    assert!(can_cast(&Type::FLOAT, &Type::BIGINT));
+    assert!(can_cast(&Type::FLOAT, &Type::INT));
+    assert!(can_cast(&Type::TEXT, &Type::INT));
+    assert!(can_cast(&Type::TEXT, &Type::BIGINT));
+    assert!(can_cast(&Type::TEXT, &Type::FLOAT));
+    assert!(can_cast(&Type::TEXT, &Type::DOUBLE));
+    assert!(can_cast(&Type::TEXT, &Type::BOOL));
+
+    // §4.3 Invalid: rejected at analysis time.
+    assert!(!can_cast(&Type::BOOL, &Type::INT));
+    assert!(!can_cast(&Type::BOOL, &Type::BIGINT));
+    assert!(!can_cast(&Type::BOOL, &Type::FLOAT));
+    assert!(!can_cast(&Type::BOOL, &Type::DOUBLE));
+    assert!(!can_cast(&Type::BOOL, &Type::NULL));
+    assert!(!can_cast(&Type::INT, &Type::BOOL));
+    assert!(!can_cast(&Type::BIGINT, &Type::BOOL));
+    assert!(!can_cast(&Type::FLOAT, &Type::BOOL));
+    assert!(!can_cast(&Type::DOUBLE, &Type::BOOL));
+    assert!(!can_cast(&Type::TEXT, &Type::NULL));
+    assert!(!can_cast(&Type::INT, &Type::NULL));
+    assert!(!can_cast(&Type::BIGINT, &Type::NULL));
+    assert!(!can_cast(&Type::FLOAT, &Type::NULL));
+    assert!(!can_cast(&Type::DOUBLE, &Type::NULL));
+  }
+
+  #[test]
+  fn test_plan_can_numeric_and_null_downcast() {
+    // Identity.
+    assert!(can_numeric_and_null_downcast(&Type::INT, &Type::INT));
+    assert!(can_numeric_and_null_downcast(&Type::BIGINT, &Type::BIGINT));
+    assert!(can_numeric_and_null_downcast(&Type::FLOAT, &Type::FLOAT));
+    assert!(can_numeric_and_null_downcast(&Type::DOUBLE, &Type::DOUBLE));
+    assert!(can_numeric_and_null_downcast(&Type::NULL, &Type::NULL));
+
+    // Numeric narrowing.
+    assert!(can_numeric_and_null_downcast(&Type::BIGINT, &Type::INT));
+    assert!(can_numeric_and_null_downcast(&Type::DOUBLE, &Type::FLOAT));
+    assert!(can_numeric_and_null_downcast(&Type::DOUBLE, &Type::BIGINT));
+    assert!(can_numeric_and_null_downcast(&Type::DOUBLE, &Type::INT));
+    assert!(can_numeric_and_null_downcast(&Type::FLOAT, &Type::BIGINT));
+    assert!(can_numeric_and_null_downcast(&Type::FLOAT, &Type::INT));
+
+    // Widening not allowed.
+    assert!(!can_numeric_and_null_downcast(&Type::INT, &Type::BIGINT));
+    assert!(!can_numeric_and_null_downcast(&Type::INT, &Type::FLOAT));
+    assert!(!can_numeric_and_null_downcast(&Type::INT, &Type::DOUBLE));
+    assert!(!can_numeric_and_null_downcast(&Type::FLOAT, &Type::DOUBLE));
+
+    // Non-numeric not allowed.
+    assert!(!can_numeric_and_null_downcast(&Type::TEXT, &Type::INT));
+    assert!(!can_numeric_and_null_downcast(&Type::BOOL, &Type::INT));
+    assert!(!can_numeric_and_null_downcast(&Type::NULL, &Type::INT));
+    assert!(!can_numeric_and_null_downcast(&Type::INT, &Type::TEXT));
+    assert!(!can_numeric_and_null_downcast(&Type::INT, &Type::BOOL));
+  }
+
+  #[test]
+  fn test_plan_can_upcast() {
+    // Numeric and NULL widening (via can_numeric_and_null_upcast).
+    assert!(can_upcast(&Type::INT, &Type::BIGINT));
+    assert!(can_upcast(&Type::INT, &Type::FLOAT));
+    assert!(can_upcast(&Type::INT, &Type::DOUBLE));
+    assert!(can_upcast(&Type::BIGINT, &Type::FLOAT));
+    assert!(can_upcast(&Type::BIGINT, &Type::DOUBLE));
+    assert!(can_upcast(&Type::FLOAT, &Type::DOUBLE));
+    assert!(can_upcast(&Type::NULL, &Type::INT));
+    assert!(can_upcast(&Type::NULL, &Type::TEXT));
+    assert!(can_upcast(&Type::NULL, &Type::BOOL));
+
+    // Identity.
+    assert!(can_upcast(&Type::INT, &Type::INT));
+    assert!(can_upcast(&Type::TEXT, &Type::TEXT));
+    assert!(can_upcast(&Type::BOOL, &Type::BOOL));
+
+    // → TEXT widening.
+    assert!(can_upcast(&Type::INT, &Type::TEXT));
+    assert!(can_upcast(&Type::BIGINT, &Type::TEXT));
+    assert!(can_upcast(&Type::FLOAT, &Type::TEXT));
+    assert!(can_upcast(&Type::DOUBLE, &Type::TEXT));
+    assert!(can_upcast(&Type::BOOL, &Type::TEXT));
+
+    // Narrowing not allowed.
+    assert!(!can_upcast(&Type::BIGINT, &Type::INT));
+    assert!(!can_upcast(&Type::DOUBLE, &Type::FLOAT));
+    assert!(!can_upcast(&Type::TEXT, &Type::INT));
+    assert!(!can_upcast(&Type::TEXT, &Type::BOOL));
+    assert!(!can_upcast(&Type::BOOL, &Type::INT));
+    assert!(!can_upcast(&Type::INT, &Type::BOOL));
+  }
+
+  #[test]
+  fn test_plan_can_downcast() {
+    // Numeric narrowing (via can_numeric_and_null_downcast).
+    assert!(can_downcast(&Type::BIGINT, &Type::INT));
+    assert!(can_downcast(&Type::DOUBLE, &Type::FLOAT));
+    assert!(can_downcast(&Type::DOUBLE, &Type::BIGINT));
+    assert!(can_downcast(&Type::DOUBLE, &Type::INT));
+    assert!(can_downcast(&Type::FLOAT, &Type::BIGINT));
+    assert!(can_downcast(&Type::FLOAT, &Type::INT));
+
+    // Identity.
+    assert!(can_downcast(&Type::INT, &Type::INT));
+    assert!(can_downcast(&Type::TEXT, &Type::TEXT));
+    assert!(can_downcast(&Type::BOOL, &Type::BOOL));
+
+    // TEXT → narrowing.
+    assert!(can_downcast(&Type::TEXT, &Type::INT));
+    assert!(can_downcast(&Type::TEXT, &Type::BIGINT));
+    assert!(can_downcast(&Type::TEXT, &Type::FLOAT));
+    assert!(can_downcast(&Type::TEXT, &Type::DOUBLE));
+    assert!(can_downcast(&Type::TEXT, &Type::BOOL));
+
+    // Widening not allowed.
+    assert!(!can_downcast(&Type::INT, &Type::BIGINT));
+    assert!(!can_downcast(&Type::INT, &Type::TEXT));
+    assert!(!can_downcast(&Type::BOOL, &Type::TEXT));
+    assert!(!can_downcast(&Type::INT, &Type::BOOL));
+    assert!(!can_downcast(&Type::BOOL, &Type::INT));
+  }
+
+  #[test]
+  fn test_plan_can_numeric_and_null_upcast() {
+    // Identity.
+    assert!(can_numeric_and_null_upcast(&Type::INT, &Type::INT));
+    assert!(can_numeric_and_null_upcast(&Type::BIGINT, &Type::BIGINT));
+    assert!(can_numeric_and_null_upcast(&Type::FLOAT, &Type::FLOAT));
+    assert!(can_numeric_and_null_upcast(&Type::DOUBLE, &Type::DOUBLE));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::NULL));
+
+    // Numeric widening.
+    assert!(can_numeric_and_null_upcast(&Type::INT, &Type::BIGINT));
+    assert!(can_numeric_and_null_upcast(&Type::INT, &Type::FLOAT));
+    assert!(can_numeric_and_null_upcast(&Type::INT, &Type::DOUBLE));
+    assert!(can_numeric_and_null_upcast(&Type::BIGINT, &Type::FLOAT));
+    assert!(can_numeric_and_null_upcast(&Type::BIGINT, &Type::DOUBLE));
+    assert!(can_numeric_and_null_upcast(&Type::FLOAT, &Type::DOUBLE));
+
+    // NULL → any.
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::INT));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::BIGINT));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::FLOAT));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::DOUBLE));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::TEXT));
+    assert!(can_numeric_and_null_upcast(&Type::NULL, &Type::BOOL));
+
+    // Narrowing not allowed.
+    assert!(!can_numeric_and_null_upcast(&Type::BIGINT, &Type::INT));
+    assert!(!can_numeric_and_null_upcast(&Type::DOUBLE, &Type::FLOAT));
+    assert!(!can_numeric_and_null_upcast(&Type::FLOAT, &Type::INT));
+
+    // Non-numeric not allowed (no implicit TEXT/BOOL widening).
+    assert!(!can_numeric_and_null_upcast(&Type::TEXT, &Type::INT));
+    assert!(!can_numeric_and_null_upcast(&Type::BOOL, &Type::INT));
+    assert!(!can_numeric_and_null_upcast(&Type::INT, &Type::TEXT));
+    assert!(!can_numeric_and_null_upcast(&Type::INT, &Type::BOOL));
+    assert!(!can_numeric_and_null_upcast(&Type::TEXT, &Type::BOOL));
+    assert!(!can_numeric_and_null_upcast(&Type::BOOL, &Type::TEXT));
   }
 
   #[test]

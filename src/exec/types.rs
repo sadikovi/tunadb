@@ -25,6 +25,22 @@ pub enum Type {
 }
 
 impl Type {
+  #[inline]
+  pub fn is_null(&self) -> bool {
+    match self {
+      Type::NULL => true,
+      _ => false,
+    }
+  }
+
+  #[inline]
+  pub fn is_numeric(&self) -> bool {
+    match self {
+      Type::INT | Type::BIGINT | Type::FLOAT | Type::DOUBLE => true,
+      _ => false,
+    }
+  }
+
   // Returns true if the type is STRUCT, i.e. can be used as a table schema.
   #[inline]
   pub fn is_struct(&self) -> bool {
@@ -278,6 +294,30 @@ mod tests {
       ),
     ];
     test_types_convert_roundtrip(Type::STRUCT(Fields::new(fields)));
+  }
+
+  #[test]
+  fn test_types_is_null() {
+    assert_eq!(Type::NULL.is_null(), true);
+    assert_eq!(Type::BOOL.is_null(), false);
+    assert_eq!(Type::INT.is_null(), false);
+    assert_eq!(Type::BIGINT.is_null(), false);
+    assert_eq!(Type::FLOAT.is_null(), false);
+    assert_eq!(Type::DOUBLE.is_null(), false);
+    assert_eq!(Type::TEXT.is_null(), false);
+    assert_eq!(Type::STRUCT(Fields::new(vec![])).is_null(), false);
+  }
+
+  #[test]
+  fn test_types_is_numeric() {
+    assert_eq!(Type::NULL.is_numeric(), false);
+    assert_eq!(Type::BOOL.is_numeric(), false);
+    assert_eq!(Type::INT.is_numeric(), true);
+    assert_eq!(Type::BIGINT.is_numeric(), true);
+    assert_eq!(Type::FLOAT.is_numeric(), true);
+    assert_eq!(Type::DOUBLE.is_numeric(), true);
+    assert_eq!(Type::TEXT.is_numeric(), false);
+    assert_eq!(Type::STRUCT(Fields::new(vec![])).is_numeric(), false);
   }
 
   #[test]
