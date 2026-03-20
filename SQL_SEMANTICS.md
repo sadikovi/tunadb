@@ -176,9 +176,9 @@ The `||` operator requires both operands to be `TEXT`. To concatenate a non-text
 
 ### 5.1 Operators
 
-`=`, `<>`, `<`, `>`, `<=`, `>=`
+`=`, `<>`, `!=`, `<`, `>`, `<=`, `>=`
 
-`<>` is the not-equals operator. `!=` is not supported.
+`<>` and `!=` are both accepted as not-equals operators and are interchangeable.
 
 ### 5.2 Type compatibility
 
@@ -383,6 +383,5 @@ tunadb follows PostgreSQL semantics with the following intentional differences:
 | Topic | tunadb | PostgreSQL | Rationale |
 |-------|--------|-----------|-----------|
 | `\|\|` operand types | Both must be `TEXT`; explicit cast required | Auto-casts any type to text | Simplicity; may be relaxed later |
-| `!=` operator | Not supported; use `<>` | Both `<>` and `!=` accepted | Simplicity |
 | NaN in comparisons | `NaN = NaN → TRUE`, NaN sorts greatest | Same | Intentional alignment with PostgreSQL (deviation from IEEE 754) |
 | Float division by zero | Runtime error | Runtime error | Intentional alignment with PostgreSQL (deviation from IEEE 754) |

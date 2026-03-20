@@ -521,6 +521,10 @@ impl<'a> Scanner<'a> {
             return self.make_token(TokenType::LESS_THAN);
           }
         },
+        b'!' => match self.consume(b'=') {
+          true => return self.make_token(TokenType::NOT_EQUALS),
+          false => return self.error_token(ERROR_ILLEGAL_CHARACTER),
+        },
         b'|' => match self.consume(b'|') {
           true => return self.make_token(TokenType::VERTICAL_DOUBLE),
           false => return self.make_token(TokenType::VERTICAL_SINGLE),
@@ -1114,11 +1118,20 @@ from
   #[test]
   fn test_scanner_not_equals() {
     assert_sql("<>", vec![(TokenType::NOT_EQUALS, "<>")]);
+    assert_sql("!=", vec![(TokenType::NOT_EQUALS, "!=")]);
     assert_sql(
       "a <> b",
       vec![
         (TokenType::IDENTIFIER, "a"),
         (TokenType::NOT_EQUALS, "<>"),
+        (TokenType::IDENTIFIER, "b"),
+      ]
+    );
+    assert_sql(
+      "a != b",
+      vec![
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::NOT_EQUALS, "!="),
         (TokenType::IDENTIFIER, "b"),
       ]
     );
@@ -1130,6 +1143,8 @@ from
         (TokenType::GREATER_THAN, ">"),
       ]
     );
+    // Bare ! is an error.
+    assert_sql("!", vec![(TokenType::ERROR, "!")]);
   }
 
   #[test]
