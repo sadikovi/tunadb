@@ -50,6 +50,7 @@ Any arithmetic or comparison operation with a NULL operand produces NULL at runt
 | `=`, `<>`, `<`, `>`, `<=`, `>=`          | `left.nullable OR right.nullable`      |
 | `AND`                                     | `left.nullable OR right.nullable`      |
 | `OR`                                      | `left.nullable OR right.nullable`      |
+| `\|\|` (concat)                           | `left.nullable OR right.nullable`      |
 | `NOT expr`                                | `expr.nullable`                        |
 | `CAST(x AS T)`                            | `x.nullable`                           |
 | `IS NULL`, `IS NOT NULL`                  | always `false`                         |

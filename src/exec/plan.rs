@@ -55,6 +55,43 @@ macro_rules! display_binary {
   }}
 }
 
+#[inline]
+fn identifier_display_name(parts: &[String], name: &str) -> String {
+  format!("{}{}{}", parts.join("."), if parts.len() == 0 { "" } else { "." }, name)
+}
+
+#[inline]
+fn promote_arithmetic_type(left: Type, right: Type) -> Res<Type> {
+  match (left, right) {
+    (Type::NULL, Type::NULL) => Ok(Type::NULL),
+    (Type::INT, Type::INT) | (Type::INT, Type::NULL) |
+    (Type::NULL, Type::INT) => Ok(Type::INT),
+
+    (Type::BIGINT, Type::INT) | (Type::INT, Type::BIGINT) |
+    (Type::BIGINT, Type::NULL) | (Type::NULL, Type::BIGINT) |
+    (Type::BIGINT, Type::BIGINT) => Ok(Type::BIGINT),
+
+    (Type::FLOAT, Type::INT) | (Type::INT, Type::FLOAT) |
+    (Type::FLOAT, Type::BIGINT) | (Type::BIGINT, Type::FLOAT) |
+    (Type::FLOAT, Type::NULL) | (Type::NULL, Type::FLOAT) |
+    (Type::FLOAT, Type::FLOAT) => Ok(Type::FLOAT),
+
+    (Type::DOUBLE, Type::INT) | (Type::INT, Type::DOUBLE) |
+    (Type::DOUBLE, Type::BIGINT) | (Type::BIGINT, Type::DOUBLE) |
+    (Type::DOUBLE, Type::FLOAT) | (Type::FLOAT, Type::DOUBLE) |
+    (Type::DOUBLE, Type::NULL) | (Type::NULL, Type::DOUBLE) |
+    (Type::DOUBLE, Type::DOUBLE) => Ok(Type::DOUBLE),
+
+    (left, right) => {
+      Err(
+        Error::SQLAnalysisExpressionDataType(
+          format!("Cannot reconcile data types {} and {}", left, right)
+        )
+      )
+    },
+  }
+}
+
 // Contains metadata for one or more expressions.
 pub struct ExpressionContext {
   // Origin of the expression, e.g. `schema.table` or `alias` path to find the expression.
@@ -167,136 +204,63 @@ impl Expression {
   }
 
   // Returns expression data type or promoted data type.
-  pub fn data_type(&self) -> Res<&Type> {
+  pub fn data_type(&self) -> Res<Type> {
     match self {
       Expression::Add(ref left, ref right) => {
-        match (left.data_type()?, right.data_type()?) {
-          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
-          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
-          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
-          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
-          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
-          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
-          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
-          (&Type::INT, _) => Ok(&Type::INT),
-          (_, &Type::INT) => Ok(&Type::INT),
-          (left, right) => {
-            Err(
-              Error::SQLAnalysisExpressionDataType(
-                format!("Cannot reconcile data types {} and {}", left, right)
-              )
-            )
-          },
-        }
+        promote_arithmetic_type(left.data_type()?, right.data_type()?)
       },
       Expression::Alias(ref child, _) => child.data_type(),
-      Expression::And(_, _) => Ok(&Type::BOOL),
-      Expression::Cast(_, ref tpe) => Ok(tpe),
-      Expression::Concat(_, _) => Ok(&Type::TEXT),
+      Expression::And(_, _) => Ok(Type::BOOL),
+      Expression::Cast(_, ref tpe) => Ok(tpe.as_ref().clone()),
+      Expression::Concat(_, _) => Ok(Type::TEXT),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
-        Ok(table_info.relation_fields().get()[*idx].data_type())
+        Ok(table_info.relation_fields().get()[*idx].data_type().clone())
       },
       Expression::Divide(ref left, ref right) => {
-        match (left.data_type()?, right.data_type()?) {
-          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
-          (&Type::NULL, other) => Ok(other),
-          (other, &Type::NULL) => Ok(other),
-          (&Type::INT, &Type::INT) => Ok(&Type::DOUBLE),
-          (&Type::BIGINT, &Type::INT) => Ok(&Type::DOUBLE),
-          (&Type::INT, &Type::BIGINT) => Ok(&Type::DOUBLE),
-          (&Type::BIGINT, &Type::BIGINT) => Ok(&Type::DOUBLE),
-          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
-          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
-          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
-          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
-          (left, right) => {
-            Err(
-              Error::SQLAnalysisExpressionDataType(
-                format!("Cannot reconcile data types {} and {}", left, right)
-              )
-            )
-          },
-        }
+        promote_arithmetic_type(left.data_type()?, right.data_type()?)
       },
-      Expression::Equals(_, _) => Ok(&Type::BOOL),
-      Expression::GreaterThan(_, _) => Ok(&Type::BOOL),
-      Expression::GreaterThanEquals(_, _) => Ok(&Type::BOOL),
+      Expression::Equals(_, _) => Ok(Type::BOOL),
+      Expression::GreaterThan(_, _) => Ok(Type::BOOL),
+      Expression::GreaterThanEquals(_, _) => Ok(Type::BOOL),
       Expression::Identifier(ref parts, ref name) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
             format!(
-              "Identifier {}{}{} does not have a data type",
-              parts.join("."),
-              if parts.len() == 0 { "" } else { "." },
-              name
+              "Identifier {} does not have a data type",
+              identifier_display_name(parts, name)
             )
           )
         )
       },
-      Expression::IsNull(_) => Ok(&Type::BOOL),
-      Expression::IsNotNull(_) => Ok(&Type::BOOL),
-      Expression::LessThan(_, _) => Ok(&Type::BOOL),
-      Expression::LessThanEquals(_, _) => Ok(&Type::BOOL),
-      Expression::LiteralBool(_) => Ok(&Type::BOOL),
-      Expression::LiteralInt(_) => Ok(&Type::INT),
-      Expression::LiteralBigInt(_) => Ok(&Type::BIGINT),
-      Expression::LiteralFloat(_) => Ok(&Type::FLOAT),
-      Expression::LiteralDouble(_) => Ok(&Type::DOUBLE),
-      Expression::LiteralString(_) => Ok(&Type::TEXT),
+      Expression::IsNull(_) => Ok(Type::BOOL),
+      Expression::IsNotNull(_) => Ok(Type::BOOL),
+      Expression::LessThan(_, _) => Ok(Type::BOOL),
+      Expression::LessThanEquals(_, _) => Ok(Type::BOOL),
+      Expression::LiteralBool(_) => Ok(Type::BOOL),
+      Expression::LiteralInt(_) => Ok(Type::INT),
+      Expression::LiteralBigInt(_) => Ok(Type::BIGINT),
+      Expression::LiteralFloat(_) => Ok(Type::FLOAT),
+      Expression::LiteralDouble(_) => Ok(Type::DOUBLE),
+      Expression::LiteralString(_) => Ok(Type::TEXT),
       Expression::Multiply(ref left, ref right) => {
-        match (left.data_type()?, right.data_type()?) {
-          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
-          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
-          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
-          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
-          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
-          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
-          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
-          (&Type::INT, _) => Ok(&Type::INT),
-          (_, &Type::INT) => Ok(&Type::INT),
-          (left, right) => {
-            Err(
-              Error::SQLAnalysisExpressionDataType(
-                format!("Cannot reconcile data types {} and {}", left, right)
-              )
-            )
-          },
-        }
+        promote_arithmetic_type(left.data_type()?, right.data_type()?)
       },
-      Expression::Not(_) => Ok(&Type::BOOL),
-      Expression::NotEquals(_, _) => Ok(&Type::BOOL),
-      Expression::Null => Ok(&Type::NULL),
-      Expression::Or(_, _) => Ok(&Type::BOOL),
+      Expression::Not(_) => Ok(Type::BOOL),
+      Expression::NotEquals(_, _) => Ok(Type::BOOL),
+      Expression::Null => Ok(Type::NULL),
+      Expression::Or(_, _) => Ok(Type::BOOL),
       Expression::Star(ref parts) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
             format!(
-              "Star expression {}{}* does not have a data type",
-              parts.join("."),
-              if parts.len() == 0 { "" } else { "." }
+              "Star expression {} does not have a data type",
+              identifier_display_name(parts, "*")
             )
           )
         )
       },
       Expression::Subtract(ref left, ref right) => {
-        match (left.data_type()?, right.data_type()?) {
-          (&Type::NULL, &Type::NULL) => Ok(&Type::NULL),
-          (&Type::DOUBLE, _) => Ok(&Type::DOUBLE),
-          (_, &Type::DOUBLE) => Ok(&Type::DOUBLE),
-          (&Type::FLOAT, _) => Ok(&Type::FLOAT),
-          (_, &Type::FLOAT) => Ok(&Type::FLOAT),
-          (&Type::BIGINT, _) => Ok(&Type::BIGINT),
-          (_, &Type::BIGINT) => Ok(&Type::BIGINT),
-          (&Type::INT, _) => Ok(&Type::INT),
-          (_, &Type::INT) => Ok(&Type::INT),
-          (left, right) => {
-            Err(
-              Error::SQLAnalysisExpressionDataType(
-                format!("Cannot reconcile data types {} and {}", left, right)
-              )
-            )
-          },
-        }
+        promote_arithmetic_type(left.data_type()?, right.data_type()?)
       },
       Expression::UnaryPlus(ref child) => child.data_type(),
       Expression::UnaryMinus(ref child) => child.data_type(),
@@ -317,15 +281,15 @@ impl Expression {
       Expression::Divide(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Equals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::GreaterThan(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
-      Expression::GreaterThanEquals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::GreaterThanEquals(ref left, ref right) => {
+        Ok(left.nullable()? || right.nullable()?)
+      },
       Expression::Identifier(ref parts, ref name) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
             format!(
-              "Identifier {}{}{} does not have nullable status",
-              parts.join("."),
-              if parts.len() == 0 { "" } else { "." },
-              name
+              "Identifier {} does not have nullable status",
+              identifier_display_name(parts, name)
             )
           )
         )
@@ -348,7 +312,10 @@ impl Expression {
       Expression::Star(ref parts) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
-            format!("Star expression {} does not have nullable status", parts.join("."))
+            format!(
+              "Star expression {} does not have nullable status",
+              identifier_display_name(parts, "*")
+            )
           )
         )
       },
@@ -1142,50 +1109,87 @@ pub mod tests {
         Rc::new(Expression::LiteralInt(1)),
         Rc::new("foo".to_string())
       ).data_type(),
-      Ok(&Type::INT)
+      Ok(Type::INT)
     );
     assert_eq!(
       Expression::Add(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralBigInt(2)),
       ).data_type(),
-      Ok(&Type::BIGINT)
+      Ok(Type::BIGINT)
     );
     assert_eq!(
       Expression::And(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
+
+    // §3.3: Integer division stays integer.
     assert_eq!(
       Expression::Divide(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
-      Ok(&Type::DOUBLE)
+      Ok(Type::INT)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralBigInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(Type::BIGINT)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralBigInt(2)),
+      ).data_type(),
+      Ok(Type::BIGINT)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralBigInt(1)),
+        Rc::new(Expression::LiteralBigInt(2)),
+      ).data_type(),
+      Ok(Type::BIGINT)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralFloat(1.0)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(Type::FLOAT)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralDouble(1.0)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(Type::DOUBLE)
     );
     assert_eq!(
       Expression::Cast(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Type::BIGINT),
       ).data_type(),
-      Ok(&Type::BIGINT)
+      Ok(Type::BIGINT)
     );
     assert_eq!(
       Expression::Equals(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
     assert_eq!(
       Expression::GreaterThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
     assert_eq!(
       Expression::GreaterThanEquals(
         Rc::new(Expression::Null),
         Rc::new(Expression::Null)
       ).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
     assert_eq!(
       Expression::Identifier(
@@ -1208,32 +1212,66 @@ pub mod tests {
     );
     assert_eq!(
       Expression::LessThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
     assert_eq!(
       Expression::LessThanEquals(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
-    assert_eq!(Expression::LiteralBool(true).data_type(), Ok(&Type::BOOL));
-    assert_eq!(Expression::LiteralInt(1i32).data_type(), Ok(&Type::INT));
-    assert_eq!(Expression::LiteralBigInt(1i64).data_type(), Ok(&Type::BIGINT));
-    assert_eq!(Expression::LiteralFloat(1f32).data_type(), Ok(&Type::FLOAT));
-    assert_eq!(Expression::LiteralDouble(1f64).data_type(), Ok(&Type::DOUBLE));
-    assert_eq!(Expression::LiteralString(Rc::new("foo".to_string())).data_type(), Ok(&Type::TEXT));
+    assert_eq!(Expression::LiteralBool(true).data_type(), Ok(Type::BOOL));
+    assert_eq!(Expression::LiteralInt(1i32).data_type(), Ok(Type::INT));
+    assert_eq!(Expression::LiteralBigInt(1i64).data_type(), Ok(Type::BIGINT));
+    assert_eq!(Expression::LiteralFloat(1f32).data_type(), Ok(Type::FLOAT));
+    assert_eq!(Expression::LiteralDouble(1f64).data_type(), Ok(Type::DOUBLE));
+    assert_eq!(Expression::LiteralString(Rc::new("foo".to_string())).data_type(), Ok(Type::TEXT));
     assert_eq!(
       Expression::Multiply(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralFloat(1f32)),
       ).data_type(),
-      Ok(&Type::FLOAT)
+      Ok(Type::FLOAT)
     );
-    assert_eq!(Expression::Null.data_type(), Ok(&Type::NULL));
+    assert_eq!(Expression::Null.data_type(), Ok(Type::NULL));
+
+    // §3.2: NULL op T infers type T; NULL op NULL infers NULL.
+    assert_eq!(
+      Expression::Add(Rc::new(Expression::Null), Rc::new(Expression::LiteralInt(1))).data_type(),
+      Ok(Type::INT)
+    );
+    assert_eq!(
+      Expression::Add(Rc::new(Expression::LiteralDouble(1.0)), Rc::new(Expression::Null)).data_type(),
+      Ok(Type::DOUBLE)
+    );
+    assert_eq!(
+      Expression::Add(Rc::new(Expression::Null), Rc::new(Expression::Null)).data_type(),
+      Ok(Type::NULL)
+    );
+    assert_eq!(
+      Expression::Divide(Rc::new(Expression::Null), Rc::new(Expression::LiteralBigInt(1))).data_type(),
+      Ok(Type::BIGINT)
+    );
+
+    // §3.4 / §8.2: Non-numeric operands in arithmetic are a type error.
+    assert_eq!(
+      Expression::Add(
+        Rc::new(Expression::LiteralDouble(1.0)),
+        Rc::new(Expression::LiteralString(Rc::new("x".to_string()))),
+      ).data_type(),
+      Err(Error::SQLAnalysisExpressionDataType("Cannot reconcile data types DOUBLE and TEXT".to_string()))
+    );
+    assert_eq!(
+      Expression::Multiply(
+        Rc::new(Expression::LiteralFloat(1.0)),
+        Rc::new(Expression::LiteralBool(true)),
+      ).data_type(),
+      Err(Error::SQLAnalysisExpressionDataType("Cannot reconcile data types FLOAT and BOOL".to_string()))
+    );
     assert_eq!(
       Expression::Or(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
     assert_eq!(
       Expression::Star(Rc::new(vec!["foo".to_string()])).data_type(),
@@ -1256,32 +1294,32 @@ pub mod tests {
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralDouble(2f64)),
       ).data_type(),
-      Ok(&Type::DOUBLE)
+      Ok(Type::DOUBLE)
     );
     assert_eq!(
       Expression::UnaryPlus(Rc::new(Expression::LiteralInt(1))).data_type(),
-      Ok(&Type::INT)
+      Ok(Type::INT)
     );
     assert_eq!(
       Expression::UnaryMinus(Rc::new(Expression::LiteralFloat(1.1))).data_type(),
-      Ok(&Type::FLOAT)
+      Ok(Type::FLOAT)
     );
     assert_eq!(
       Expression::Concat(
         Rc::new(Expression::LiteralString(Rc::new("a".to_string()))),
         Rc::new(Expression::LiteralString(Rc::new("b".to_string()))),
       ).data_type(),
-      Ok(&Type::TEXT)
+      Ok(Type::TEXT)
     );
-    assert_eq!(Expression::IsNull(Rc::new(Expression::Null)).data_type(), Ok(&Type::BOOL));
-    assert_eq!(Expression::IsNotNull(Rc::new(Expression::Null)).data_type(), Ok(&Type::BOOL));
-    assert_eq!(Expression::Not(Rc::new(Expression::LiteralBool(true))).data_type(), Ok(&Type::BOOL));
+    assert_eq!(Expression::IsNull(Rc::new(Expression::Null)).data_type(), Ok(Type::BOOL));
+    assert_eq!(Expression::IsNotNull(Rc::new(Expression::Null)).data_type(), Ok(Type::BOOL));
+    assert_eq!(Expression::Not(Rc::new(Expression::LiteralBool(true))).data_type(), Ok(Type::BOOL));
     assert_eq!(
       Expression::NotEquals(
         Rc::new(Expression::LiteralInt(1)),
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
-      Ok(&Type::BOOL)
+      Ok(Type::BOOL)
     );
   }
 
