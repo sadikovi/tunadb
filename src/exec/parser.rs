@@ -165,6 +165,16 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn primary(&mut self) -> Res<Expression> {
+    // CAST expression — allowed as a primary so it can appear anywhere in arithmetic.
+    if self.matches(TokenType::CAST)? {
+      self.consume(TokenType::PAREN_LEFT, "Expected '('")?;
+      let expr = self.expression()?;
+      self.consume(TokenType::AS, "Expected 'AS'")?;
+      let tpe = self.column_type()?;
+      self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
+      return Ok(Expression::Cast(Rc::new(expr), Rc::new(tpe)));
+    }
+
     // Global star.
     if self.matches(TokenType::STAR)? {
       return Ok(Expression::Star(Rc::new(Vec::new())));
@@ -223,11 +233,7 @@ impl<'a> Parser<'a> {
 
       if let Ok(double_value) = value.parse::<f64>() {
         self.advance()?;
-        if double_value >= f32::MIN.into() && double_value <= f32::MAX.into() {
-          return Ok(Expression::LiteralFloat(double_value as f32));
-        } else {
-          return Ok(Expression::LiteralDouble(double_value));
-        }
+        return Ok(Expression::LiteralDouble(double_value));
       }
 
       return Err(self.error_at(&self.current, &format!("Invalid number '{}'", value)));
@@ -273,9 +279,11 @@ impl<'a> Parser<'a> {
   #[inline]
   fn unary(&mut self) -> Res<Expression> {
     if self.matches(TokenType::MINUS)? {
-      Ok(Expression::UnaryMinus(Rc::new(self.primary()?)))
+      // Call unary again to handle "--1" and "-+1".
+      Ok(Expression::UnaryMinus(Rc::new(self.unary()?)))
     } else if self.matches(TokenType::PLUS)? {
-      Ok(Expression::UnaryPlus(Rc::new(self.primary()?)))
+      // Call unary again to handle "++1" and "+-1".
+      Ok(Expression::UnaryPlus(Rc::new(self.unary()?)))
     } else {
       self.primary()
     }
@@ -321,24 +329,34 @@ impl<'a> Parser<'a> {
 
   #[inline]
   fn comparison(&mut self) -> Res<Expression> {
-    let left = self.addition()?;
+    let left = self.concatenation()?;
 
-    // Parse the right-hand side of the expression.
     if self.matches(TokenType::EQUALS)? {
-      let right = self.addition()?;
+      let right = self.concatenation()?;
       Ok(Expression::Equals(Rc::new(left), Rc::new(right)))
+    } else if self.matches(TokenType::NOT_EQUALS)? {
+      let right = self.concatenation()?;
+      Ok(Expression::NotEquals(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::GREATER_THAN)? {
-      let right = self.addition()?;
+      let right = self.concatenation()?;
       Ok(Expression::GreaterThan(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::GREATER_THAN_EQUALS)? {
-      let right = self.addition()?;
+      let right = self.concatenation()?;
       Ok(Expression::GreaterThanEquals(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::LESS_THAN)? {
-      let right = self.addition()?;
+      let right = self.concatenation()?;
       Ok(Expression::LessThan(Rc::new(left), Rc::new(right)))
     } else if self.matches(TokenType::LESS_THAN_EQUALS)? {
-      let right = self.addition()?;
+      let right = self.concatenation()?;
       Ok(Expression::LessThanEquals(Rc::new(left), Rc::new(right)))
+    } else if self.matches(TokenType::IS)? {
+      if self.matches(TokenType::NOT)? {
+        self.consume(TokenType::NULL, "Expected NULL after IS NOT")?;
+        Ok(Expression::IsNotNull(Rc::new(left)))
+      } else {
+        self.consume(TokenType::NULL, "Expected NULL after IS")?;
+        Ok(Expression::IsNull(Rc::new(left)))
+      }
     } else {
       // Technically, a single left-hand side can be a boolean expression already, e.g. boolean
       // literal or a column evaluated to a boolean, so absence of the comparison operator does
@@ -348,15 +366,34 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn concatenation(&mut self) -> Res<Expression> {
+    let mut expr = self.addition()?;
+    while self.matches(TokenType::VERTICAL_DOUBLE)? {
+      let right = self.addition()?;
+      expr = Expression::Concat(Rc::new(expr), Rc::new(right));
+    }
+    Ok(expr)
+  }
+
+  #[inline]
   fn logical_and(&mut self) -> Res<Expression> {
-    let mut expr = self.comparison()?;
+    let mut expr = self.logical_not()?;
 
     while self.matches(TokenType::AND)? {
-      let right = self.comparison()?;
+      let right = self.logical_not()?;
       expr = Expression::And(Rc::new(expr), Rc::new(right));
     }
 
     Ok(expr)
+  }
+
+  #[inline]
+  fn logical_not(&mut self) -> Res<Expression> {
+    if self.matches(TokenType::NOT)? {
+      Ok(Expression::Not(Rc::new(self.logical_not()?)))
+    } else {
+      self.comparison()
+    }
   }
 
   #[inline]
@@ -372,22 +409,8 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
-  fn cast(&mut self) -> Res<Expression> {
-    if self.matches(TokenType::CAST)? {
-      self.consume(TokenType::PAREN_LEFT, "Expected '('")?;
-      let expr = self.logical_or()?;
-      self.consume(TokenType::AS, "Expected 'AS'")?;
-      let tpe = self.column_type()?;
-      self.consume(TokenType::PAREN_RIGHT, "Expected ')'")?;
-      Ok(Expression::Cast(Rc::new(expr), Rc::new(tpe)))
-    } else {
-      self.logical_or()
-    }
-  }
-
-  #[inline]
   fn expression(&mut self) -> Res<Expression> {
-    self.cast()
+    self.logical_or()
   }
 
   //============
@@ -793,9 +816,9 @@ pub mod tests {
       local(
         vec![
           int(1),
-          float(1.2),
-          _minus(float(3.4)),
-          _plus(float(5.6)),
+          double(1.2),
+          _minus(double(3.4)),
+          _plus(double(5.6)),
           string("7.8"),
           int(9),
           boolean(true),
@@ -880,6 +903,15 @@ pub mod tests {
   }
 
   #[test]
+  fn test_parser_unary_chained() {
+    // Note: "--" starts a comment in SQL, so chained minus requires spaces.
+    assert_plan("select - -1", local(vec![_minus(_minus(int(1)))]));
+    assert_plan("select ++1", local(vec![_plus(_plus(int(1)))]));
+    assert_plan("select -+1", local(vec![_minus(_plus(int(1)))]));
+    assert_plan("select +-1", local(vec![_plus(_minus(int(1)))]));
+  }
+
+  #[test]
   fn test_parser_expressions_identifier_functions() {
     // Escaped identifier values.
     assert_eq!(str_to_norm_identifier(""), "".to_string());
@@ -943,7 +975,7 @@ pub mod tests {
 
     assert_plan(
       "select 1.2",
-      local(vec![float(1.2)]),
+      local(vec![double(1.2)]),
     );
   }
 
@@ -1579,5 +1611,123 @@ pub mod tests {
         local(vec![int(3)]),
       ],
     );
+  }
+
+  #[test]
+  fn test_parser_not_equals() {
+    assert_plan(
+      "select * from test where a <> 1",
+      filter(
+        not_equals(identifier("a"), int(1)),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+
+    assert_plan(
+      "select * from test where a <> b",
+      filter(
+        not_equals(identifier("a"), identifier("b")),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_not() {
+    assert_plan(
+      "select * from test where not a",
+      filter(
+        not(identifier("a")),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+
+    assert_plan(
+      "select * from test where not not a",
+      filter(
+        not(not(identifier("a"))),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+
+    assert_plan(
+      "select * from test where not a and b",
+      filter(
+        and(not(identifier("a")), identifier("b")),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_is_null() {
+    assert_plan(
+      "select * from test where a is null",
+      filter(
+        is_null(identifier("a")),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+
+    assert_plan(
+      "select * from test where a is not null",
+      filter(
+        is_not_null(identifier("a")),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+
+    assert_plan(
+      "select * from test where a is null and b is not null",
+      filter(
+        and(is_null(identifier("a")), is_not_null(identifier("b"))),
+        project(vec![star()], from(None, "test", None))
+      )
+    );
+  }
+
+  #[test]
+  fn test_parser_concat() {
+    assert_plan(
+      "select 'a' || 'b'",
+      local(vec![concat(string("a"), string("b"))])
+    );
+
+    assert_plan(
+      "select 'a' || 'b' || 'c'",
+      local(vec![concat(concat(string("a"), string("b")), string("c"))])
+    );
+  }
+
+  #[test]
+  fn test_parser_cast_as_primary() {
+    // CAST must be usable inside arithmetic expressions, not just at the top level.
+    assert_plan(
+      "select 1 + cast(2 as bigint)",
+      local(vec![add(int(1), cast(int(2), Type::BIGINT))])
+    );
+
+    assert_plan(
+      "select cast(1 as bigint) * cast(2 as double)",
+      local(vec![multiply(cast(int(1), Type::BIGINT), cast(int(2), Type::DOUBLE))])
+    );
+
+    assert_plan(
+      "select cast(a as text) || 'suffix'",
+      local(vec![concat(cast(identifier("a"), Type::TEXT), string("suffix"))])
+    );
+  }
+
+  #[test]
+  fn test_parser_float_literals_are_double() {
+    // All decimal and exponent literals must parse as DOUBLE (spec Rule 10.2).
+    assert_plan("select 1.0", local(vec![double(1.0)]));
+    assert_plan("select 1.5", local(vec![double(1.5)]));
+    assert_plan("select 0.001", local(vec![double(0.001)]));
+    assert_plan("select 1e3", local(vec![double(1e3)]));
+    assert_plan("select 1.5e-2", local(vec![double(1.5e-2)]));
+    // Integer literals still parse as INT or BIGINT.
+    assert_plan("select 1", local(vec![int(1)]));
+    assert_plan("select 100000000000", local(vec![bigint(100000000000)]));
   }
 }

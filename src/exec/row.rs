@@ -205,12 +205,11 @@ impl Row {
     match self {
       Row::MutableRow { ref nulls, ref fixed, .. } => {
         assert_is_not_null(nulls, i);
-        let bytes = u64_u8!(fixed[i]);
-        u8_f64!(&bytes) as f32
+        f32::from_bits(fixed[i] as u32)
       },
       Row::BufferRow { ref buf, .. } => {
         let slot = get_fixed_slot(buf, i);
-        u8_f64!(slot) as f32
+        f32::from_bits(u8_u64!(slot) as u32)
       },
     }
   }
@@ -318,8 +317,7 @@ impl Row {
           is_fixed[i] = true;
         }
         nulls[i] = false;
-        let val = f64_u8!(value as f64);
-        fixed[i] = u8_u64!(val);
+        fixed[i] = value.to_bits() as u64;
       },
       Row::BufferRow { .. } => unimplemented!("BufferRow does not support set_f32"),
     }
@@ -581,6 +579,63 @@ mod tests {
     assert_eq!(row.get_f32(3), 1.2);
     assert_eq!(row.get_f64(4), 2.4);
     assert_eq!(row.get_str(5), "123");
+  }
+
+  #[test]
+  fn test_row_float_f32_stored_as_f32_bits() {
+    // f32 must be stored as its own bit pattern, not promoted to f64.
+    // 1.2f32 as f64 = 1.2000000476837158, which differs from 1.2f64 = 1.2.
+    // After the fix, the row stores each with its own precision.
+    let mut row = Row::new(2);
+    row.set_f32(0, 1.2f32);
+    row.set_f64(1, 1.2f64);
+
+    assert_eq!(row.get_f32(0), 1.2f32);
+    assert_eq!(row.get_f64(1), 1.2f64);
+    // The stored representations must be distinct.
+    assert_ne!(row.get_f32(0) as f64, row.get_f64(1));
+  }
+
+  #[test]
+  fn test_row_float_special_values() {
+    let mut row = Row::new(8);
+    row.set_f32(0, f32::INFINITY);
+    row.set_f32(1, f32::NEG_INFINITY);
+    row.set_f32(2, f32::NAN);
+    row.set_f32(3, f32::MAX);
+
+    assert_eq!(row.get_f32(0), f32::INFINITY);
+    assert_eq!(row.get_f32(1), f32::NEG_INFINITY);
+    assert!(row.get_f32(2).is_nan());
+    assert_eq!(row.get_f32(3), f32::MAX);
+
+    row.set_f64(4, f64::INFINITY);
+    row.set_f64(5, f64::NEG_INFINITY);
+    row.set_f64(6, f64::NAN);
+    row.set_f64(7, f64::MAX);
+
+    assert_eq!(row.get_f64(4), f64::INFINITY);
+    assert_eq!(row.get_f64(5), f64::NEG_INFINITY);
+    assert!(row.get_f64(6).is_nan());
+    assert_eq!(row.get_f64(7), f64::MAX);
+  }
+
+  #[test]
+  fn test_row_float_f32_buffer_roundtrip() {
+    // Verify that f32 values survive a full MutableRow → to_vec() → BufferRow roundtrip.
+    let mut row = Row::new(4);
+    row.set_f32(0, 1.2f32);
+    row.set_f32(1, f32::INFINITY);
+    row.set_f32(2, f32::NEG_INFINITY);
+    row.set_f32(3, f32::MAX);
+
+    let buf = row.to_vec();
+    let row = Row::from_buf(4, buf);
+
+    assert_eq!(row.get_f32(0), 1.2f32);
+    assert_eq!(row.get_f32(1), f32::INFINITY);
+    assert_eq!(row.get_f32(2), f32::NEG_INFINITY);
+    assert_eq!(row.get_f32(3), f32::MAX);
   }
 
   #[test]

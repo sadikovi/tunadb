@@ -22,6 +22,7 @@ pub enum TokenType {
   // 2+ character tokens.
   GREATER_THAN_EQUALS,
   LESS_THAN_EQUALS,
+  NOT_EQUALS,
   VERTICAL_DOUBLE,
 
   // Literals.
@@ -511,9 +512,14 @@ impl<'a> Scanner<'a> {
           true => return self.make_token(TokenType::GREATER_THAN_EQUALS),
           false => return self.make_token(TokenType::GREATER_THAN),
         },
-        b'<' => match self.consume(b'=') {
-          true => return self.make_token(TokenType::LESS_THAN_EQUALS),
-          false => return self.make_token(TokenType::LESS_THAN),
+        b'<' => {
+          if self.consume(b'=') {
+            return self.make_token(TokenType::LESS_THAN_EQUALS);
+          } else if self.consume(b'>') {
+            return self.make_token(TokenType::NOT_EQUALS);
+          } else {
+            return self.make_token(TokenType::LESS_THAN);
+          }
         },
         b'|' => match self.consume(b'|') {
           true => return self.make_token(TokenType::VERTICAL_DOUBLE),
@@ -1101,6 +1107,27 @@ from
         (TokenType::NUMBER, "6"),
         (TokenType::PAREN_RIGHT, ")"),
         (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_not_equals() {
+    assert_sql("<>", vec![(TokenType::NOT_EQUALS, "<>")]);
+    assert_sql(
+      "a <> b",
+      vec![
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::NOT_EQUALS, "<>"),
+        (TokenType::IDENTIFIER, "b"),
+      ]
+    );
+    // Space between < and > produces two separate tokens.
+    assert_sql(
+      "< >",
+      vec![
+        (TokenType::LESS_THAN, "<"),
+        (TokenType::GREATER_THAN, ">"),
       ]
     );
   }

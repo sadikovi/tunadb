@@ -94,6 +94,7 @@ pub enum Expression {
   Alias(Rc<Expression>, Rc<String> /* alias name */),
   And(Rc<Expression>, Rc<Expression>),
   Cast(Rc<Expression>, Rc<Type>),
+  Concat(Rc<Expression>, Rc<Expression>),
   ColumnRef(
     Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
@@ -105,6 +106,8 @@ pub enum Expression {
   GreaterThan(Rc<Expression>, Rc<Expression>),
   GreaterThanEquals(Rc<Expression>, Rc<Expression>),
   Identifier(Rc<Vec<String>> /* identifier parts/origin */, Rc<String> /* name */),
+  IsNull(Rc<Expression>),
+  IsNotNull(Rc<Expression>),
   LessThan(Rc<Expression>, Rc<Expression>),
   LessThanEquals(Rc<Expression>, Rc<Expression>),
   LiteralBool(bool),
@@ -114,6 +117,8 @@ pub enum Expression {
   LiteralDouble(f64),
   LiteralString(Rc<String> /* string value */),
   Multiply(Rc<Expression>, Rc<Expression>),
+  Not(Rc<Expression>),
+  NotEquals(Rc<Expression>, Rc<Expression>),
   Null,
   Or(Rc<Expression>, Rc<Expression>),
   Star(Rc<Vec<String>> /* identifier parts/origin */),
@@ -130,6 +135,7 @@ impl Expression {
       Expression::Alias(_, ref name) => name,
       Expression::And(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Cast(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Concat(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         table_info.relation_fields().get()[*idx].name()
       },
@@ -138,6 +144,8 @@ impl Expression {
       Expression::GreaterThan(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::GreaterThanEquals(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Identifier(_, ref name) => name,
+      Expression::IsNull(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::IsNotNull(_) => DEFAULT_EXPRESSION_NAME,
       Expression::LessThan(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::LessThanEquals(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::LiteralBool(_) => DEFAULT_EXPRESSION_NAME,
@@ -147,6 +155,8 @@ impl Expression {
       Expression::LiteralDouble(_) => DEFAULT_EXPRESSION_NAME,
       Expression::LiteralString(_) => DEFAULT_EXPRESSION_NAME,
       Expression::Multiply(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::Not(_) => DEFAULT_EXPRESSION_NAME,
+      Expression::NotEquals(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Null => DEFAULT_EXPRESSION_NAME,
       Expression::Or(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Star(_) => DEFAULT_EXPRESSION_NAME,
@@ -182,6 +192,7 @@ impl Expression {
       Expression::Alias(ref child, _) => child.data_type(),
       Expression::And(_, _) => Ok(&Type::BOOL),
       Expression::Cast(_, ref tpe) => Ok(tpe),
+      Expression::Concat(_, _) => Ok(&Type::TEXT),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         Ok(table_info.relation_fields().get()[*idx].data_type())
       },
@@ -222,6 +233,8 @@ impl Expression {
           )
         )
       },
+      Expression::IsNull(_) => Ok(&Type::BOOL),
+      Expression::IsNotNull(_) => Ok(&Type::BOOL),
       Expression::LessThan(_, _) => Ok(&Type::BOOL),
       Expression::LessThanEquals(_, _) => Ok(&Type::BOOL),
       Expression::LiteralBool(_) => Ok(&Type::BOOL),
@@ -250,6 +263,8 @@ impl Expression {
           },
         }
       },
+      Expression::Not(_) => Ok(&Type::BOOL),
+      Expression::NotEquals(_, _) => Ok(&Type::BOOL),
       Expression::Null => Ok(&Type::NULL),
       Expression::Or(_, _) => Ok(&Type::BOOL),
       Expression::Star(ref parts) => {
@@ -293,15 +308,16 @@ impl Expression {
     match self {
       Expression::Add(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Alias(ref child, _) => child.nullable(),
-      Expression::And(_, _) => Ok(false),
+      Expression::And(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Cast(ref expr, _) => expr.nullable(),
+      Expression::Concat(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
         Ok(table_info.relation_fields().get()[*idx].nullable())
       },
       Expression::Divide(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
-      Expression::Equals(_, _) => Ok(false),
-      Expression::GreaterThan(_, _) => Ok(false),
-      Expression::GreaterThanEquals(_, _) => Ok(false),
+      Expression::Equals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::GreaterThan(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::GreaterThanEquals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Identifier(ref parts, ref name) => {
         Err(
           Error::SQLAnalysisUnresolvedExpression(
@@ -314,8 +330,10 @@ impl Expression {
           )
         )
       },
-      Expression::LessThan(_, _) => Ok(false),
-      Expression::LessThanEquals(_, _) => Ok(false),
+      Expression::IsNull(_) => Ok(false),
+      Expression::IsNotNull(_) => Ok(false),
+      Expression::LessThan(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::LessThanEquals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::LiteralBool(_) => Ok(false),
       Expression::LiteralInt(_) => Ok(false),
       Expression::LiteralBigInt(_) => Ok(false),
@@ -323,6 +341,8 @@ impl Expression {
       Expression::LiteralDouble(_) => Ok(false),
       Expression::LiteralString(_) => Ok(false),
       Expression::Multiply(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::Not(ref child) => child.nullable(),
+      Expression::NotEquals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Null => Ok(true),
       Expression::Or(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Star(ref parts) => {
@@ -354,6 +374,7 @@ impl TreeNode<Expression> for Expression {
         expr.display(f)?;
         write!(f, "{})", tpe)
       },
+      Expression::Concat(ref left, ref right) => display_binary!(f, left, "||", right),
       Expression::ColumnRef(_, ref table_info, _, ref index) => {
         let name = table_info.relation_fields().get()[*index].name();
         let tpe = table_info.relation_fields().get()[*index].data_type();
@@ -366,6 +387,8 @@ impl TreeNode<Expression> for Expression {
       Expression::Identifier(ref parts, ref name) => {
         write!(f, "${}{}{}", parts.join("."), if parts.len() == 0 { "" } else { "." }, name)
       },
+      Expression::IsNull(ref expr) => { expr.display(f)?; write!(f, " is null") },
+      Expression::IsNotNull(ref expr) => { expr.display(f)?; write!(f, " is not null") },
       Expression::LessThan(ref left, ref right) => display_binary!(f, left, "<", right),
       Expression::LessThanEquals(ref left, ref right) => display_binary!(f, left, "<=", right),
       Expression::LiteralBool(value) => write!(f, "{}", value),
@@ -375,6 +398,8 @@ impl TreeNode<Expression> for Expression {
       Expression::LiteralDouble(value) => write!(f, "{}", value),
       Expression::LiteralString(value) => write!(f, "{}", value),
       Expression::Multiply(ref left, ref right) => display_binary!(f, left, "x", right),
+      Expression::Not(ref child) => display_unary!(f, "not ", child),
+      Expression::NotEquals(ref left, ref right) => display_binary!(f, left, "<>", right),
       Expression::Null => write!(f, "null"),
       Expression::Or(ref left, ref right) => display_binary!(f, left, "or", right),
       Expression::Star(ref parts) => {
@@ -398,12 +423,15 @@ impl TreeNode<Expression> for Expression {
       Expression::Alias(ref child, _) => vec![child],
       Expression::And(ref left, ref right) => vec![left, right],
       Expression::Cast(ref expr, _) => vec![expr],
+      Expression::Concat(ref left, ref right) => vec![left, right],
       Expression::ColumnRef(_, _, _, _) => Vec::new(),
       Expression::Divide(ref left, ref right) => vec![left, right],
       Expression::Equals(ref left, ref right) => vec![left, right],
       Expression::GreaterThan(ref left, ref right) => vec![left, right],
       Expression::GreaterThanEquals(ref left, ref right) => vec![left, right],
       Expression::Identifier(_, _) => Vec::new(),
+      Expression::IsNull(ref expr) => vec![expr],
+      Expression::IsNotNull(ref expr) => vec![expr],
       Expression::LessThan(ref left, ref right) => vec![left, right],
       Expression::LessThanEquals(ref left, ref right) => vec![left, right],
       Expression::LiteralBool(_) => Vec::new(),
@@ -413,6 +441,8 @@ impl TreeNode<Expression> for Expression {
       Expression::LiteralDouble(_) => Vec::new(),
       Expression::LiteralString(_) => Vec::new(),
       Expression::Multiply(ref left, ref right) => vec![left, right],
+      Expression::Not(ref child) => vec![child],
+      Expression::NotEquals(ref left, ref right) => vec![left, right],
       Expression::Null => Vec::new(),
       Expression::Or(ref left, ref right) => vec![left, right],
       Expression::Star(_) => Vec::new(),
@@ -438,6 +468,10 @@ impl TreeNode<Expression> for Expression {
         Expression::And(Rc::new(left), Rc::new(right))
       },
       Expression::Cast(ref expr, ref tpe) => Expression::Cast(expr.clone(), tpe.clone()),
+      Expression::Concat(_, _) => {
+        let (left, right) = get_binary!("Concat", children);
+        Expression::Concat(Rc::new(left), Rc::new(right))
+      },
       Expression::ColumnRef(ref schema_info, ref table_info, ref alias, ref index) => {
         Expression::ColumnRef(schema_info.clone(), table_info.clone(), alias.clone(), *index)
       },
@@ -458,6 +492,14 @@ impl TreeNode<Expression> for Expression {
         Expression::GreaterThanEquals(Rc::new(left), Rc::new(right))
       },
       Expression::Identifier(parts, name) => Expression::Identifier(parts.clone(), name.clone()),
+      Expression::IsNull(_) => {
+        let child = get_unary!("IsNull", children);
+        Expression::IsNull(Rc::new(child))
+      },
+      Expression::IsNotNull(_) => {
+        let child = get_unary!("IsNotNull", children);
+        Expression::IsNotNull(Rc::new(child))
+      },
       Expression::LessThan(_, _) => {
         let (left, right) = get_binary!("LessThan", children);
         Expression::LessThan(Rc::new(left), Rc::new(right))
@@ -475,6 +517,14 @@ impl TreeNode<Expression> for Expression {
       Expression::Multiply(_, _) => {
         let (left, right) = get_binary!("Multiply", children);
         Expression::Multiply(Rc::new(left), Rc::new(right))
+      },
+      Expression::Not(_) => {
+        let child = get_unary!("Not", children);
+        Expression::Not(Rc::new(child))
+      },
+      Expression::NotEquals(_, _) => {
+        let (left, right) = get_binary!("NotEquals", children);
+        Expression::NotEquals(Rc::new(left), Rc::new(right))
       },
       Expression::Null => Expression::Null,
       Expression::Or(_, _) => {
@@ -969,6 +1019,34 @@ pub mod dsl {
     Expression::Or(Rc::new(left), Rc::new(right))
   }
 
+  pub fn concat(left: Expression, right: Expression) -> Expression {
+    Expression::Concat(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn is_null(child: Expression) -> Expression {
+    Expression::IsNull(Rc::new(child))
+  }
+
+  pub fn is_not_null(child: Expression) -> Expression {
+    Expression::IsNotNull(Rc::new(child))
+  }
+
+  pub fn not(child: Expression) -> Expression {
+    Expression::Not(Rc::new(child))
+  }
+
+  pub fn not_equals(left: Expression, right: Expression) -> Expression {
+    Expression::NotEquals(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn less_than_equals(left: Expression, right: Expression) -> Expression {
+    Expression::LessThanEquals(Rc::new(left), Rc::new(right))
+  }
+
+  pub fn greater_than_equals(left: Expression, right: Expression) -> Expression {
+    Expression::GreaterThanEquals(Rc::new(left), Rc::new(right))
+  }
+
   // LogicalPlan nodes.
 
   pub fn create_schema(schema: &str) -> LogicalPlan {
@@ -1188,6 +1266,179 @@ pub mod tests {
       Expression::UnaryMinus(Rc::new(Expression::LiteralFloat(1.1))).data_type(),
       Ok(&Type::FLOAT)
     );
+    assert_eq!(
+      Expression::Concat(
+        Rc::new(Expression::LiteralString(Rc::new("a".to_string()))),
+        Rc::new(Expression::LiteralString(Rc::new("b".to_string()))),
+      ).data_type(),
+      Ok(&Type::TEXT)
+    );
+    assert_eq!(Expression::IsNull(Rc::new(Expression::Null)).data_type(), Ok(&Type::BOOL));
+    assert_eq!(Expression::IsNotNull(Rc::new(Expression::Null)).data_type(), Ok(&Type::BOOL));
+    assert_eq!(Expression::Not(Rc::new(Expression::LiteralBool(true))).data_type(), Ok(&Type::BOOL));
+    assert_eq!(
+      Expression::NotEquals(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).data_type(),
+      Ok(&Type::BOOL)
+    );
+  }
+
+  #[test]
+  fn test_plan_expression_nullable() {
+    // Literals: never nullable.
+    assert_eq!(Expression::LiteralBool(true).nullable(), Ok(false));
+    assert_eq!(Expression::LiteralInt(1).nullable(), Ok(false));
+    assert_eq!(Expression::LiteralBigInt(1).nullable(), Ok(false));
+    assert_eq!(Expression::LiteralFloat(1.0).nullable(), Ok(false));
+    assert_eq!(Expression::LiteralDouble(1.0).nullable(), Ok(false));
+    assert_eq!(Expression::LiteralString(Rc::new("a".to_string())).nullable(), Ok(false));
+    // NULL literal: always nullable.
+    assert_eq!(Expression::Null.nullable(), Ok(true));
+
+    // Unary: propagates child.
+    assert_eq!(Expression::UnaryMinus(Rc::new(Expression::LiteralInt(1))).nullable(), Ok(false));
+    assert_eq!(Expression::UnaryMinus(Rc::new(Expression::Null)).nullable(), Ok(true));
+    assert_eq!(Expression::UnaryPlus(Rc::new(Expression::LiteralInt(1))).nullable(), Ok(false));
+    assert_eq!(Expression::Not(Rc::new(Expression::LiteralBool(true))).nullable(), Ok(false));
+    assert_eq!(Expression::Not(Rc::new(Expression::Null)).nullable(), Ok(true));
+
+    // Arithmetic: nullable if either side is.
+    assert_eq!(
+      Expression::Add(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).nullable(),
+      Ok(false)
+    );
+    assert_eq!(
+      Expression::Add(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralInt(2)),
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(Expression::Subtract(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(), Ok(true));
+    assert_eq!(Expression::Multiply(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::Null)).nullable(), Ok(true));
+    assert_eq!(Expression::Divide(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))).nullable(), Ok(false));
+
+    // Comparisons: nullable if either operand is nullable.
+    assert_eq!(
+      Expression::Equals(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).nullable(),
+      Ok(false)
+    );
+    assert_eq!(
+      Expression::Equals(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralInt(2)),
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::NotEquals(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralInt(1)),
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::NotEquals(
+        Rc::new(Expression::LiteralInt(1)),
+        Rc::new(Expression::LiteralInt(2)),
+      ).nullable(),
+      Ok(false)
+    );
+    assert_eq!(Expression::LessThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(), Ok(true));
+    assert_eq!(Expression::GreaterThan(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))).nullable(), Ok(false));
+
+    // Logical: nullable if either operand is.
+    assert_eq!(
+      Expression::And(
+        Rc::new(Expression::LiteralBool(true)),
+        Rc::new(Expression::LiteralBool(false)),
+      ).nullable(),
+      Ok(false)
+    );
+    assert_eq!(
+      Expression::And(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralBool(false)),
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Or(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralBool(true)),
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Or(
+        Rc::new(Expression::LiteralBool(false)),
+        Rc::new(Expression::LiteralBool(true)),
+      ).nullable(),
+      Ok(false)
+    );
+
+    // IS NULL / IS NOT NULL: always non-nullable regardless of input.
+    assert_eq!(Expression::IsNull(Rc::new(Expression::Null)).nullable(), Ok(false));
+    assert_eq!(Expression::IsNull(Rc::new(Expression::LiteralInt(1))).nullable(), Ok(false));
+    assert_eq!(Expression::IsNotNull(Rc::new(Expression::Null)).nullable(), Ok(false));
+    assert_eq!(Expression::IsNotNull(Rc::new(Expression::LiteralInt(1))).nullable(), Ok(false));
+
+    // Concat: propagates nullability.
+    assert_eq!(
+      Expression::Concat(
+        Rc::new(Expression::LiteralString(Rc::new("a".to_string()))),
+        Rc::new(Expression::LiteralString(Rc::new("b".to_string()))),
+      ).nullable(),
+      Ok(false)
+    );
+    assert_eq!(
+      Expression::Concat(
+        Rc::new(Expression::Null),
+        Rc::new(Expression::LiteralString(Rc::new("b".to_string()))),
+      ).nullable(),
+      Ok(true)
+    );
+
+    // Alias and Cast preserve child nullability.
+    assert_eq!(Expression::Alias(Rc::new(Expression::Null), Rc::new("x".to_string())).nullable(), Ok(true));
+    assert_eq!(Expression::Alias(Rc::new(Expression::LiteralInt(1)), Rc::new("x".to_string())).nullable(), Ok(false));
+    assert_eq!(Expression::Cast(Rc::new(Expression::Null), Rc::new(Type::INT)).nullable(), Ok(true));
+    assert_eq!(Expression::Cast(Rc::new(Expression::LiteralInt(1)), Rc::new(Type::BIGINT)).nullable(), Ok(false));
+  }
+
+  #[test]
+  fn test_plan_expression_copy() {
+    use crate::exec::trees;
+
+    // Verify that copy() correctly rebuilds each new expression type.
+    // We use transform_up with a no-op rule which exercises copy() on every node.
+    struct NoopRule;
+    impl trees::Rule<Expression> for NoopRule {
+      fn apply(&self, _: &Expression) -> crate::common::error::Res<Option<Expression>> {
+        Ok(None)
+      }
+    }
+
+    let exprs = vec![
+      concat(string("a"), string("b")),
+      is_null(int(1)),
+      is_not_null(null()),
+      not(boolean(true)),
+      not_equals(int(1), int(2)),
+    ];
+
+    for expr in exprs {
+      let result = trees::transform_up(&expr, &NoopRule).unwrap();
+      assert_eq!(result, expr);
+    }
   }
 
   #[test]
