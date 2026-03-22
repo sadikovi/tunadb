@@ -37,7 +37,7 @@ impl SerDe for RelationType {
     match reader.read_u8() {
       1 => RelationType::TABLE,
       2 => RelationType::SYSTEM_VIEW,
-      _ => unreachable!(),
+      unknown => unreachable!("Unknown relation type {}", unknown),
     }
   }
 }
