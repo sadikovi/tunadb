@@ -121,38 +121,19 @@ where
     return Ok(None);
   }
 
+  // promote_arithmetic_type already validated that a promotion path exists, so casting
+  // unconditionally here is safe: if the operand type already matches result_tpe we skip it,
+  // otherwise the cast is guaranteed to be a valid numeric widening or NULL conversion.
   let new_left = if ltpe == result_tpe {
     left.clone()
-  } else if ltpe != result_tpe && can_numeric_and_null_upcast(&ltpe, &result_tpe) {
-    Rc::new(Expression::Cast(left.clone(), Rc::new(result_tpe.clone())))
   } else {
-    return Err(
-      Error::SQLAnalysisExpressionDataType(
-        format!(
-          "Cannot cast {} to {} for {}",
-          ltpe,
-          result_tpe,
-          trees::plan_output(left.as_ref()),
-        )
-      )
-    )
+    Rc::new(Expression::Cast(left.clone(), Rc::new(result_tpe.clone())))
   };
 
   let new_right = if rtpe == result_tpe {
     right.clone()
-  } else if rtpe != result_tpe && can_numeric_and_null_upcast(&rtpe, &result_tpe) {
-    Rc::new(Expression::Cast(right.clone(), Rc::new(result_tpe)))
   } else {
-    return Err(
-      Error::SQLAnalysisExpressionDataType(
-        format!(
-          "Cannot cast {} to {} for {}",
-          rtpe,
-          result_tpe,
-          trees::plan_output(right.as_ref()),
-        )
-      )
-    )
+    Rc::new(Expression::Cast(right.clone(), Rc::new(result_tpe)))
   };
 
   Ok(Some(make(new_left, new_right)))
@@ -180,7 +161,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
               }
             }
 
-            if identifier_matches.len() == 0 {
+            if identifier_matches.is_empty() {
               // We could not resolve the identifier.
               Err(
                 Error::SQLAnalysisUnresolvedExpression(
@@ -379,10 +360,7 @@ fn resolve_expression_type(expr: &Expression) -> Res<Expression> {
 
 enum AnalysisRule<'a> {
   ResolveNodes(&'a Session, &'a TransactionRef),
-  ResolveTypes(&'a Session, &'a TransactionRef),
-}
-
-impl<'a> AnalysisRule<'a> {
+  ResolveTypes,
 }
 
 impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
@@ -391,8 +369,8 @@ impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
       AnalysisRule::ResolveNodes(ref session, ref txn) => {
         analysis_resolve_nodes(session, txn, plan)
       },
-      AnalysisRule::ResolveTypes(ref session, ref txn) => {
-        analysis_resolve_types(session, txn, plan)
+      AnalysisRule::ResolveTypes => {
+        analysis_resolve_types(plan)
       },
     }
   }
@@ -593,11 +571,7 @@ fn analysis_resolve_nodes(
   }
 }
 
-fn analysis_resolve_types(
-  _session: &Session,
-  _txn: &TransactionRef,
-  plan: &LogicalPlan,
-) -> Res<Option<LogicalPlan>> {
+fn analysis_resolve_types(plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
   match plan {
     LogicalPlan::Filter(ref expression, ref child) => {
       let resolved = resolve_expression_type(expression.as_ref())?;
@@ -608,7 +582,11 @@ fn analysis_resolve_types(
           )
         );
       }
-      Ok(Some(LogicalPlan::Filter(Rc::new(resolved), child.clone())))
+      if &resolved != expression.as_ref() {
+        Ok(Some(LogicalPlan::Filter(Rc::new(resolved), child.clone())))
+      } else {
+        Ok(None)
+      }
     },
     LogicalPlan::InsertInto(ref schema_info, ref table_info, ref col_pos, ref query) => {
       let table_fields = table_info.relation_fields().get();
@@ -714,7 +692,7 @@ fn analysis_resolve_types(
 pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Res<LogicalPlan> {
   let rules = vec![
     AnalysisRule::ResolveNodes(session, txn),
-    AnalysisRule::ResolveTypes(session, txn),
+    AnalysisRule::ResolveTypes,
   ];
 
   let mut curr_plan: LogicalPlan = plan;
@@ -782,6 +760,16 @@ mod tests {
     assert!(resolve(add(double(1.0), string("x"))).is_err());
     assert!(resolve(multiply(float(1.0), boolean(true))).is_err());
     assert!(resolve(divide(string("a"), int(1))).is_err());
+  }
+
+  #[test]
+  fn test_resolve_types_arithmetic_null() {
+    // NULL op T: NULL is cast to T (§3.2).
+    assert_eq!(resolve(add(null(), int(1))), Ok(add(cast(null(), Type::INT), int(1))));
+    assert_eq!(resolve(multiply(bigint(1), null())), Ok(multiply(bigint(1), cast(null(), Type::BIGINT))));
+    assert_eq!(resolve(subtract(null(), double(1.0))), Ok(subtract(cast(null(), Type::DOUBLE), double(1.0))));
+    // NULL op NULL: both sides stay NULL, no cast needed (result type is NULL).
+    assert_eq!(resolve(add(null(), null())), Ok(add(null(), null())));
   }
 
   //=====================================
