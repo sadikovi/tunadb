@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::exec::catalog;
-use crate::exec::plan::{
+use crate::sql::catalog;
+use crate::sql::plan::{
   DEFAULT_SUBQUERY_NAME,
   Expression,
   ExpressionContext,
@@ -11,9 +11,9 @@ use crate::exec::plan::{
   can_numeric_and_null_upcast,
   promote_arithmetic_type,
 };
-use crate::exec::session::Session;
-use crate::exec::trees;
-use crate::exec::types::{Fields, Type};
+use crate::sql::session::Session;
+use crate::sql::trees;
+use crate::sql::types::{Fields, Type};
 use crate::storage::txn::TransactionRef;
 
 // Returns the current schema from the schema name or default session schema.
@@ -709,10 +709,10 @@ pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Re
 mod tests {
   use std::rc::Rc;
   use super::*;
-  use crate::exec::catalog::{self, RelationType};
-  use crate::exec::plan::dsl::*;
-  use crate::exec::session::Session;
-  use crate::exec::types::{Field, Fields, Type};
+  use crate::sql::catalog::{self, RelationType};
+  use crate::sql::plan::dsl::*;
+  use crate::sql::session::Session;
+  use crate::sql::types::{Field, Fields, Type};
   use crate::storage::db;
 
   // Convenience: resolve types and unwrap.

@@ -1,9 +1,9 @@
 use std::fmt;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::exec::catalog::{SchemaInfo, RelationInfo};
-use crate::exec::trees::TreeNode;
-use crate::exec::types::{Fields, Type};
+use crate::sql::catalog::{SchemaInfo, RelationInfo};
+use crate::sql::trees::TreeNode;
+use crate::sql::types::{Fields, Type};
 
 pub const DEFAULT_EXPRESSION_NAME: &str = "?col?";
 pub const DEFAULT_SUBQUERY_NAME: &str = "?subquery?";
@@ -1168,7 +1168,7 @@ pub mod dsl {
 pub mod tests {
   use super::*;
   use super::dsl::*;
-  use crate::exec::trees;
+  use crate::sql::trees;
 
   #[test]
   fn test_plan_expression_type_promotion() {
@@ -1522,7 +1522,7 @@ pub mod tests {
 
   #[test]
   fn test_plan_expression_copy() {
-    use crate::exec::trees;
+    use crate::sql::trees;
 
     // Verify that copy() correctly rebuilds each new expression type.
     // We use transform_up with a no-op rule which exercises copy() on every node.

@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::exec::plan::{Expression, LogicalPlan};
-use crate::exec::scanner::{Scanner, Token, TokenType};
-use crate::exec::types::{Field, Fields, Type};
+use crate::sql::plan::{Expression, LogicalPlan};
+use crate::sql::scanner::{Scanner, Token, TokenType};
+use crate::sql::types::{Field, Fields, Type};
 
 // Returns true if the value is a singl-word identifier, i.e. not the escaped identifier.
 fn is_single_word_identifier(value: &str) -> bool {
@@ -769,7 +769,7 @@ pub fn parse(sql: &str) -> Res<Vec<LogicalPlan>> {
 #[cfg(test)]
 pub mod tests {
   use super::*;
-  use crate::exec::plan::dsl::*;
+  use crate::sql::plan::dsl::*;
 
   // Helper method to check the query plan.
   fn assert_plans(query: &str, plans: Vec<LogicalPlan>) {
