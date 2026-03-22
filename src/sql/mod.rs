@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod catalog;
 pub mod parser;
 pub mod plan;
+pub mod planning;
 pub mod row;
 pub mod scanner;
 pub mod session;

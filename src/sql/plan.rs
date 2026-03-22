@@ -744,42 +744,19 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
         write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
       },
       LogicalPlan::DropTable(ref schema_info, ref table_info) => {
-        write!(
-          f,
-          "DropTable({}.{})",
-          schema_info.schema_name(),
-          table_info.relation_name()
-        )
+        write!(f, "DropTable({}.{})", schema_info.schema_name(), table_info.relation_name())
       },
       LogicalPlan::Filter(ref expression, _) => {
         write!(f, "Filter(")?;
         expression.display(f)?;
         write!(f, ")")
       },
-      LogicalPlan::InsertInto(ref schema_info, ref table_info, ref cols, _) => {
-        write!(
-          f,
-          "InsertInto({}.{}, {:?})",
-          schema_info.schema_name(),
-          table_info.relation_name(),
-          cols
-        )
+      LogicalPlan::InsertInto(ref schema_info, ref table_info, _, _) => {
+        write!(f, "InsertInto({}.{})", schema_info.schema_name(), table_info.relation_name())
       },
       LogicalPlan::Limit(ref limit, _) => write!(f, "Limit({})", limit),
       LogicalPlan::LocalRelation(ref expressions) => {
-        write!(f, "LocalRelation(")?;
-        for i in 0..expressions.len() {
-          if i > 0 {
-            write!(f, ", ")?;
-          }
-          for j in 0..expressions[i].len() {
-            if j > 0 {
-              write!(f, ", ")?;
-            }
-            expressions[i][j].display(f)?;
-          }
-        }
-        write!(f, ")")
+        write!(f, "LocalRelation({} rows)", expressions.len())
       },
       LogicalPlan::Project(ref expressions, _) => {
         write!(f, "Project(")?;
@@ -794,8 +771,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::Subquery(ref alias, _) => write!(f, "Subquery({})", alias),
       LogicalPlan::TableScan(ref schema_info, ref table_info, ref alias) => {
         write!(
-          f,
-          "TableScan({}.{}, {:?})",
+          f, "TableScan({}.{}, {:?})",
           schema_info.schema_name(),
           table_info.relation_name(),
           alias
@@ -940,6 +916,138 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
           table_name.clone(),
           table_alias.clone()
         )
+      },
+    }
+  }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PhysicalPlan {
+  CreateSchema(Rc<String> /* schema name */),
+  CreateTable(
+    Rc<String> /* schema name */,
+    Rc<String> /* table name */,
+    Rc<Fields> /* table schema */,
+  ),
+  DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
+  DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+  Filter(Rc<Expression> /* filter expression */, Rc<PhysicalPlan> /* child */),
+  InsertInto(
+    Rc<SchemaInfo> /* schema info */,
+    Rc<RelationInfo> /* table info */,
+    Rc<Vec<usize>> /* col_positions */,
+    Rc<PhysicalPlan> /* query */,
+  ),
+  Limit(usize /* limit */, Rc<PhysicalPlan> /* child */),
+  LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
+  Project(Rc<Vec<Expression>> /* expressions */, Rc<PhysicalPlan> /* child */),
+  SeqScan(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+}
+
+impl TreeNode<PhysicalPlan> for PhysicalPlan {
+  #[inline]
+  fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      PhysicalPlan::CreateSchema(ref schema_name) => write!(f, "CreateSchema({})", schema_name),
+      PhysicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
+        write!(f, "CreateTable({}.{}, {})", schema_name, table_name, fields)
+      },
+      PhysicalPlan::DropSchema(ref schema_info, cascade) => {
+        write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
+      },
+      PhysicalPlan::DropTable(ref schema_info, ref table_info) => {
+        write!(f, "DropTable({}.{})", schema_info.schema_name(), table_info.relation_name())
+      },
+      PhysicalPlan::Filter(ref expression, _) => {
+        write!(f, "Filter(")?;
+        expression.display(f)?;
+        write!(f, ")")
+      },
+      PhysicalPlan::InsertInto(ref schema_info, ref table_info, _, _) => {
+        write!(f, "InsertInto({}.{})", schema_info.schema_name(), table_info.relation_name())
+      },
+      PhysicalPlan::Limit(ref limit, _) => write!(f, "Limit({})", limit),
+      PhysicalPlan::LocalRelation(ref expressions) => {
+        write!(f, "LocalRelation({} rows)", expressions.len())
+      },
+      PhysicalPlan::Project(ref expressions, _) => {
+        write!(f, "Project(")?;
+        for i in 0..expressions.len() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          expressions[i].display(f)?;
+        }
+        write!(f, ")")
+      },
+      PhysicalPlan::SeqScan(ref schema_info, ref table_info) => {
+        write!(f, "SeqScan({}.{})", schema_info.schema_name(), table_info.relation_name())
+      },
+    }
+  }
+
+  #[inline]
+  fn as_ref(&self) -> &PhysicalPlan {
+    self
+  }
+
+  #[inline]
+  fn children(&self) -> Vec<&PhysicalPlan> {
+    match self {
+      PhysicalPlan::CreateSchema(_) => Vec::new(),
+      PhysicalPlan::CreateTable(_, _, _) => Vec::new(),
+      PhysicalPlan::DropSchema(_, _) => Vec::new(),
+      PhysicalPlan::DropTable(_, _) => Vec::new(),
+      PhysicalPlan::Filter(_, ref child) => vec![child],
+      PhysicalPlan::InsertInto(_, _, _, ref query) => vec![query],
+      PhysicalPlan::Limit(_, ref child) => vec![child],
+      PhysicalPlan::LocalRelation(_) => Vec::new(),
+      PhysicalPlan::Project(_, ref child) => vec![child],
+      PhysicalPlan::SeqScan(_, _) => Vec::new(),
+    }
+  }
+
+  #[inline]
+  fn copy(&self, mut children: Vec<PhysicalPlan>) -> PhysicalPlan {
+    match self {
+      PhysicalPlan::CreateSchema(ref schema_name) => {
+        PhysicalPlan::CreateSchema(schema_name.clone())
+      },
+      PhysicalPlan::CreateTable(ref schema_name, ref table_name, ref schema) => {
+        PhysicalPlan::CreateTable(schema_name.clone(), table_name.clone(), schema.clone())
+      },
+      PhysicalPlan::DropSchema(ref schema_info, cascade) => {
+        PhysicalPlan::DropSchema(schema_info.clone(), *cascade)
+      },
+      PhysicalPlan::DropTable(ref schema_info, ref table_info) => {
+        PhysicalPlan::DropTable(schema_info.clone(), table_info.clone())
+      },
+      PhysicalPlan::Filter(ref expression, _) => {
+        let child = get_unary!("Filter", children);
+        PhysicalPlan::Filter(expression.clone(), Rc::new(child))
+      },
+      PhysicalPlan::InsertInto(ref schema_info, ref table_info, ref cols, _) => {
+        let child = get_unary!("InsertInto", children);
+        PhysicalPlan::InsertInto(
+          schema_info.clone(),
+          table_info.clone(),
+          cols.clone(),
+          Rc::new(child)
+        )
+      },
+      PhysicalPlan::Limit(limit, _) => {
+        let child = get_unary!("Limit", children);
+        PhysicalPlan::Limit(*limit, Rc::new(child))
+      },
+      PhysicalPlan::LocalRelation(ref expressions) => {
+        PhysicalPlan::LocalRelation(expressions.clone())
+      },
+      PhysicalPlan::Project(ref expressions, _) => {
+        let child = get_unary!("Project", children);
+        PhysicalPlan::Project(expressions.clone(), Rc::new(child))
+      },
+      PhysicalPlan::SeqScan(ref schema_info, ref table_info) => {
+        PhysicalPlan::SeqScan(schema_info.clone(), table_info.clone())
       },
     }
   }
