@@ -597,7 +597,7 @@ pub enum LogicalPlan {
   InsertInto(
     Rc<SchemaInfo> /* schema info */,
     Rc<RelationInfo> /* table info */,
-    Rc<Vec<String>> /* columns to insert */,
+    Rc<Vec<usize>> /* insert order of fields' positions, guaranteed to be non-empty and valid */,
     Rc<LogicalPlan> /* query */,
   ),
   Limit(usize /* limit */, Rc<LogicalPlan> /* child */),

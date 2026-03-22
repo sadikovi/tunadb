@@ -200,6 +200,17 @@ impl Fields {
   }
 
   #[inline]
+  pub fn get_field_pos(&self, name: &str) -> Option<usize> {
+    for (field_idx, field) in self.fields.iter().enumerate() {
+      if field.name == name {
+        return Some(field_idx);
+      }
+    }
+
+    None
+  }
+
+  #[inline]
   pub fn len(&self) -> usize {
     self.fields.len()
   }

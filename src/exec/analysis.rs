@@ -477,6 +477,8 @@ fn analysis_resolve_nodes(
           // Insert is always positional, not based on column names.
           // We only check top-level fields.
           let query_cols = query.output()?;
+          // Column positions are at most length of table fields.
+          let mut col_positions = Vec::with_capacity(table_info.relation_fields().len());
 
           if !columns.is_empty() {
             let mut set = HashSet::new();
@@ -492,33 +494,34 @@ fn analysis_resolve_nodes(
             }
 
             for col in columns.as_slice() {
-              if table_info.relation_fields().get_field(col).is_none() {
-                return Err(
-                  Error::SQLAnalysisUnresolvedPlan(
-                    format!(
-                      "Column {} does not exist in the table {} schema",
-                      col,
-                      table_info.relation_name()
+              match table_info.relation_fields().get_field_pos(col) {
+                Some(pos) => col_positions.push(pos),
+                None => {
+                  return Err(
+                    Error::SQLAnalysisUnresolvedPlan(
+                      format!(
+                        "Column {} does not exist in the table {} schema",
+                        col,
+                        table_info.relation_name()
+                      )
                     )
-                  )
-                );
+                  );
+                },
               }
+            }
+          } else {
+            for i in 0..table_info.relation_fields().len() {
+              col_positions.push(i);
             }
           }
 
-          let expected_col_len = if !columns.is_empty() {
-            columns.len()
-          } else {
-            table_info.relation_fields().len()
-          };
-
           // populate columns from the table.
-          if expected_col_len != query_cols.len() {
+          if col_positions.len() != query_cols.len() {
             return Err(
               Error::SQLAnalysisUnresolvedPlan(
                 format!(
                   "Input columns match for Insert, expected {} columns, found {}",
-                  expected_col_len,
+                  col_positions.len(),
                   query_cols.len()
                 )
               )
@@ -530,7 +533,7 @@ fn analysis_resolve_nodes(
               LogicalPlan::InsertInto(
                 Rc::new(schema_info),
                 Rc::new(table_info),
-                columns.clone(), // empty means all table columns in definition order
+                Rc::new(col_positions),
                 query.clone()
               )
             )
@@ -596,101 +599,112 @@ fn analysis_resolve_types(
   plan: &LogicalPlan,
 ) -> Res<Option<LogicalPlan>> {
   match plan {
-    // LogicalPlan::Filter(ref expression, ref child) => {
-    //   let resolved = resolve_expression_type(expression.as_ref())?;
-    //   if resolved.data_type()? != &Type::BOOL {
-    //     return Err(
-    //       Error::SQLAnalysisExpressionDataType(
-    //         format!("Filter expression {} must be of type BOOL", trees::tree_output(&resolved))
-    //       )
-    //     );
-    //   }
-    //   Ok(Some(LogicalPlan::Filter(Rc::new(resolved), child.clone())))
-    // },
-    // LogicalPlan::InsertInto(ref _schema_info, ref table_info, ref cols, ref query) => {
-    //   let output = query.output()?;
-    //   let table_fields = table_info.relation_fields();
-    //   if output.len() != cols.len() {
-    //     return Err(
-    //       Error::SQLAnalysisExpressionDataType(
-    //         format!(
-    //           "INSERT column count mismatch: query has {} columns, {} column names given",
-    //           output.len(),
-    //           cols.len()
-    //         )
-    //       )
-    //     );
-    //   }
-    //   for (i, col_name) in cols.iter().enumerate() {
-    //     let table_field = table_fields
-    //       .get_field(col_name)
-    //       .ok_or_else(|| {
-    //         Error::SQLAnalysisUnknownField(
-    //           format!("Unknown field {} in destination table", col_name)
-    //         )
-    //       })?;
-    //     let expr_tpe = output[i].1.data_type()?;
-    //     let target_tpe = table_field.data_type();
-    //     if expr_tpe != target_tpe && !can_cast(target_tpe, expr_tpe) {
-    //       return Err(
-    //         Error::SQLAnalysisExpressionDataType(
-    //           format!(
-    //             "Column {} type mismatch: expression has type {}, table expects {}",
-    //             col_name,
-    //             expr_tpe,
-    //             target_tpe
-    //           )
-    //         )
-    //       );
-    //     }
-    //   }
-    //   Ok(None)
-    // },
-    // LogicalPlan::LocalRelation(ref expressions) => {
-    //   if expressions.is_empty() {
-    //     return Ok(None);
-    //   }
-    //   let row_len = expressions[0].len();
-    //   for (row_idx, row) in expressions.iter().enumerate() {
-    //     if row.len() != row_len {
-    //       return Err(
-    //         Error::SQLAnalysisExpressionDataType(
-    //           format!(
-    //             "LocalRelation row {} has {} expressions, expected {}",
-    //             row_idx,
-    //             row.len(),
-    //             row_len
-    //           )
-    //         )
-    //       );
-    //     }
-    //     for (col_idx, expr) in row.iter().enumerate() {
-    //       expr.data_type().map_err(|e| {
-    //         Error::SQLAnalysisExpressionDataType(
-    //           format!("LocalRelation row {} column {}: {:?}", row_idx, col_idx, e)
-    //         )
-    //       })?;
-    //     }
-    //   }
-    //   Ok(None)
-    // },
-    // LogicalPlan::Project(ref expressions, ref child) => {
-    //   let mut resolved_exprs: Vec<Expression> = Vec::with_capacity(expressions.len());
-    //   let mut changed = false;
-    //   for expr in expressions.as_ref() {
-    //     let resolved = resolve_expression_type(expr)?;
-    //     if &resolved != expr {
-    //       changed = true;
-    //     }
-    //     resolved.data_type()?;
-    //     resolved_exprs.push(resolved);
-    //   }
-    //   if changed {
-    //     Ok(Some(LogicalPlan::Project(Rc::new(resolved_exprs), child.clone())))
-    //   } else {
-    //     Ok(None)
-    //   }
-    // },
+    LogicalPlan::Filter(ref expression, ref child) => {
+      let resolved = resolve_expression_type(expression.as_ref())?;
+      if resolved.data_type()? != Type::BOOL {
+        return Err(
+          Error::SQLAnalysisError(
+            format!("Filter expression {} must be BOOL", trees::plan_output(&resolved))
+          )
+        );
+      }
+      Ok(Some(LogicalPlan::Filter(Rc::new(resolved), child.clone())))
+    },
+    LogicalPlan::InsertInto(ref schema_info, ref table_info, ref col_pos, ref query) => {
+      let table_fields = table_info.relation_fields().get();
+      let output = query.output()?;
+      // This should have been already verified in ResolveNodes.
+      assert_eq!(col_pos.len(), output.len());
+
+      let mut requires_projection = false;
+      let mut projection = Vec::with_capacity(col_pos.len());
+
+      for (query_pos, (_ctx, out_expr)) in output.into_iter().enumerate() {
+        let in_field = &table_fields[col_pos[query_pos]];
+        let in_field_tpe = in_field.data_type();
+        let out_expr_tpe = out_expr.data_type()?;
+
+        if *in_field_tpe == out_expr_tpe {
+          projection.push(out_expr);
+        } else if can_numeric_and_null_upcast(&out_expr_tpe, &in_field_tpe) {
+          projection.push(Expression::Cast(Rc::new(out_expr), Rc::new(in_field_tpe.clone())));
+          requires_projection = true;
+        } else {
+          return Err(
+            Error::SQLAnalysisError(
+              format!(
+                "Expected {} type for expression {} but received {} in Insert",
+                in_field_tpe,
+                out_expr_tpe,
+                trees::plan_output(&out_expr)
+              )
+            )
+          );
+        }
+      }
+
+      if requires_projection {
+        Ok(
+          Some(
+            LogicalPlan::InsertInto(
+              schema_info.clone(),
+              table_info.clone(),
+              col_pos.clone(),
+              Rc::new(
+                LogicalPlan::Project(
+                  Rc::new(projection),
+                  query.clone()
+                )
+              )
+            )
+          )
+        )
+      } else {
+        Ok(None)
+      }
+    },
+    LogicalPlan::LocalRelation(ref expressions) => {
+      let mut resolved_exprs: Vec<Vec<Expression>> = Vec::with_capacity(expressions.len());
+      let mut changed = false;
+
+      for row in expressions.iter() {
+        let mut row_buf = Vec::with_capacity(row.len());
+        for expr in row.iter() {
+          let resolved = resolve_expression_type(expr)?;
+          if &resolved != expr {
+            changed = true;
+          }
+          resolved.data_type()?;
+          row_buf.push(resolved);
+        }
+        resolved_exprs.push(row_buf);
+      }
+
+      if changed {
+        Ok(Some(LogicalPlan::LocalRelation(Rc::new(resolved_exprs))))
+      } else {
+        Ok(None)
+      }
+    },
+    LogicalPlan::Project(ref expressions, ref child) => {
+      let mut resolved_exprs: Vec<Expression> = Vec::with_capacity(expressions.len());
+      let mut changed = false;
+
+      for expr in expressions.as_ref() {
+        let resolved = resolve_expression_type(expr)?;
+        if &resolved != expr {
+          changed = true;
+        }
+        resolved.data_type()?;
+        resolved_exprs.push(resolved);
+      }
+
+      if changed {
+        Ok(Some(LogicalPlan::Project(Rc::new(resolved_exprs), child.clone())))
+      } else {
+        Ok(None)
+      }
+    },
     _ => Ok(None),
   }
 }

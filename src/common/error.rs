@@ -19,6 +19,7 @@ pub enum Error {
   SQLAnalysisSchemaDoesNotExist(String /* schema name */),
   SQLAnalysisTableAlreadyExists(String /* schema name */, String /* table name */),
   SQLAnalysisTableDoesNotExist(String /* schema name */, String /* table name */),
+  SQLAnalysisError(String /* message */),
 
   // SQL catalog errors.
   OperationIsNotAllowed(String /* error message */),
