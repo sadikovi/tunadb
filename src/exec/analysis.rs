@@ -41,18 +41,6 @@ fn assert_unique_fields(fields: &Fields) -> Res<()> {
   Ok(())
 }
 
-// Asserts if the field with the provided name exists in the schema.
-fn assert_field_exists(fields: &Fields, field_name: &str) -> Res<()> {
-  match fields.get_field(field_name) {
-    Some(_) => Ok(()),
-    None => Err(
-      Error::SQLAnalysisUnknownField(
-        format!("Unknown field {} in the destination table", field_name)
-      )
-    ),
-  }
-}
-
 // Resolves types for a binary comparison by casting one operand to match the other when possible.
 fn resolve_types_for_binary_comparison<F>(
   left: &Rc<Expression>,
@@ -387,6 +375,342 @@ fn resolve_expressions(
 
 fn resolve_expression_type(expr: &Expression) -> Res<Expression> {
   trees::transform_up(expr, &ExpressionRule::ResolveTypes)
+}
+
+enum AnalysisRule<'a> {
+  ResolveNodes(&'a Session, &'a TransactionRef),
+  ResolveTypes(&'a Session, &'a TransactionRef),
+}
+
+impl<'a> AnalysisRule<'a> {
+}
+
+impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
+  fn apply(&self, plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
+    match self {
+      AnalysisRule::ResolveNodes(ref session, ref txn) => {
+        analysis_resolve_nodes(session, txn, plan)
+      },
+      AnalysisRule::ResolveTypes(ref session, ref txn) => {
+        analysis_resolve_types(session, txn, plan)
+      },
+    }
+  }
+}
+
+fn analysis_resolve_nodes(
+  session: &Session,
+  txn: &TransactionRef,
+  plan: &LogicalPlan
+) -> Res<Option<LogicalPlan>> {
+  match plan {
+    LogicalPlan::UnresolvedCreateSchema(ref schema_name) => {
+      match catalog::get_schema(txn, schema_name) {
+        Ok(info) => Err(Error::SQLAnalysisSchemaAlreadyExists(info.into_schema_name())),
+        Err(Error::SchemaDoesNotExist(_)) => {
+          Ok(Some(LogicalPlan::CreateSchema(schema_name.clone())))
+        },
+        Err(err) => Err(err),
+      }
+    },
+    LogicalPlan::UnresolvedCreateTable(ref schema_name, ref table_name, ref fields) => {
+      match catalog::get_relation(txn, current_schema(session, schema_name), table_name) {
+        Ok((schema_info, table_info)) => {
+          Err(
+            Error::SQLAnalysisTableAlreadyExists(
+              schema_info.into_schema_name(),
+              table_info.into_relation_name()
+            )
+          )
+        },
+        Err(Error::SchemaDoesNotExist(schema_name)) => {
+          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+        },
+        Err(Error::RelationDoesNotExist(ref schema_name, ref table_name)) => {
+          // Validate fields to make sure there are no duplicates.
+          assert_unique_fields(fields)?;
+          Ok(
+            Some(
+              LogicalPlan::CreateTable(
+                Rc::new(schema_name.to_string()),
+                Rc::new(table_name.to_string()),
+                fields.clone()
+              )
+            )
+          )
+        },
+        Err(err) => Err(err),
+      }
+    },
+    LogicalPlan::UnresolvedDropSchema(ref schema_name, cascade) => {
+      match catalog::get_schema(txn, schema_name) {
+        Ok(info) => {
+          Ok(Some(LogicalPlan::DropSchema(Rc::new(info), *cascade)))
+        },
+        Err(Error::SchemaDoesNotExist(schema_name)) => {
+          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+        },
+        Err(err) => Err(err),
+      }
+    },
+    LogicalPlan::UnresolvedDropTable(ref schema_name, ref table_name) => {
+      match catalog::get_relation(txn, current_schema(session, schema_name), table_name) {
+        Ok((schema_info, table_info)) => {
+          Ok(Some(LogicalPlan::DropTable(Rc::new(schema_info), Rc::new(table_info))))
+        },
+        Err(Error::SchemaDoesNotExist(schema_name)) => {
+          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+        },
+        Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
+          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+        },
+        Err(err) => Err(err),
+      }
+    },
+    LogicalPlan::UnresolvedFilter(ref expression, ref child) => {
+      let output = resolve_expression(expression, &child.output()?)?;
+      Ok(Some(LogicalPlan::Filter(Rc::new(output), child.clone())))
+    },
+    LogicalPlan::UnresolvedInsertInto(ref schema_name, ref table_name, ref columns, ref query) => {
+      match catalog::get_relation(txn, current_schema(session, schema_name), table_name) {
+        Ok((schema_info, table_info)) => {
+          // Insert is always positional, not based on column names.
+          // We only check top-level fields.
+          let query_cols = query.output()?;
+
+          if !columns.is_empty() {
+            let mut set = HashSet::new();
+
+            for col in columns.as_slice() {
+              if !set.insert(col) {
+                return Err(
+                  Error::SQLAnalysisUnresolvedPlan(
+                    format!("Duplicate column {} in Insert", col)
+                  )
+                );
+              }
+            }
+
+            for col in columns.as_slice() {
+              if table_info.relation_fields().get_field(col).is_none() {
+                return Err(
+                  Error::SQLAnalysisUnresolvedPlan(
+                    format!(
+                      "Column {} does not exist in the table {} schema",
+                      col,
+                      table_info.relation_name()
+                    )
+                  )
+                );
+              }
+            }
+          }
+
+          let expected_col_len = if !columns.is_empty() {
+            columns.len()
+          } else {
+            table_info.relation_fields().len()
+          };
+
+          // populate columns from the table.
+          if expected_col_len != query_cols.len() {
+            return Err(
+              Error::SQLAnalysisUnresolvedPlan(
+                format!(
+                  "Input columns match for Insert, expected {} columns, found {}",
+                  expected_col_len,
+                  query_cols.len()
+                )
+              )
+            );
+          }
+
+          Ok(
+            Some(
+              LogicalPlan::InsertInto(
+                Rc::new(schema_info),
+                Rc::new(table_info),
+                columns.clone(), // empty means all table columns in definition order
+                query.clone()
+              )
+            )
+          )
+        },
+        Err(Error::SchemaDoesNotExist(schema_name)) => {
+          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+        },
+        Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
+          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+        },
+        Err(err) => Err(err),
+      }
+    },
+    LogicalPlan::UnresolvedLimit(ref limit, ref child) => {
+      Ok(Some(LogicalPlan::Limit(*limit, child.clone())))
+    },
+    LogicalPlan::UnresolvedLocalRelation(ref expressions) => {
+      let mut output = Vec::new();
+      for expr_row in expressions.as_slice() {
+        let output_row = resolve_expressions(expr_row, &[])?;
+        output.push(output_row);
+      }
+      Ok(Some(LogicalPlan::LocalRelation(Rc::new(output))))
+    },
+    LogicalPlan::UnresolvedProject(ref expressions, ref child) => {
+      let output = resolve_expressions(expressions, &child.output()?)?;
+      Ok(Some(LogicalPlan::Project(Rc::new(output), child.clone())))
+    },
+    LogicalPlan::UnresolvedSubquery(ref alias, ref child) => {
+      let resolved_alias = alias.clone().unwrap_or(Rc::new(DEFAULT_SUBQUERY_NAME.to_string()));
+      Ok(Some(LogicalPlan::Subquery(resolved_alias, child.clone())))
+    },
+    LogicalPlan::UnresolvedTableScan(ref schema_name, ref table_name, ref alias) => {
+      match catalog::get_relation(txn, current_schema(session, schema_name), table_name) {
+        Ok((schema_info, table_info)) => {
+          Ok(
+            Some(
+              LogicalPlan::TableScan(
+                Rc::new(schema_info),
+                Rc::new(table_info),
+                alias.clone()
+              )
+            )
+          )
+        },
+        Err(Error::SchemaDoesNotExist(schema_name)) => {
+          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+        },
+        Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
+          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+        },
+        Err(err) => Err(err),
+      }
+    },
+    _ => Ok(None),
+  }
+}
+
+fn analysis_resolve_types(
+  _session: &Session,
+  _txn: &TransactionRef,
+  plan: &LogicalPlan,
+) -> Res<Option<LogicalPlan>> {
+  match plan {
+    // LogicalPlan::Filter(ref expression, ref child) => {
+    //   let resolved = resolve_expression_type(expression.as_ref())?;
+    //   if resolved.data_type()? != &Type::BOOL {
+    //     return Err(
+    //       Error::SQLAnalysisExpressionDataType(
+    //         format!("Filter expression {} must be of type BOOL", trees::tree_output(&resolved))
+    //       )
+    //     );
+    //   }
+    //   Ok(Some(LogicalPlan::Filter(Rc::new(resolved), child.clone())))
+    // },
+    // LogicalPlan::InsertInto(ref _schema_info, ref table_info, ref cols, ref query) => {
+    //   let output = query.output()?;
+    //   let table_fields = table_info.relation_fields();
+    //   if output.len() != cols.len() {
+    //     return Err(
+    //       Error::SQLAnalysisExpressionDataType(
+    //         format!(
+    //           "INSERT column count mismatch: query has {} columns, {} column names given",
+    //           output.len(),
+    //           cols.len()
+    //         )
+    //       )
+    //     );
+    //   }
+    //   for (i, col_name) in cols.iter().enumerate() {
+    //     let table_field = table_fields
+    //       .get_field(col_name)
+    //       .ok_or_else(|| {
+    //         Error::SQLAnalysisUnknownField(
+    //           format!("Unknown field {} in destination table", col_name)
+    //         )
+    //       })?;
+    //     let expr_tpe = output[i].1.data_type()?;
+    //     let target_tpe = table_field.data_type();
+    //     if expr_tpe != target_tpe && !can_cast(target_tpe, expr_tpe) {
+    //       return Err(
+    //         Error::SQLAnalysisExpressionDataType(
+    //           format!(
+    //             "Column {} type mismatch: expression has type {}, table expects {}",
+    //             col_name,
+    //             expr_tpe,
+    //             target_tpe
+    //           )
+    //         )
+    //       );
+    //     }
+    //   }
+    //   Ok(None)
+    // },
+    // LogicalPlan::LocalRelation(ref expressions) => {
+    //   if expressions.is_empty() {
+    //     return Ok(None);
+    //   }
+    //   let row_len = expressions[0].len();
+    //   for (row_idx, row) in expressions.iter().enumerate() {
+    //     if row.len() != row_len {
+    //       return Err(
+    //         Error::SQLAnalysisExpressionDataType(
+    //           format!(
+    //             "LocalRelation row {} has {} expressions, expected {}",
+    //             row_idx,
+    //             row.len(),
+    //             row_len
+    //           )
+    //         )
+    //       );
+    //     }
+    //     for (col_idx, expr) in row.iter().enumerate() {
+    //       expr.data_type().map_err(|e| {
+    //         Error::SQLAnalysisExpressionDataType(
+    //           format!("LocalRelation row {} column {}: {:?}", row_idx, col_idx, e)
+    //         )
+    //       })?;
+    //     }
+    //   }
+    //   Ok(None)
+    // },
+    // LogicalPlan::Project(ref expressions, ref child) => {
+    //   let mut resolved_exprs: Vec<Expression> = Vec::with_capacity(expressions.len());
+    //   let mut changed = false;
+    //   for expr in expressions.as_ref() {
+    //     let resolved = resolve_expression_type(expr)?;
+    //     if &resolved != expr {
+    //       changed = true;
+    //     }
+    //     resolved.data_type()?;
+    //     resolved_exprs.push(resolved);
+    //   }
+    //   if changed {
+    //     Ok(Some(LogicalPlan::Project(Rc::new(resolved_exprs), child.clone())))
+    //   } else {
+    //     Ok(None)
+    //   }
+    // },
+    _ => Ok(None),
+  }
+}
+
+// Analyses the plan and returns fully resolved and analysed plan.
+// If it is not possible, returns an error.
+pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Res<LogicalPlan> {
+  let rules = vec![
+    AnalysisRule::ResolveNodes(session, txn),
+    AnalysisRule::ResolveTypes(session, txn),
+  ];
+
+  let mut curr_plan: LogicalPlan = plan;
+
+  for rule in rules {
+    let tmp = trees::transform_up(&curr_plan, &rule)?;
+    curr_plan = tmp;
+  }
+
+  Ok(curr_plan)
 }
 
 #[cfg(test)]
