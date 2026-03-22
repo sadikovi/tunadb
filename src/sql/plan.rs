@@ -1307,7 +1307,9 @@ pub mod tests {
       Ok(Type::INT)
     );
     assert_eq!(
-      Expression::Add(Rc::new(Expression::LiteralDouble(1.0)), Rc::new(Expression::Null)).data_type(),
+      Expression::Add(
+        Rc::new(Expression::LiteralDouble(1.0)), Rc::new(Expression::Null)
+      ).data_type(),
       Ok(Type::DOUBLE)
     );
     assert_eq!(
@@ -1315,7 +1317,9 @@ pub mod tests {
       Ok(Type::NULL)
     );
     assert_eq!(
-      Expression::Divide(Rc::new(Expression::Null), Rc::new(Expression::LiteralBigInt(1))).data_type(),
+      Expression::Divide(
+        Rc::new(Expression::Null), Rc::new(Expression::LiteralBigInt(1))
+      ).data_type(),
       Ok(Type::BIGINT)
     );
 
@@ -1325,14 +1329,18 @@ pub mod tests {
         Rc::new(Expression::LiteralDouble(1.0)),
         Rc::new(Expression::LiteralString(Rc::new("x".to_string()))),
       ).data_type(),
-      Err(Error::SQLAnalysisExpressionError("Cannot reconcile data types DOUBLE and TEXT".to_string()))
+      Err(Error::SQLAnalysisExpressionError(
+        "Cannot reconcile data types DOUBLE and TEXT".to_string()
+      ))
     );
     assert_eq!(
       Expression::Multiply(
         Rc::new(Expression::LiteralFloat(1.0)),
         Rc::new(Expression::LiteralBool(true)),
       ).data_type(),
-      Err(Error::SQLAnalysisExpressionError("Cannot reconcile data types FLOAT and BOOL".to_string()))
+      Err(Error::SQLAnalysisExpressionError(
+        "Cannot reconcile data types FLOAT and BOOL".to_string()
+      ))
     );
     assert_eq!(
       Expression::Or(
@@ -1425,9 +1433,22 @@ pub mod tests {
       ).nullable(),
       Ok(true)
     );
-    assert_eq!(Expression::Subtract(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(), Ok(true));
-    assert_eq!(Expression::Multiply(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::Null)).nullable(), Ok(true));
-    assert_eq!(Expression::Divide(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))).nullable(), Ok(false));
+    assert_eq!(
+      Expression::Subtract(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Multiply(
+        Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::Null)
+      ).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Divide(
+        Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))
+      ).nullable(),
+      Ok(false)
+    );
 
     // Comparisons: nullable if either operand is nullable.
     assert_eq!(
@@ -1458,8 +1479,16 @@ pub mod tests {
       ).nullable(),
       Ok(false)
     );
-    assert_eq!(Expression::LessThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(), Ok(true));
-    assert_eq!(Expression::GreaterThan(Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))).nullable(), Ok(false));
+    assert_eq!(
+      Expression::LessThan(Rc::new(Expression::Null), Rc::new(Expression::Null)).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::GreaterThan(
+        Rc::new(Expression::LiteralInt(1)), Rc::new(Expression::LiteralInt(2))
+      ).nullable(),
+      Ok(false)
+    );
 
     // Logical: nullable if either operand is.
     assert_eq!(
@@ -1514,10 +1543,22 @@ pub mod tests {
     );
 
     // Alias and Cast preserve child nullability.
-    assert_eq!(Expression::Alias(Rc::new(Expression::Null), Rc::new("x".to_string())).nullable(), Ok(true));
-    assert_eq!(Expression::Alias(Rc::new(Expression::LiteralInt(1)), Rc::new("x".to_string())).nullable(), Ok(false));
-    assert_eq!(Expression::Cast(Rc::new(Expression::Null), Rc::new(Type::INT)).nullable(), Ok(true));
-    assert_eq!(Expression::Cast(Rc::new(Expression::LiteralInt(1)), Rc::new(Type::BIGINT)).nullable(), Ok(false));
+    assert_eq!(
+      Expression::Alias(Rc::new(Expression::Null), Rc::new("x".to_string())).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Alias(Rc::new(Expression::LiteralInt(1)), Rc::new("x".to_string())).nullable(),
+      Ok(false)
+    );
+    assert_eq!(
+      Expression::Cast(Rc::new(Expression::Null), Rc::new(Type::INT)).nullable(),
+      Ok(true)
+    );
+    assert_eq!(
+      Expression::Cast(Rc::new(Expression::LiteralInt(1)), Rc::new(Type::BIGINT)).nullable(),
+      Ok(false)
+    );
   }
 
   #[test]

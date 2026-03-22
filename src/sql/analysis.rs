@@ -447,7 +447,9 @@ fn analysis_resolve_nodes(
           Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
+          Err(Error::SQLAnalysisError(
+            format!("Table {}.{} does not exist", schema_name, table_name)
+          ))
         },
         Err(err) => Err(err),
       }
@@ -528,7 +530,9 @@ fn analysis_resolve_nodes(
           Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
+          Err(Error::SQLAnalysisError(
+            format!("Table {}.{} does not exist", schema_name, table_name)
+          ))
         },
         Err(err) => Err(err),
       }
@@ -569,7 +573,9 @@ fn analysis_resolve_nodes(
           Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
+          Err(Error::SQLAnalysisError(
+            format!("Table {}.{} does not exist", schema_name, table_name)
+          ))
         },
         Err(err) => Err(err),
       }
@@ -776,8 +782,14 @@ mod tests {
   fn test_resolve_types_arithmetic_null() {
     // NULL op T: NULL is cast to T (§3.2).
     assert_eq!(resolve(add(null(), int(1))), Ok(add(cast(null(), Type::INT), int(1))));
-    assert_eq!(resolve(multiply(bigint(1), null())), Ok(multiply(bigint(1), cast(null(), Type::BIGINT))));
-    assert_eq!(resolve(subtract(null(), double(1.0))), Ok(subtract(cast(null(), Type::DOUBLE), double(1.0))));
+    assert_eq!(
+      resolve(multiply(bigint(1), null())),
+      Ok(multiply(bigint(1), cast(null(), Type::BIGINT)))
+    );
+    assert_eq!(
+      resolve(subtract(null(), double(1.0))),
+      Ok(subtract(cast(null(), Type::DOUBLE), double(1.0)))
+    );
     // NULL op NULL: both sides stay NULL, no cast needed (result type is NULL).
     assert_eq!(resolve(add(null(), null())), Ok(add(null(), null())));
   }
@@ -790,8 +802,14 @@ mod tests {
   fn test_resolve_types_comparison_same_type() {
     // Same type: no rewrite.
     assert_eq!(resolve(equals(int(1), int(2))), Ok(equals(int(1), int(2))));
-    assert_eq!(resolve(less_than(string("a"), string("b"))), Ok(less_than(string("a"), string("b"))));
-    assert_eq!(resolve(equals(boolean(true), boolean(false))), Ok(equals(boolean(true), boolean(false))));
+    assert_eq!(
+      resolve(less_than(string("a"), string("b"))),
+      Ok(less_than(string("a"), string("b")))
+    );
+    assert_eq!(
+      resolve(equals(boolean(true), boolean(false))),
+      Ok(equals(boolean(true), boolean(false)))
+    );
   }
 
   #[test]
@@ -1007,7 +1025,9 @@ mod tests {
       cols.iter().map(|(name, tpe)| Field::new(name.to_string(), tpe.clone(), true)).collect()
     );
     dbc.with_txn(true, |txn| {
-      catalog::create_relation(&txn, "default", table, RelationType::TABLE, fields.clone(), false).unwrap();
+      catalog::create_relation(
+        &txn, "default", table, RelationType::TABLE, fields.clone(), false
+      ).unwrap();
     });
   }
 
