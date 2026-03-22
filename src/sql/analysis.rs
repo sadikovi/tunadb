@@ -29,7 +29,9 @@ fn assert_unique_fields(fields: &Fields) -> Res<()> {
 
   for field in fields.get() {
     if !set.insert(field.name()) {
-      return Err(Error::SQLAnalysisDuplicateField(field.name().to_string()));
+      return Err(
+        Error::SQLAnalysisExpressionError(format!("Duplicate column name {}", field.name()))
+      );
     }
 
     match field.data_type() {
@@ -75,7 +77,7 @@ where
     )
   } else {
     Err(
-      Error::SQLAnalysisExpressionDataType(
+      Error::SQLAnalysisExpressionError(
         format!(
           "Incompatible comparison types {} != {} between {} and {}",
           left_tpe,
@@ -104,7 +106,7 @@ where
     Ok(result_tpe) => result_tpe,
     Err(_) => {
       return Err(
-        Error::SQLAnalysisExpressionDataType(
+        Error::SQLAnalysisExpressionError(
           format!(
             "Incompatible arithmetic types {} != {} between {} and {}",
             ltpe,
@@ -164,7 +166,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             if identifier_matches.is_empty() {
               // We could not resolve the identifier.
               Err(
-                Error::SQLAnalysisUnresolvedExpression(
+                Error::SQLAnalysisExpressionError(
                   format!("Unknown expressions found: {:?}", expr)
                 )
               )
@@ -172,7 +174,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
               Ok(identifier_matches.pop().cloned())
             } else {
               Err(
-                Error::SQLAnalysisUnresolvedExpression(
+                Error::SQLAnalysisExpressionError(
                   format!("Duplicate expressions found: {:?}", identifier_matches)
                 )
               )
@@ -192,7 +194,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let right_tpe = right.data_type()?;
             if left_tpe != Type::BOOL || right_tpe != Type::BOOL {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!("And requires BOOL operands, got {} and {}", left_tpe, right_tpe)
                 )
               )
@@ -204,7 +206,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let from_tpe = child.data_type()?;
             if !can_cast(&from_tpe, tpe) {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!("Cannot cast {} to {}", from_tpe, tpe)
                 )
               )
@@ -217,7 +219,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let right_tpe = right.data_type()?;
             if left_tpe != Type::TEXT || right_tpe != Type::TEXT {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!("Concat requires TEXT operands, got {} and {}", left_tpe, right_tpe)
                 )
               )
@@ -240,7 +242,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
           }
           Expression::Identifier(_, _) => {
             // Should never happen, all identifiers must be resolved before this step runs.
-            Err(Error::SQLAnalysisExpressionDataType(format!("Identifier is unresolved")))
+            Err(Error::SQLAnalysisExpressionError(format!("Identifier is unresolved")))
           },
           Expression::IsNull(_) => Ok(None),
           Expression::IsNotNull(_) => Ok(None),
@@ -263,7 +265,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let tpe = child.data_type()?;
             if tpe != Type::BOOL {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!(
                     "{} must have BOOL data type, got {}",
                     trees::plan_output(child.as_ref()),
@@ -284,7 +286,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let right_tpe = right.data_type()?;
             if left_tpe != Type::BOOL || right_tpe != Type::BOOL {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!("Or requires BOOL operands, got {} and {}", left_tpe, right_tpe)
                 )
               )
@@ -294,7 +296,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
           },
           Expression::Star(_) => {
             // Should never happen, all stars must be resolved before this step runs.
-            Err(Error::SQLAnalysisExpressionDataType(format!("Star is unresolved")))
+            Err(Error::SQLAnalysisExpressionError(format!("Star is unresolved")))
           },
           Expression::Subtract(ref left, ref right) => {
             resolve_types_for_binary_arithmetic(left, right, Expression::Subtract)
@@ -304,7 +306,7 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             let tpe = child.data_type()?;
             if !tpe.is_numeric() && !tpe.is_null() {
               Err(
-                Error::SQLAnalysisExpressionDataType(
+                Error::SQLAnalysisExpressionError(
                   format!(
                     "{} must have numeric data type, got {}",
                     trees::plan_output(child.as_ref()),
@@ -384,7 +386,9 @@ fn analysis_resolve_nodes(
   match plan {
     LogicalPlan::UnresolvedCreateSchema(ref schema_name) => {
       match catalog::get_schema(txn, schema_name) {
-        Ok(info) => Err(Error::SQLAnalysisSchemaAlreadyExists(info.into_schema_name())),
+        Ok(info) => Err(
+          Error::SQLAnalysisError(format!("Schema {} already exists", info.into_schema_name()))
+        ),
         Err(Error::SchemaDoesNotExist(_)) => {
           Ok(Some(LogicalPlan::CreateSchema(schema_name.clone())))
         },
@@ -395,14 +399,17 @@ fn analysis_resolve_nodes(
       match catalog::get_relation(txn, current_schema(session, schema_name), table_name) {
         Ok((schema_info, table_info)) => {
           Err(
-            Error::SQLAnalysisTableAlreadyExists(
-              schema_info.into_schema_name(),
-              table_info.into_relation_name()
+            Error::SQLAnalysisError(
+              format!(
+                "Table {}.{} already exists",
+                schema_info.into_schema_name(),
+                table_info.into_relation_name()
+              )
             )
           )
         },
         Err(Error::SchemaDoesNotExist(schema_name)) => {
-          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+          Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(ref schema_name, ref table_name)) => {
           // Validate fields to make sure there are no duplicates.
@@ -426,7 +433,7 @@ fn analysis_resolve_nodes(
           Ok(Some(LogicalPlan::DropSchema(Rc::new(info), *cascade)))
         },
         Err(Error::SchemaDoesNotExist(schema_name)) => {
-          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+          Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(err) => Err(err),
       }
@@ -437,10 +444,10 @@ fn analysis_resolve_nodes(
           Ok(Some(LogicalPlan::DropTable(Rc::new(schema_info), Rc::new(table_info))))
         },
         Err(Error::SchemaDoesNotExist(schema_name)) => {
-          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+          Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
         },
         Err(err) => Err(err),
       }
@@ -464,7 +471,7 @@ fn analysis_resolve_nodes(
             for col in columns.as_slice() {
               if !set.insert(col) {
                 return Err(
-                  Error::SQLAnalysisUnresolvedPlan(
+                  Error::SQLAnalysisError(
                     format!("Duplicate column {} in Insert", col)
                   )
                 );
@@ -476,7 +483,7 @@ fn analysis_resolve_nodes(
                 Some(pos) => col_positions.push(pos),
                 None => {
                   return Err(
-                    Error::SQLAnalysisUnresolvedPlan(
+                    Error::SQLAnalysisError(
                       format!(
                         "Column {} does not exist in the table {} schema",
                         col,
@@ -496,7 +503,7 @@ fn analysis_resolve_nodes(
           // populate columns from the table.
           if col_positions.len() != query_cols.len() {
             return Err(
-              Error::SQLAnalysisUnresolvedPlan(
+              Error::SQLAnalysisError(
                 format!(
                   "Input columns match for Insert, expected {} columns, found {}",
                   col_positions.len(),
@@ -518,10 +525,10 @@ fn analysis_resolve_nodes(
           )
         },
         Err(Error::SchemaDoesNotExist(schema_name)) => {
-          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+          Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
         },
         Err(err) => Err(err),
       }
@@ -559,10 +566,10 @@ fn analysis_resolve_nodes(
           )
         },
         Err(Error::SchemaDoesNotExist(schema_name)) => {
-          Err(Error::SQLAnalysisSchemaDoesNotExist(schema_name))
+          Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(schema_name, table_name)) => {
-          Err(Error::SQLAnalysisTableDoesNotExist(schema_name, table_name))
+          Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", schema_name, table_name)))
         },
         Err(err) => Err(err),
       }

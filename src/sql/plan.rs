@@ -152,7 +152,7 @@ pub fn promote_arithmetic_type(left: &Type, right: &Type) -> Res<Type> {
 
     (left, right) => {
       Err(
-        Error::SQLAnalysisExpressionDataType(
+        Error::SQLAnalysisExpressionError(
           format!("Cannot reconcile data types {} and {}", left, right)
         )
       )
@@ -292,7 +292,7 @@ impl Expression {
       Expression::GreaterThanEquals(_, _) => Ok(Type::BOOL),
       Expression::Identifier(ref parts, ref name) => {
         Err(
-          Error::SQLAnalysisUnresolvedExpression(
+          Error::SQLAnalysisExpressionError(
             format!(
               "Identifier {} does not have a data type",
               identifier_display_name(parts, name)
@@ -319,7 +319,7 @@ impl Expression {
       Expression::Or(_, _) => Ok(Type::BOOL),
       Expression::Star(ref parts) => {
         Err(
-          Error::SQLAnalysisUnresolvedExpression(
+          Error::SQLAnalysisExpressionError(
             format!(
               "Star expression {} does not have a data type",
               identifier_display_name(parts, "*")
@@ -354,7 +354,7 @@ impl Expression {
       },
       Expression::Identifier(ref parts, ref name) => {
         Err(
-          Error::SQLAnalysisUnresolvedExpression(
+          Error::SQLAnalysisExpressionError(
             format!(
               "Identifier {} does not have nullable status",
               identifier_display_name(parts, name)
@@ -379,7 +379,7 @@ impl Expression {
       Expression::Or(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Star(ref parts) => {
         Err(
-          Error::SQLAnalysisUnresolvedExpression(
+          Error::SQLAnalysisExpressionError(
             format!(
               "Star expression {} does not have nullable status",
               identifier_display_name(parts, "*")
@@ -696,37 +696,37 @@ impl LogicalPlan {
         Ok(expressions)
       },
       LogicalPlan::UnresolvedCreateSchema(_) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateSchema".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedCreateSchema".to_string()))
       },
       LogicalPlan::UnresolvedCreateTable(_, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedCreateTable".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedCreateTable".to_string()))
       },
       LogicalPlan::UnresolvedDropSchema(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropSchema".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedDropSchema".to_string()))
       },
       LogicalPlan::UnresolvedDropTable(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedDropTable".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedDropTable".to_string()))
       },
       LogicalPlan::UnresolvedFilter(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedFilter".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedFilter".to_string()))
       },
       LogicalPlan::UnresolvedInsertInto(_, _, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedInsertInto".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedInsertInto".to_string()))
       },
       LogicalPlan::UnresolvedLimit(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLimit".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedLimit".to_string()))
       },
       LogicalPlan::UnresolvedLocalRelation(_) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedLocalRelation".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedLocalRelation".to_string()))
       },
       LogicalPlan::UnresolvedProject(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedProject".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedProject".to_string()))
       },
       LogicalPlan::UnresolvedSubquery(_, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedSubquery".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedSubquery".to_string()))
       },
       LogicalPlan::UnresolvedTableScan(_, _, _) => {
-        Err(Error::SQLAnalysisUnresolvedPlan("UnresolvedTableScan".to_string()))
+        Err(Error::SQLAnalysisError("UnresolvedTableScan".to_string()))
       },
     }
   }
@@ -1265,7 +1265,7 @@ pub mod tests {
         Rc::new("bar".to_string())
       ).data_type(),
       Err(
-        Error::SQLAnalysisUnresolvedExpression(
+        Error::SQLAnalysisExpressionError(
           "Identifier foo.bar does not have a data type".to_string()
         )
       )
@@ -1273,7 +1273,7 @@ pub mod tests {
     assert_eq!(
       Expression::Identifier(Rc::new(Vec::new()), Rc::new("bar".to_string())).data_type(),
       Err(
-        Error::SQLAnalysisUnresolvedExpression(
+        Error::SQLAnalysisExpressionError(
           "Identifier bar does not have a data type".to_string()
         )
       )
@@ -1325,14 +1325,14 @@ pub mod tests {
         Rc::new(Expression::LiteralDouble(1.0)),
         Rc::new(Expression::LiteralString(Rc::new("x".to_string()))),
       ).data_type(),
-      Err(Error::SQLAnalysisExpressionDataType("Cannot reconcile data types DOUBLE and TEXT".to_string()))
+      Err(Error::SQLAnalysisExpressionError("Cannot reconcile data types DOUBLE and TEXT".to_string()))
     );
     assert_eq!(
       Expression::Multiply(
         Rc::new(Expression::LiteralFloat(1.0)),
         Rc::new(Expression::LiteralBool(true)),
       ).data_type(),
-      Err(Error::SQLAnalysisExpressionDataType("Cannot reconcile data types FLOAT and BOOL".to_string()))
+      Err(Error::SQLAnalysisExpressionError("Cannot reconcile data types FLOAT and BOOL".to_string()))
     );
     assert_eq!(
       Expression::Or(
@@ -1344,7 +1344,7 @@ pub mod tests {
     assert_eq!(
       Expression::Star(Rc::new(vec!["foo".to_string()])).data_type(),
       Err(
-        Error::SQLAnalysisUnresolvedExpression(
+        Error::SQLAnalysisExpressionError(
           "Star expression foo.* does not have a data type".to_string()
         )
       )
@@ -1352,7 +1352,7 @@ pub mod tests {
     assert_eq!(
       Expression::Star(Rc::new(Vec::new())).data_type(),
       Err(
-        Error::SQLAnalysisUnresolvedExpression(
+        Error::SQLAnalysisExpressionError(
           "Star expression * does not have a data type".to_string()
         )
       )
