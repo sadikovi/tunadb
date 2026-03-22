@@ -709,8 +709,11 @@ pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Re
 mod tests {
   use std::rc::Rc;
   use super::*;
+  use crate::exec::catalog::{self, RelationType};
   use crate::exec::plan::dsl::*;
-  use crate::exec::types::Type;
+  use crate::exec::session::Session;
+  use crate::exec::types::{Field, Fields, Type};
+  use crate::storage::db;
 
   // Convenience: resolve types and unwrap.
   fn resolve(expr: Expression) -> Res<Expression> {
@@ -907,5 +910,342 @@ mod tests {
   fn test_resolve_types_unary_invalid() {
     assert!(resolve(_plus(string("x"))).is_err());
     assert!(resolve(_minus(boolean(true))).is_err());
+  }
+
+  //===============================================================
+  // analysis_resolve_types — plan level (no catalog required)
+  //===============================================================
+
+  #[test]
+  fn test_analysis_resolve_types_filter_bool_no_change() {
+    let child = Rc::new(LogicalPlan::LocalRelation(Rc::new(vec![vec![]])));
+    let plan = LogicalPlan::Filter(Rc::new(boolean(true)), child);
+    assert_eq!(analysis_resolve_types(&plan), Ok(None));
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_filter_widened() {
+    // Comparison of INT < BIGINT: INT operand gets a Cast node inserted.
+    let child = Rc::new(LogicalPlan::LocalRelation(Rc::new(vec![vec![]])));
+    let plan = LogicalPlan::Filter(Rc::new(less_than(int(1), bigint(2))), child.clone());
+    assert_eq!(
+      analysis_resolve_types(&plan),
+      Ok(Some(LogicalPlan::Filter(
+        Rc::new(less_than(cast(int(1), Type::BIGINT), bigint(2))),
+        child,
+      )))
+    );
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_filter_non_bool_error() {
+    let child = Rc::new(LogicalPlan::LocalRelation(Rc::new(vec![vec![]])));
+    let plan = LogicalPlan::Filter(Rc::new(int(1)), child);
+    assert!(analysis_resolve_types(&plan).is_err());
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_local_relation_no_change() {
+    let plan = LogicalPlan::LocalRelation(Rc::new(vec![vec![int(1), boolean(true)]]));
+    assert_eq!(analysis_resolve_types(&plan), Ok(None));
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_local_relation_widened() {
+    let plan = LogicalPlan::LocalRelation(Rc::new(vec![vec![add(int(1), bigint(2))]]));
+    assert_eq!(
+      analysis_resolve_types(&plan),
+      Ok(Some(LogicalPlan::LocalRelation(
+        Rc::new(vec![vec![add(cast(int(1), Type::BIGINT), bigint(2))]])
+      )))
+    );
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_project_no_change() {
+    let child = Rc::new(LogicalPlan::LocalRelation(Rc::new(vec![vec![]])));
+    let plan = LogicalPlan::Project(Rc::new(vec![int(1), boolean(true)]), child);
+    assert_eq!(analysis_resolve_types(&plan), Ok(None));
+  }
+
+  #[test]
+  fn test_analysis_resolve_types_project_widened() {
+    let child = Rc::new(LogicalPlan::LocalRelation(Rc::new(vec![vec![]])));
+    let plan = LogicalPlan::Project(Rc::new(vec![add(int(1), bigint(2))]), child.clone());
+    assert_eq!(
+      analysis_resolve_types(&plan),
+      Ok(Some(LogicalPlan::Project(
+        Rc::new(vec![add(cast(int(1), Type::BIGINT), bigint(2))]),
+        child,
+      )))
+    );
+  }
+
+  //===============================================================
+  // analyse — end-to-end (catalog required)
+  //===============================================================
+
+  fn init_db() -> db::DB {
+    let mut dbc = db::open(None).try_build().unwrap();
+    dbc.with_txn(true, |txn| {
+      catalog::init_catalog(&txn).unwrap();
+      catalog::create_schema(&txn, "default", false).unwrap();
+    });
+    dbc
+  }
+
+  // Creates a table in the "default" schema.
+  fn setup_table(dbc: &mut db::DB, table: &str, cols: &[(&str, Type)]) {
+    let fields = Fields::new(
+      cols.iter().map(|(name, tpe)| Field::new(name.to_string(), tpe.clone(), true)).collect()
+    );
+    dbc.with_txn(true, |txn| {
+      catalog::create_relation(&txn, "default", table, RelationType::TABLE, fields.clone(), false).unwrap();
+    });
+  }
+
+  #[test]
+  fn test_analyse_create_table() {
+    let mut dbc = init_db();
+    let fields = Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, create_table(None, "t", fields.clone()))
+    });
+    assert!(matches!(result, Ok(LogicalPlan::CreateTable(_, _, _))));
+  }
+
+  #[test]
+  fn test_analyse_create_table_already_exists_error() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let fields = Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, create_table(None, "t", fields.clone()))
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_drop_table() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, drop_table(None, "t"))
+    });
+    assert!(matches!(result, Ok(LogicalPlan::DropTable(_, _))));
+  }
+
+  #[test]
+  fn test_analyse_drop_table_not_exists_error() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, drop_table(None, "t"))
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_table_scan() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, from(None, "t", None))
+    });
+    assert!(matches!(result, Ok(LogicalPlan::TableScan(_, _, _))));
+  }
+
+  #[test]
+  fn test_analyse_table_scan_not_exists_error() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, from(None, "t", None))
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_insert_all_cols() {
+    // INSERT INTO t VALUES (1, 'x') — no column list, all columns in definition order.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(None, "t", vec![], vec![vec![int(1), string("x")]]);
+      analyse(&Session::new(), &txn, plan)
+    });
+    match result.unwrap() {
+      LogicalPlan::InsertInto(_, _, col_pos, _) => {
+        assert_eq!(col_pos.as_ref(), &vec![0, 1]);
+      },
+      other => panic!("expected InsertInto, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_insert_explicit_cols() {
+    // INSERT INTO t (b, a) VALUES ('x', 1) — explicit reverse order, positions must reflect it.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(
+        None, "t",
+        vec!["b".to_string(), "a".to_string()],
+        vec![vec![string("x"), int(1)]]
+      );
+      analyse(&Session::new(), &txn, plan)
+    });
+    match result.unwrap() {
+      LogicalPlan::InsertInto(_, _, col_pos, _) => {
+        assert_eq!(col_pos.as_ref(), &vec![1, 0]);
+      },
+      other => panic!("expected InsertInto, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_insert_duplicate_col_error() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(
+        None, "t",
+        vec!["a".to_string(), "a".to_string()],
+        vec![vec![int(1), int(2)]]
+      );
+      analyse(&Session::new(), &txn, plan)
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_insert_unknown_col_error() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(
+        None, "t",
+        vec!["z".to_string()],
+        vec![vec![int(1)]]
+      );
+      analyse(&Session::new(), &txn, plan)
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_insert_count_mismatch_error() {
+    // Table has 2 columns but only 1 value is provided.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(None, "t", vec![], vec![vec![int(1)]]);
+      analyse(&Session::new(), &txn, plan)
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_insert_type_widening() {
+    // INT value into BIGINT column — analysis wraps the query in a Project with Cast.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::BIGINT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(None, "t", vec![], vec![vec![int(1)]]);
+      analyse(&Session::new(), &txn, plan)
+    });
+    match result.unwrap() {
+      LogicalPlan::InsertInto(_, _, _, query) => {
+        match query.as_ref() {
+          LogicalPlan::Project(exprs, _) => {
+            assert_eq!(&exprs[0], &cast(int(1), Type::BIGINT));
+          },
+          other => panic!("expected Project wrapping the query, got {:?}", other),
+        }
+      },
+      other => panic!("expected InsertInto, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_insert_incompatible_type_error() {
+    // TEXT into INT column is incompatible — no implicit cast exists.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      let plan = insert_into_values(None, "t", vec![], vec![vec![string("hello")]]);
+      analyse(&Session::new(), &txn, plan)
+    });
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_analyse_filter() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, filter(boolean(true), empty()))
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Filter(_, _))));
+  }
+
+  #[test]
+  fn test_analyse_project() {
+    // Projection with implicit widening: INT + BIGINT becomes Cast(INT, BIGINT) + BIGINT.
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, project(vec![add(int(1), bigint(2))], empty()))
+    });
+    match result.unwrap() {
+      LogicalPlan::Project(exprs, _) => {
+        assert_eq!(&exprs[0], &add(cast(int(1), Type::BIGINT), bigint(2)));
+      },
+      other => panic!("expected Project, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_local_relation() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, local(vec![int(1), string("hello")]))
+    });
+    match result.unwrap() {
+      LogicalPlan::LocalRelation(rows) => {
+        assert_eq!(rows[0], vec![int(1), string("hello")]);
+      },
+      other => panic!("expected LocalRelation, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_subquery_with_alias() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, subquery(empty(), Some("sq")))
+    });
+    match result.unwrap() {
+      LogicalPlan::Subquery(alias, _) => assert_eq!(alias.as_str(), "sq"),
+      other => panic!("expected Subquery, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_subquery_no_alias() {
+    // A subquery without an alias gets the default alias (§14.1).
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, subquery(empty(), None))
+    });
+    match result.unwrap() {
+      LogicalPlan::Subquery(alias, _) => assert_eq!(alias.as_str(), DEFAULT_SUBQUERY_NAME),
+      other => panic!("expected Subquery, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_limit() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::new(), &txn, limit(10, empty()))
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Limit(10, _))));
   }
 }
