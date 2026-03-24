@@ -49,6 +49,11 @@ pub struct SchemaInfo {
 }
 
 impl SchemaInfo {
+  // Creates new schema info using schema id and name.
+  pub fn new(schema_id: u64, schema_name: String) -> Self {
+    Self { schema_id, schema_name }
+  }
+
   // Returns globally unique object id for the schema.
   #[inline]
   pub fn schema_id(&self) -> u64 {
@@ -93,6 +98,17 @@ pub struct RelationInfo {
 }
 
 impl RelationInfo {
+  // Creates new relation info.
+  pub fn new(
+    schema_id: u64,
+    relation_id: u64,
+    relation_name: String,
+    relation_type: RelationType,
+    relation_fields: Fields,
+  ) -> Self {
+    Self { schema_id, relation_id, relation_name, relation_type, relation_fields }
+  }
+
   // Returns globally unique id for the schema.
   #[inline]
   pub fn schema_id(&self) -> u64 {

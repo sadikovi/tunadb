@@ -267,14 +267,20 @@ Division by zero is a **runtime error** for both integer and float operands. IEE
 
 ### 8.6 NaN
 
-NaN can arise from float operations such as `0.0 / 0.0` only if explicitly cast from a string (`CAST('NaN' AS DOUBLE)`). Arithmetic with NaN propagates NaN. Comparisons involving NaN:
+NaN can arise only if explicitly cast from a string (`CAST('NaN' AS FLOAT)`, `CAST('NaN' AS DOUBLE)`). Arithmetic with a NaN operand propagates NaN. NULL propagation (Section 2.2) takes precedence: if either operand is NULL the result is NULL regardless of NaN.
 
-- `NaN = NaN` → `TRUE`
-- `NaN <> NaN` → `FALSE`
-- `NaN > x` → `TRUE` for all non-NaN `x`
-- `NaN < x` → `FALSE` for all non-NaN `x`
+NaN is ordered **greater than all non-NaN values**. This matches PostgreSQL sort semantics and deviates from IEEE 754 in order to give NaN a stable, consistent position in sort order and index structures.
 
-NaN is ordered greater than all non-NaN values. This matches PostgreSQL and deviates from IEEE 754 in order to give NaN a stable, consistent position in sort order and index structures.
+Full truth table for comparisons where `x` and `y` are non-NaN finite-or-infinite values:
+
+| Op   | NaN ○ NaN | NaN ○ x | x ○ NaN | x ○ y    |
+|------|-----------|---------|---------|----------|
+| `=`  | TRUE      | FALSE   | FALSE   | `x = y`  |
+| `<>` | FALSE     | TRUE    | TRUE    | `x ≠ y`  |
+| `>`  | FALSE     | TRUE    | FALSE   | `x > y`  |
+| `>=` | TRUE      | TRUE    | FALSE   | `x ≥ y`  |
+| `<`  | FALSE     | FALSE   | TRUE    | `x < y`  |
+| `<=` | TRUE      | FALSE   | TRUE    | `x ≤ y`  |
 
 ---
 

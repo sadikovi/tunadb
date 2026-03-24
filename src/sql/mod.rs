@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod catalog;
+pub mod exec;
 pub mod parser;
 pub mod plan;
 pub mod planning;

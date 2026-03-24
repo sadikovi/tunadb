@@ -13,6 +13,8 @@ pub enum Error {
   SQLAnalysisError(String /* error message */),
   SQLAnalysisExpressionError(String /* error message */),
 
+  SQLExecutionError(String /* error message */),
+
   // SQL catalog errors.
   OperationIsNotAllowed(String /* error message */),
   SchemaAlreadyExists(String /* schema */),
