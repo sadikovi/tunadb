@@ -627,6 +627,8 @@ pub enum LogicalPlan {
   UnresolvedLimit(usize /* limit */, Rc<LogicalPlan> /* child */),
   UnresolvedLocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   UnresolvedProject(Rc<Vec<Expression>> /* expressions */, Rc<LogicalPlan> /* child */),
+  UnresolvedShowSchemas,
+  UnresolvedShowTables,
   UnresolvedSubquery(Option<Rc<String>> /* alias */, Rc<LogicalPlan> /* child */),
   UnresolvedTableScan(
     Option<Rc<String>> /* optional schema name */,
@@ -722,6 +724,12 @@ impl LogicalPlan {
       LogicalPlan::UnresolvedProject(_, _) => {
         Err(Error::SQLAnalysisError("UnresolvedProject".to_string()))
       },
+      LogicalPlan::UnresolvedShowSchemas => {
+        Err(Error::SQLAnalysisError("UnresolvedShowSchemas".to_string()))
+      },
+      LogicalPlan::UnresolvedShowTables => {
+        Err(Error::SQLAnalysisError("UnresolvedShowTables".to_string()))
+      },
       LogicalPlan::UnresolvedSubquery(_, _) => {
         Err(Error::SQLAnalysisError("UnresolvedSubquery".to_string()))
       },
@@ -786,6 +794,8 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedLimit(_, _) => write!(f, "UnresolvedLimit"),
       LogicalPlan::UnresolvedLocalRelation(_) => write!(f, "UnresolvedLocalRelation"),
       LogicalPlan::UnresolvedProject(_, _) => write!(f, "UnresolvedProject"),
+      LogicalPlan::UnresolvedShowSchemas => write!(f, "UnresolvedShowSchemas"),
+      LogicalPlan::UnresolvedShowTables => write!(f, "UnresolvedShowTables"),
       LogicalPlan::UnresolvedSubquery(_, _) => write!(f, "UnresolvedSubquery"),
       LogicalPlan::UnresolvedTableScan(_, _, _) => write!(f, "UnresolvedTableScan"),
     }
@@ -819,6 +829,8 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedLimit(_, ref child) => vec![child],
       LogicalPlan::UnresolvedLocalRelation(_) => Vec::new(),
       LogicalPlan::UnresolvedProject(_, ref child) => vec![child],
+      LogicalPlan::UnresolvedShowSchemas => Vec::new(),
+      LogicalPlan::UnresolvedShowTables => Vec::new(),
       LogicalPlan::UnresolvedSubquery(_, ref child) => vec![child],
       LogicalPlan::UnresolvedTableScan(_, _, _) => Vec::new(),
     }
@@ -906,6 +918,8 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
         let child = get_unary!("UnresolvedProject", children);
         LogicalPlan::UnresolvedProject(expressions.clone(), Rc::new(child))
       },
+      LogicalPlan::UnresolvedShowSchemas => LogicalPlan::UnresolvedShowSchemas,
+      LogicalPlan::UnresolvedShowTables => LogicalPlan::UnresolvedShowTables,
       LogicalPlan::UnresolvedSubquery(ref alias, _) => {
         let child = get_unary!("UnresolvedSubquery", children);
         LogicalPlan::UnresolvedSubquery(alias.clone(), Rc::new(child))

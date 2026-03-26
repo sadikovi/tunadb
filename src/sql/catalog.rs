@@ -199,7 +199,11 @@ fn get_system_relations(txn: &TransactionRef) -> Res<Set> {
 
 pub const INFORMATION_SCHEMA: &str = "information_schema";
 pub const INFORMATION_SCHEMA_SCHEMATA: &str = "schemata";
+pub const INFORMATION_SCHEMA_SCHEMATA_SCHEMA_NAME: &str = "schema_name";
 pub const INFORMATION_SCHEMA_RELATIONS: &str = "relations";
+pub const INFORMATION_SCHEMA_RELATIONS_RELATION_SCHEMA: &str = "relation_schema";
+pub const INFORMATION_SCHEMA_RELATIONS_RELATION_NAME: &str = "relation_name";
+pub const INFORMATION_SCHEMA_RELATIONS_RELATION_TYPE: &str = "relation_type";
 
 // Returns true if the catalog is already initialised, false if it is not.
 // Errors if the catalog is in a partially initialised (corrupt) state.
@@ -227,7 +231,7 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("schema_name".to_string(), Type::TEXT, false),
+        Field::new(INFORMATION_SCHEMA_SCHEMATA_SCHEMA_NAME.to_string(), Type::TEXT, false),
       ]
     ),
     false
@@ -240,9 +244,9 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
     RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("relation_schema".to_string(), Type::TEXT, false),
-        Field::new("relation_name".to_string(), Type::TEXT, false),
-        Field::new("relation_type".to_string(), Type::TEXT, false),
+        Field::new(INFORMATION_SCHEMA_RELATIONS_RELATION_SCHEMA.to_string(), Type::TEXT, false),
+        Field::new(INFORMATION_SCHEMA_RELATIONS_RELATION_NAME.to_string(), Type::TEXT, false),
+        Field::new(INFORMATION_SCHEMA_RELATIONS_RELATION_TYPE.to_string(), Type::TEXT, false),
       ]
     ),
     false

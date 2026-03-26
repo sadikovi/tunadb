@@ -717,6 +717,12 @@ impl<'a> Parser<'a> {
       stmt = Some(self.insert_statement()?);
     } else if self.matches(TokenType::SELECT)? {
       stmt = Some(self.select_statement()?);
+    } else if self.matches(TokenType::SHOW)? {
+      if self.matches(TokenType::SCHEMAS)? {
+        stmt = Some(LogicalPlan::UnresolvedShowSchemas);
+      } else if self.matches(TokenType::TABLES)? {
+        stmt = Some(LogicalPlan::UnresolvedShowTables);
+      }
     }
 
     match stmt {
@@ -1728,5 +1734,23 @@ pub mod tests {
     // Integer literals still parse as INT or BIGINT.
     assert_plan("select 1", local(vec![int(1)]));
     assert_plan("select 100000000000", local(vec![bigint(100000000000)]));
+  }
+
+  #[test]
+  fn test_parser_show_schemas() {
+    assert_plan("show schemas", LogicalPlan::UnresolvedShowSchemas);
+    assert_plan("SHOW SCHEMAS", LogicalPlan::UnresolvedShowSchemas);
+  }
+
+  #[test]
+  fn test_parser_show_tables() {
+    assert_plan("show tables", LogicalPlan::UnresolvedShowTables);
+    assert_plan("SHOW TABLES", LogicalPlan::UnresolvedShowTables);
+  }
+
+  #[test]
+  #[should_panic(expected = "Unsupported token 'indexes'")]
+  fn test_parser_show_unknown() {
+    assert_plan("show indexes", empty());
   }
 }

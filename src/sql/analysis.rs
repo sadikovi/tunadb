@@ -361,6 +361,7 @@ fn resolve_expression_type(expr: &Expression) -> Res<Expression> {
 }
 
 enum AnalysisRule<'a> {
+  ExpandCommands(&'a Session),
   ResolveNodes(&'a Session, &'a TransactionRef),
   ResolveTypes,
 }
@@ -368,6 +369,9 @@ enum AnalysisRule<'a> {
 impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
   fn apply(&self, plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
     match self {
+      AnalysisRule::ExpandCommands(session) => {
+        analysis_expand_commands(session, plan)
+      },
       AnalysisRule::ResolveNodes(ref session, ref txn) => {
         analysis_resolve_nodes(session, txn, plan)
       },
@@ -375,6 +379,39 @@ impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
         analysis_resolve_types(plan)
       },
     }
+  }
+}
+
+fn analysis_expand_commands(session: &Session, plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
+  let info_schema = Some(Rc::new(catalog::INFORMATION_SCHEMA.to_string()));
+  let star = Rc::new(vec![Expression::Star(Rc::new(Vec::new()))]);
+
+  match plan {
+    LogicalPlan::UnresolvedShowSchemas => {
+      let scan = Rc::new(LogicalPlan::UnresolvedTableScan(
+        info_schema,
+        Rc::new(catalog::INFORMATION_SCHEMA_SCHEMATA.to_string()),
+        None,
+      ));
+      Ok(Some(LogicalPlan::UnresolvedProject(star, scan)))
+    },
+    LogicalPlan::UnresolvedShowTables => {
+      let scan = Rc::new(LogicalPlan::UnresolvedTableScan(
+        info_schema,
+        Rc::new(catalog::INFORMATION_SCHEMA_RELATIONS.to_string()),
+        None,
+      ));
+      let filter_expr = Rc::new(Expression::Equals(
+        Rc::new(Expression::Identifier(
+          Rc::new(Vec::new()),
+          Rc::new(catalog::INFORMATION_SCHEMA_RELATIONS_RELATION_SCHEMA.to_string()),
+        )),
+        Rc::new(Expression::LiteralString(Rc::new(session.current_schema().to_string()))),
+      ));
+      let filter = Rc::new(LogicalPlan::UnresolvedFilter(filter_expr, scan));
+      Ok(Some(LogicalPlan::UnresolvedProject(star, filter)))
+    },
+    _ => Ok(None),
   }
 }
 
@@ -704,6 +741,7 @@ fn analysis_resolve_types(plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
 // If it is not possible, returns an error.
 pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Res<LogicalPlan> {
   let rules = vec![
+    AnalysisRule::ExpandCommands(session),
     AnalysisRule::ResolveNodes(session, txn),
     AnalysisRule::ResolveTypes,
   ];
@@ -1274,5 +1312,119 @@ mod tests {
       analyse(&Session::builder().build(), &txn, limit(10, empty()))
     });
     assert!(matches!(result, Ok(LogicalPlan::Limit(10, _))));
+  }
+
+  //==========================
+  // analysis_expand_commands
+  //==========================
+
+  #[test]
+  fn test_expand_commands_show_schemas() {
+    let session = Session::builder().build();
+    let result = analysis_expand_commands(&session, &LogicalPlan::UnresolvedShowSchemas).unwrap();
+    match result {
+      Some(LogicalPlan::UnresolvedProject(exprs, scan)) => {
+        assert!(matches!(exprs[0], Expression::Star(_)));
+        match scan.as_ref() {
+          LogicalPlan::UnresolvedTableScan(schema, name, None) => {
+            assert_eq!(schema.as_deref().map(|s| s.as_str()), Some(catalog::INFORMATION_SCHEMA));
+            assert_eq!(name.as_str(), catalog::INFORMATION_SCHEMA_SCHEMATA);
+          },
+          other => panic!("expected UnresolvedTableScan, got {:?}", other),
+        }
+      },
+      other => panic!("expected UnresolvedProject, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_expand_commands_show_tables() {
+    let session = Session::builder().build();
+    let result = analysis_expand_commands(&session, &LogicalPlan::UnresolvedShowTables).unwrap();
+    match result {
+      Some(LogicalPlan::UnresolvedProject(exprs, filter)) => {
+        assert!(matches!(exprs[0], Expression::Star(_)));
+        match filter.as_ref() {
+          LogicalPlan::UnresolvedFilter(filter_expr, scan) => {
+            // Filter is on relation_schema = current_schema.
+            match filter_expr.as_ref() {
+              Expression::Equals(left, right) => {
+                assert!(
+                  matches!(
+                    left.as_ref(),
+                    Expression::Identifier(_, name) if name.as_str() ==
+                      catalog::INFORMATION_SCHEMA_RELATIONS_RELATION_SCHEMA
+                  )
+                );
+                assert!(
+                  matches!(
+                    right.as_ref(),
+                    Expression::LiteralString(s) if s.as_str() == session.current_schema()
+                  )
+                );
+              },
+              other => panic!("expected Equals filter, got {:?}", other),
+            }
+            match scan.as_ref() {
+              LogicalPlan::UnresolvedTableScan(schema, name, None) => {
+                assert_eq!(
+                  schema.as_deref().map(|s| s.as_str()),
+                  Some(catalog::INFORMATION_SCHEMA)
+                );
+                assert_eq!(name.as_str(), catalog::INFORMATION_SCHEMA_RELATIONS);
+              },
+              other => panic!("expected UnresolvedTableScan, got {:?}", other),
+            }
+          },
+          other => panic!("expected UnresolvedFilter, got {:?}", other),
+        }
+      },
+      other => panic!("expected UnresolvedProject, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_expand_commands_other_unchanged() {
+    let session = Session::builder().build();
+    // Non-SHOW plan nodes return None (no expansion).
+    let result = analysis_expand_commands(&session, &empty()).unwrap();
+    assert!(result.is_none());
+  }
+
+  #[test]
+  fn test_analyse_show_schemas() {
+    // Full analyse() of UnresolvedShowSchemas resolves to Project(TableScan).
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::builder().build(), &txn, LogicalPlan::UnresolvedShowSchemas)
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Project(_, _))));
+    match result.unwrap() {
+      LogicalPlan::Project(_, child) => {
+        assert!(matches!(child.as_ref(), LogicalPlan::TableScan(_, _, _)))
+      },
+      _ => unreachable!(),
+    }
+  }
+
+  #[test]
+  fn test_analyse_show_tables() {
+    // Full analyse() of UnresolvedShowTables resolves to Project(Filter(TableScan)).
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(&Session::builder().build(), &txn, LogicalPlan::UnresolvedShowTables)
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Project(_, _))));
+    match result.unwrap() {
+      LogicalPlan::Project(_, child) => {
+        match child.as_ref() {
+          LogicalPlan::Filter(_, scan) => {
+            assert!(matches!(scan.as_ref(), LogicalPlan::TableScan(_, _, _)))
+          },
+          other => panic!("expected Filter, got {:?}", other),
+        }
+      },
+      _ => unreachable!(),
+    }
   }
 }

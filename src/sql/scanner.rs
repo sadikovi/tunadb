@@ -59,8 +59,11 @@ pub enum TokenType {
   OR,
   ORDER,
   SCHEMA,
+  SCHEMAS,
   SELECT,
+  SHOW,
   TABLE,
+  TABLES,
   THEN,
   TRUE,
   UNION,
@@ -333,10 +336,16 @@ impl<'a> Scanner<'a> {
       TokenType::ORDER
     } else if self.match_keyword(b"SCHEMA") {
       TokenType::SCHEMA
+    } else if self.match_keyword(b"SCHEMAS") {
+      TokenType::SCHEMAS
     } else if self.match_keyword(b"SELECT") {
       TokenType::SELECT
+    } else if self.match_keyword(b"SHOW") {
+      TokenType::SHOW
     } else if self.match_keyword(b"TABLE") {
       TokenType::TABLE
+    } else if self.match_keyword(b"TABLES") {
+      TokenType::TABLES
     } else if self.match_keyword(b"THEN") {
       TokenType::THEN
     } else if self.match_keyword(b"TRUE") {
@@ -1164,6 +1173,42 @@ from
         (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "t2"),
         (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_show() {
+    assert_sql(
+      "show schemas",
+      vec![
+        (TokenType::SHOW, "show"),
+        (TokenType::SCHEMAS, "schemas"),
+      ]
+    );
+
+    assert_sql(
+      "show tables",
+      vec![
+        (TokenType::SHOW, "show"),
+        (TokenType::TABLES, "tables"),
+      ]
+    );
+
+    // Case insensitive.
+    assert_sql(
+      "SHOW SCHEMAS",
+      vec![
+        (TokenType::SHOW, "SHOW"),
+        (TokenType::SCHEMAS, "SCHEMAS"),
+      ]
+    );
+
+    assert_sql(
+      "SHOW TABLES",
+      vec![
+        (TokenType::SHOW, "SHOW"),
+        (TokenType::TABLES, "TABLES"),
       ]
     );
   }

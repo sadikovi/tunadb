@@ -233,6 +233,32 @@ fn test_rollback() {
 }
 
 #[test]
+fn test_show_schemas() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA s1");
+  query(&mut db, "CREATE SCHEMA s2");
+  let rows = query(&mut db, "SHOW SCHEMAS");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(names.contains(&"s1"));
+  assert!(names.contains(&"s2"));
+  assert!(names.contains(&"default"));
+  assert!(names.contains(&"information_schema"));
+}
+
+#[test]
+fn test_show_tables() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t1 (a INT)",
+    "CREATE TABLE t2 (b TEXT)",
+  ]);
+  let rows = query(&mut db, "SHOW TABLES");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(1)).collect();
+  assert!(names.contains(&"t1"));
+  assert!(names.contains(&"t2"));
+}
+
+#[test]
 fn test_information_schema_schemata() {
   let mut db = setup();
   query(&mut db, "CREATE SCHEMA s1");
