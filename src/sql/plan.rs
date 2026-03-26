@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::sql::catalog::{SchemaInfo, RelationInfo};
 use crate::sql::trees::TreeNode;
-use crate::sql::types::{Fields, Type};
+use crate::sql::types::{Field, Fields, Type};
 
 pub const DEFAULT_EXPRESSION_NAME: &str = "?col?";
 pub const DEFAULT_SUBQUERY_NAME: &str = "?subquery?";
@@ -649,21 +649,18 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
-  // Returns the list of expressions that produce the output fields/schema for the plan node.
+  // Returns the list of output expressions available to parent nodes during analysis.
+  // Used by analysis to resolve identifiers in expressions (e.g. column names in WHERE/SELECT)
+  // against the columns produced by a child plan. Each entry carries an ExpressionContext
+  // (the qualifier scope, e.g. schema.table or subquery alias) and the expression itself.
+  // This is not the user-facing output schema — for that, see PhysicalPlan::schema().
   pub fn output(&self) -> Res<Vec<(Rc<ExpressionContext>, Expression)>> {
     match self {
       LogicalPlan::CreateSchema(_) => Ok(Vec::new()),
       LogicalPlan::CreateTable(_, _, _) => Ok(Vec::new()),
       LogicalPlan::DropSchema(_, _) => Ok(Vec::new()),
       LogicalPlan::DropTable(_, _) => Ok(Vec::new()),
-      LogicalPlan::Explain(_, _, _) => {
-        let ctx = Rc::new(ExpressionContext::new(Vec::new()));
-        let expr = Expression::Alias(
-          Rc::new(Expression::LiteralString(Rc::new(String::new()))),
-          Rc::new("plan".to_string()),
-        );
-        Ok(vec![(ctx, expr)])
-      },
+      LogicalPlan::Explain(_, _, _) => Ok(Vec::new()),
       LogicalPlan::Filter(_, ref child) => child.output(),
       LogicalPlan::InsertInto(_, _, _, _) => Ok(Vec::new()),
       LogicalPlan::Limit(_, ref child) => child.output(),
@@ -1004,6 +1001,40 @@ pub enum PhysicalPlan {
   LocalRelation(Rc<Vec<Vec<Expression>>> /* expressions */),
   Project(Rc<Vec<Expression>> /* expressions */, Rc<PhysicalPlan> /* child */),
   SeqScan(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+}
+
+impl PhysicalPlan {
+  // Returns the output schema of rows produced by this plan node.
+  pub fn schema(&self) -> Res<Fields> {
+    match self {
+      PhysicalPlan::CreateSchema(_) |
+      PhysicalPlan::CreateTable(_, _, _) |
+      PhysicalPlan::DropSchema(_, _) |
+      PhysicalPlan::DropTable(_, _) |
+      PhysicalPlan::InsertInto(_, _, _, _) => Ok(Fields::new(Vec::new())),
+      PhysicalPlan::Explain(_, _, _, _) => Ok(Fields::new(vec![
+        Field::new("plan".to_string(), Type::TEXT, false),
+      ])),
+      PhysicalPlan::Filter(_, ref child) => child.schema(),
+      PhysicalPlan::Limit(_, ref child) => child.schema(),
+      PhysicalPlan::LocalRelation(ref expressions) => {
+        if expressions.is_empty() {
+          return Ok(Fields::new(Vec::new()));
+        }
+        // All rows are guaranteed to be homogeneous by analysis (same count and types),
+        // so the schema can be derived from the first row's expressions.
+        expressions[0].iter().map(|expr| {
+          Ok(Field::new(expr.name().to_string(), expr.data_type()?, expr.nullable()?))
+        }).collect::<Res<Vec<_>>>().map(Fields::new)
+      },
+      PhysicalPlan::Project(ref exprs, _) => {
+        exprs.iter().map(|expr| {
+          Ok(Field::new(expr.name().to_string(), expr.data_type()?, expr.nullable()?))
+        }).collect::<Res<Vec<_>>>().map(Fields::new)
+      },
+      PhysicalPlan::SeqScan(_, ref table_info) => Ok(table_info.relation_fields().clone()),
+    }
+  }
 }
 
 impl TreeNode<PhysicalPlan> for PhysicalPlan {

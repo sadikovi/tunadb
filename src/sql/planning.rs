@@ -1,24 +1,14 @@
 use std::rc::Rc;
 use crate::common::error::Res;
 use crate::sql::plan::{LogicalPlan, PhysicalPlan};
-use crate::sql::types::{Field, Fields};
-
+use crate::sql::types::Fields;
 // Converts a resolved LogicalPlan into a (Fields, PhysicalPlan) pair.
 // Fields describes the schema of the rows produced by the plan.
 // The input must be fully resolved — no Unresolved* variants should be present.
 pub fn plan(logical: &LogicalPlan) -> Res<(Fields, PhysicalPlan)> {
-  let fields = plan_schema(logical)?;
   let physical = plan_node(logical)?;
+  let fields = physical.schema()?;
   Ok((fields, physical))
-}
-
-// Derives the output Fields from a logical plan by inspecting its output expressions.
-fn plan_schema(logical: &LogicalPlan) -> Res<Fields> {
-  let output = logical.output()?;
-  let fields = output.iter().map(|(_, expr)| {
-    Ok(Field::new(expr.name().to_string(), expr.data_type()?, expr.nullable()?))
-  }).collect::<Res<Vec<_>>>()?;
-  Ok(Fields::new(fields))
 }
 
 // Recursively converts a LogicalPlan node into a PhysicalPlan node.
