@@ -1912,12 +1912,12 @@ pub mod tests {
   #[test]
   fn test_plan_display() {
     let expr = and(equals(int(1), int(2)), less_than(identifier("a"), string("abc")));
-    assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))\n");
+    assert_eq!(trees::plan_output(&expr), "((1) = (2)) and (($a) < (abc))");
 
     let expr = equals(alias(qualified_identifier(vec!["a", "b"], "c"), "col"), string("abc"));
-    assert_eq!(trees::plan_output(&expr), "($a.b.c as col) = (abc)\n");
+    assert_eq!(trees::plan_output(&expr), "($a.b.c as col) = (abc)");
 
     let expr = equals(alias(identifier("a"), "A"), _minus(int(2)));
-    assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)\n");
+    assert_eq!(trees::plan_output(&expr), "($a as A) = (-2)");
   }
 }

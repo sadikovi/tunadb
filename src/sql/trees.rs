@@ -81,8 +81,7 @@ struct PlanSimpleDisplay<'a, A: TreeNode<A>> {
 
 impl<'a, A: TreeNode<A>> fmt::Display for PlanSimpleDisplay<'a, A> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.plan.display(f)?;
-    writeln!(f)
+    self.plan.display(f)
   }
 }
 
