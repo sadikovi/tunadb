@@ -1010,8 +1010,10 @@ impl PhysicalPlan {
       PhysicalPlan::CreateSchema(_) |
       PhysicalPlan::CreateTable(_, _, _) |
       PhysicalPlan::DropSchema(_, _) |
-      PhysicalPlan::DropTable(_, _) |
-      PhysicalPlan::InsertInto(_, _, _, _) => Ok(Fields::new(Vec::new())),
+      PhysicalPlan::DropTable(_, _) => Ok(Fields::new(Vec::new())),
+      PhysicalPlan::InsertInto(_, _, _, _) => Ok(Fields::new(vec![
+        Field::new("rows_affected".to_string(), Type::BIGINT, false),
+      ])),
       PhysicalPlan::Explain(_, _, _, _) => Ok(Fields::new(vec![
         Field::new("plan".to_string(), Type::TEXT, false),
       ])),

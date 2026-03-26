@@ -231,6 +231,22 @@ fn test_insert_multiple_rows() {
 }
 
 #[test]
+fn test_insert_returns_rows_affected() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "INSERT INTO t VALUES (1)");
+  assert_rows(&rows, &[&[Val::BigInt(1)]]);
+}
+
+#[test]
+fn test_insert_multiple_rows_returns_count() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "INSERT INTO t VALUES (1), (2), (3)");
+  assert_rows(&rows, &[&[Val::BigInt(3)]]);
+}
+
+#[test]
 fn test_rollback() {
   let mut db = setup();
   query(&mut db, "CREATE TABLE t (a INT)");

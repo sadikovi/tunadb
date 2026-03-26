@@ -266,7 +266,8 @@ mod tests {
           Rc::new(PhysicalPlan::LocalRelation(source_exprs)),
         )
       );
-      assert!(schema.get().is_empty());
+      assert_eq!(schema.get().len(), 1);
+      assert_eq!(schema.get()[0].name(), "rows_affected");
     });
   }
 }

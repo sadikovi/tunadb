@@ -731,7 +731,7 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
       for (i, &pos) in col_positions.iter().enumerate() {
         src_map[pos] = Some(i);
       }
-
+      let mut rows_affected = 0i64;
       while let Some(result) = child_iter.next() {
         let src = result?;
         let mut dst = Row::new(num_table_fields);
@@ -755,9 +755,11 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
         }
         let key = u64_u8!(next_object_id(txn));
         set.put(&key, &dst.to_vec());
+        rows_affected += 1;
       }
-
-      Ok(RowIter::empty())
+      let mut row = Row::new(1);
+      row.set_i64(0, rows_affected);
+      Ok(RowIter::from_vec(vec![row]))
     },
     PhysicalPlan::Limit(ref limit, ref child) => {
       let child_iter = execute(session, txn, child)?;
@@ -1561,7 +1563,9 @@ mod tests {
           vec![int(2), string("world")],
         ]))),
       );
-      assert!(collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap()).is_empty());
+      let rows = collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap());
+      assert_eq!(rows.len(), 1);
+      assert_eq!(rows[0].get_i64(0), 2); // 2 rows inserted
     });
 
     let mut rows = dbc.with_txn(false, |txn| {
