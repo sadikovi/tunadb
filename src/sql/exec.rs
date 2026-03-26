@@ -9,7 +9,8 @@ use crate::sql::catalog::{
   INFORMATION_SCHEMA_RELATIONS,
   INFORMATION_SCHEMA_SCHEMATA,
 };
-use crate::sql::plan::{Expression, PhysicalPlan};
+use crate::sql::plan::{Expression, LogicalPlan, PhysicalPlan};
+use crate::sql::trees;
 use crate::sql::row::Row;
 use crate::sql::session::Session;
 use crate::sql::types::Type;
@@ -693,6 +694,25 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
         Ok(()) => Ok(RowIter::empty()),
         Err(_) => unreachable!("Drop table {}: unexpected error", table_name),
       }
+    },
+    PhysicalPlan::Explain(extended, ref unresolved, ref resolved, ref physical) => {
+      let mut lines: Vec<String> = Vec::new();
+      if *extended {
+        lines.push("== Unresolved Plan ==".to_string());
+        lines.extend(trees::tree_output::<LogicalPlan>(unresolved).lines().map(str::to_string));
+        lines.push(String::new());
+        lines.push("== Resolved Plan ==".to_string());
+        lines.extend(trees::tree_output::<LogicalPlan>(resolved).lines().map(str::to_string));
+        lines.push(String::new());
+        lines.push("== Physical Plan ==".to_string());
+      }
+      lines.extend(trees::tree_output::<PhysicalPlan>(physical).lines().map(str::to_string));
+      let rows = lines.into_iter().map(|line| {
+        let mut row = Row::new(1);
+        row.set_str(0, &line);
+        row
+      }).collect();
+      Ok(RowIter::from_vec(rows))
     },
     PhysicalPlan::Filter(ref expression, ref child) => {
       let child_iter = execute(session, txn, child)?;

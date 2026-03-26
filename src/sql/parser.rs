@@ -713,6 +713,10 @@ impl<'a> Parser<'a> {
       } else if self.matches(TokenType::TABLE)? {
         stmt = Some(self.drop_table_statement()?);
       }
+    } else if self.matches(TokenType::EXPLAIN)? {
+      let extended = self.matches(TokenType::EXTENDED)?;
+      let inner = Rc::new(self.statement()?);
+      stmt = Some(LogicalPlan::UnresolvedExplain(extended, inner.clone(), inner))
     } else if self.matches(TokenType::INSERT)? {
       stmt = Some(self.insert_statement()?);
     } else if self.matches(TokenType::SELECT)? {

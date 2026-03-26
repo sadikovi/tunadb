@@ -593,6 +593,11 @@ pub enum LogicalPlan {
   ),
   DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
   DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+  Explain(
+    bool /* extended */,
+    Rc<LogicalPlan> /* unresolved snapshot */,
+    Rc<LogicalPlan> /* child */,
+  ),
   Filter(Rc<Expression> /* filter expression */, Rc<LogicalPlan> /* child */),
   InsertInto(
     Rc<SchemaInfo> /* schema info */,
@@ -617,6 +622,11 @@ pub enum LogicalPlan {
   ),
   UnresolvedDropSchema(Rc<String> /* schema name */, bool /* cascade */),
   UnresolvedDropTable(Option<Rc<String>> /* optional schema name */, Rc<String> /* table name */),
+  UnresolvedExplain(
+    bool /* extended */,
+    Rc<LogicalPlan> /* snapshot */,
+    Rc<LogicalPlan> /* child to resolve */,
+  ),
   UnresolvedFilter(Rc<Expression> /* filter expression */, Rc<LogicalPlan> /* child */),
   UnresolvedInsertInto(
     Option<Rc<String>> /* optional schema name */,
@@ -646,6 +656,14 @@ impl LogicalPlan {
       LogicalPlan::CreateTable(_, _, _) => Ok(Vec::new()),
       LogicalPlan::DropSchema(_, _) => Ok(Vec::new()),
       LogicalPlan::DropTable(_, _) => Ok(Vec::new()),
+      LogicalPlan::Explain(_, _, _) => {
+        let ctx = Rc::new(ExpressionContext::new(Vec::new()));
+        let expr = Expression::Alias(
+          Rc::new(Expression::LiteralString(Rc::new(String::new()))),
+          Rc::new("plan".to_string()),
+        );
+        Ok(vec![(ctx, expr)])
+      },
       LogicalPlan::Filter(_, ref child) => child.output(),
       LogicalPlan::InsertInto(_, _, _, _) => Ok(Vec::new()),
       LogicalPlan::Limit(_, ref child) => child.output(),
@@ -710,6 +728,9 @@ impl LogicalPlan {
       LogicalPlan::UnresolvedDropTable(_, _) => {
         Err(Error::SQLAnalysisError("UnresolvedDropTable".to_string()))
       },
+      LogicalPlan::UnresolvedExplain(_, _, _) => {
+        Err(Error::SQLAnalysisError("UnresolvedExplain".to_string()))
+      },
       LogicalPlan::UnresolvedFilter(_, _) => {
         Err(Error::SQLAnalysisError("UnresolvedFilter".to_string()))
       },
@@ -758,6 +779,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::DropTable(ref schema_info, ref table_info) => {
         write!(f, "DropTable({}.{})", schema_info.schema_name(), table_info.relation_name())
       },
+      LogicalPlan::Explain(extended, _, _) => write!(f, "Explain(extended: {})", extended),
       LogicalPlan::Filter(ref expression, _) => {
         write!(f, "Filter(")?;
         expression.display(f)?;
@@ -793,6 +815,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedCreateTable(_, _, _) => write!(f, "UnresolvedCreateTable"),
       LogicalPlan::UnresolvedDropSchema(_, _) => write!(f, "UnresolvedDropSchema"),
       LogicalPlan::UnresolvedDropTable(_, _) => write!(f, "UnresolvedDropTable"),
+      LogicalPlan::UnresolvedExplain(_, _, _) => write!(f, "UnresolvedExplain"),
       LogicalPlan::UnresolvedFilter(_, _) => write!(f, "UnresolvedFilter"),
       LogicalPlan::UnresolvedInsertInto(_, _, _, _) => write!(f, "UnresolvedInsertInto"),
       LogicalPlan::UnresolvedLimit(_, _) => write!(f, "UnresolvedLimit"),
@@ -818,6 +841,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::CreateTable(_, _, _) => Vec::new(),
       LogicalPlan::DropSchema(_, _) => Vec::new(),
       LogicalPlan::DropTable(_, _) => Vec::new(),
+      LogicalPlan::Explain(_, _, ref child) => vec![child],
       LogicalPlan::Filter(_, ref child) => vec![child],
       LogicalPlan::InsertInto(_, _, _, ref query) => vec![query],
       LogicalPlan::Limit(_, ref child) => vec![child],
@@ -829,6 +853,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedCreateTable(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedDropSchema(_, _) => Vec::new(),
       LogicalPlan::UnresolvedDropTable(_, _) => Vec::new(),
+      LogicalPlan::UnresolvedExplain(_, _, ref child) => vec![child],
       LogicalPlan::UnresolvedFilter(_, ref child) => vec![child],
       LogicalPlan::UnresolvedInsertInto(_, _, _, ref query) => vec![query],
       LogicalPlan::UnresolvedLimit(_, ref child) => vec![child],
@@ -856,6 +881,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       },
       LogicalPlan::DropTable(ref schema_info, ref table_info) => {
         LogicalPlan::DropTable(schema_info.clone(), table_info.clone())
+      },
+      LogicalPlan::Explain(extended, ref unresolved_child, _) => {
+        let child = get_unary!("Explain", children);
+        LogicalPlan::Explain(*extended, unresolved_child.clone(), Rc::new(child))
       },
       LogicalPlan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);
@@ -899,6 +928,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       },
       LogicalPlan::UnresolvedDropTable(ref schema_name, ref table_name) => {
         LogicalPlan::UnresolvedDropTable(schema_name.clone(), table_name.clone())
+      },
+      LogicalPlan::UnresolvedExplain(extended, ref snapshot, _) => {
+        let child = get_unary!("UnresolvedExplain", children);
+        LogicalPlan::UnresolvedExplain(*extended, snapshot.clone(), Rc::new(child))
       },
       LogicalPlan::UnresolvedFilter(ref expressions, _) => {
         let child = get_unary!("UnresolvedFilter", children);
@@ -954,6 +987,12 @@ pub enum PhysicalPlan {
   ),
   DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
   DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
+  Explain(
+    bool,
+    Rc<LogicalPlan> /* unresolved snapshot */,
+    Rc<LogicalPlan> /* resolved snapshot */,
+    Rc<PhysicalPlan> /* child */,
+  ),
   Filter(Rc<Expression> /* filter expression */, Rc<PhysicalPlan> /* child */),
   InsertInto(
     Rc<SchemaInfo> /* schema info */,
@@ -980,6 +1019,9 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
       },
       PhysicalPlan::DropTable(ref schema_info, ref table_info) => {
         write!(f, "DropTable({}.{})", schema_info.schema_name(), table_info.relation_name())
+      },
+      PhysicalPlan::Explain(extended, _, _, _) => {
+        write!(f, "Explain(extended: {})", extended)
       },
       PhysicalPlan::Filter(ref expression, _) => {
         write!(f, "Filter(")?;
@@ -1021,6 +1063,7 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
       PhysicalPlan::CreateTable(_, _, _) => Vec::new(),
       PhysicalPlan::DropSchema(_, _) => Vec::new(),
       PhysicalPlan::DropTable(_, _) => Vec::new(),
+      PhysicalPlan::Explain(_, _, _, ref child) => vec![child],
       PhysicalPlan::Filter(_, ref child) => vec![child],
       PhysicalPlan::InsertInto(_, _, _, ref query) => vec![query],
       PhysicalPlan::Limit(_, ref child) => vec![child],
@@ -1044,6 +1087,15 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
       },
       PhysicalPlan::DropTable(ref schema_info, ref table_info) => {
         PhysicalPlan::DropTable(schema_info.clone(), table_info.clone())
+      },
+      PhysicalPlan::Explain(extended, ref unresolved_snapshot, ref resolved_snapshot, _) => {
+        let child = get_unary!("Explain", children);
+        PhysicalPlan::Explain(
+          *extended,
+          unresolved_snapshot.clone(),
+          resolved_snapshot.clone(),
+          Rc::new(child)
+        )
       },
       PhysicalPlan::Filter(ref expression, _) => {
         let child = get_unary!("Filter", children);

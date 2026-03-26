@@ -46,6 +46,8 @@ pub enum TokenType {
   ELSE,
   END,
   EXISTS,
+  EXPLAIN,
+  EXTENDED,
   FALSE,
   FROM,
   GROUP,
@@ -311,6 +313,10 @@ impl<'a> Scanner<'a> {
       TokenType::END
     } else if self.match_keyword(b"EXISTS") {
       TokenType::EXISTS
+    } else if self.match_keyword(b"EXPLAIN") {
+      TokenType::EXPLAIN
+    } else if self.match_keyword(b"EXTENDED") {
+      TokenType::EXTENDED
     } else if self.match_keyword(b"FALSE") {
       TokenType::FALSE
     } else if self.match_keyword(b"FROM") {

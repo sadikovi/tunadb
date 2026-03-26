@@ -516,3 +516,62 @@ fn test_insert_not_null_omitted_column_error() {
   query(&mut db, "CREATE TABLE t (a INT, b TEXT NOT NULL)");
   query_err(&mut db, "INSERT INTO t (a) VALUES (1)", "NOT NULL constraint");
 }
+
+#[test]
+fn test_explain_returns_plan_column() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT, b TEXT)",
+    "INSERT INTO t VALUES (1, 'x')",
+  ]);
+  let rows = query(&mut db, "EXPLAIN SELECT a FROM t WHERE a = 1");
+  assert!(!rows.is_empty());
+  // All rows have exactly one TEXT column.
+  for row in &rows {
+    assert_eq!(row.num_fields(), 1);
+  }
+  let plan: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  let joined = plan.join("\n");
+  assert!(joined.contains("Project"), "expected Project in plan: {}", joined);
+  assert!(joined.contains("Filter"), "expected Filter in plan: {}", joined);
+  assert!(joined.contains("SeqScan"), "expected SeqScan in plan: {}", joined);
+}
+
+#[test]
+fn test_explain_extended_contains_all_sections() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "EXPLAIN EXTENDED SELECT a FROM t");
+  let plan: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  let joined = plan.join("\n");
+  assert!(joined.contains("== Unresolved Plan =="), "missing unresolved section: {}", joined);
+  assert!(joined.contains("== Resolved Plan =="), "missing resolved section: {}", joined);
+  assert!(joined.contains("== Physical Plan =="), "missing physical section: {}", joined);
+}
+
+#[test]
+fn test_explain_extended_unresolved_has_unresolved_nodes() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "EXPLAIN EXTENDED SELECT a FROM t");
+  let plan: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  let joined = plan.join("\n");
+  // Unresolved section uses Unresolved* node names.
+  let unresolved_section = joined.split("== Resolved Plan ==").next().unwrap();
+  assert!(unresolved_section.contains("Unresolved"), "expected Unresolved nodes: {}", unresolved_section);
+  // Physical section uses physical node names (no Unresolved prefix).
+  let physical_section = joined.split("== Physical Plan ==").nth(1).unwrap();
+  assert!(!physical_section.contains("Unresolved"), "unexpected Unresolved in physical: {}", physical_section);
+  assert!(physical_section.contains("SeqScan"), "expected SeqScan in physical: {}", physical_section);
+}
+
+#[test]
+fn test_explain_show_tables() {
+  // EXPLAIN works on non-SELECT statements too.
+  let mut db = setup();
+  let rows = query(&mut db, "EXPLAIN SHOW TABLES");
+  assert!(!rows.is_empty());
+  let joined: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  let plan = joined.join("\n");
+  assert!(joined.iter().any(|l| !l.is_empty()), "plan should not be empty: {}", plan);
+}

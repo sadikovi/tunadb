@@ -516,6 +516,9 @@ fn analysis_resolve_nodes(
         Err(err) => Err(err),
       }
     },
+    LogicalPlan::UnresolvedExplain(extended, ref snapshot, ref child) => {
+      Ok(Some(LogicalPlan::Explain(*extended, snapshot.clone(), child.clone())))
+    },
     LogicalPlan::UnresolvedFilter(ref expression, ref child) => {
       let output = resolve_expression(expression, &child.output()?)?;
       Ok(Some(LogicalPlan::Filter(Rc::new(output), child.clone())))

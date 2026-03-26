@@ -36,6 +36,14 @@ fn plan_node(logical: &LogicalPlan) -> Res<PhysicalPlan> {
     LogicalPlan::DropTable(ref schema_info, ref table_info) => {
       Ok(PhysicalPlan::DropTable(schema_info.clone(), table_info.clone()))
     },
+    LogicalPlan::Explain(extended, ref unresolved_snapshot, ref resolved_snapshot) => {
+      Ok(PhysicalPlan::Explain(
+        *extended,
+        unresolved_snapshot.clone(),
+        resolved_snapshot.clone(),
+        Rc::new(plan_node(resolved_snapshot)?)
+      ))
+    },
     LogicalPlan::Filter(ref expr, ref child) => {
       Ok(PhysicalPlan::Filter(expr.clone(), Rc::new(plan_node(child)?)))
     },
