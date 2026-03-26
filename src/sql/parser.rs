@@ -534,15 +534,14 @@ impl<'a> Parser<'a> {
     let expressions = self.expression_list()?;
 
     let mut plan = if self.matches(TokenType::FROM)? {
-      let parent = self.from_statement()?;
-      LogicalPlan::UnresolvedProject(Rc::new(expressions), Rc::new(parent))
+      let mut from = self.from_statement()?;
+      if self.matches(TokenType::WHERE)? {
+        from = self.where_statement(from)?;
+      }
+      LogicalPlan::UnresolvedProject(Rc::new(expressions), Rc::new(from))
     } else {
       LogicalPlan::UnresolvedLocalRelation(Rc::new(vec![expressions]))
     };
-
-    if self.matches(TokenType::WHERE)? {
-      plan = self.where_statement(plan)?;
-    }
 
     if self.matches(TokenType::LIMIT)? {
       plan = self.limit_statement(plan)?;
@@ -1214,15 +1213,15 @@ pub mod tests {
   fn test_parser_where() {
     assert_plan(
       "select * from TEST where a",
-      filter(
+      project(vec![star()], filter(
         identifier("a"), // boolean column
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from TEST where 1 = 2 and a > b or c < d",
-      filter(
+      project(vec![star()], filter(
         or(
           and(
             equals(
@@ -1239,13 +1238,13 @@ pub mod tests {
             identifier("d")
           )
         ),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where 1 = 2 and (a > b or c < d)",
-      filter(
+      project(vec![star()], filter(
         and(
           equals(
             int(1),
@@ -1262,13 +1261,13 @@ pub mod tests {
             )
           )
         ),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where ((b) = ('def') or (a > 1)) and b = 'abc'",
-      filter(
+      project(vec![star()], filter(
         and(
           or(
             equals(
@@ -1285,8 +1284,8 @@ pub mod tests {
             string("abc")
           )
         ),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
   }
 
@@ -1617,18 +1616,18 @@ pub mod tests {
   fn test_parser_not_equals() {
     assert_plan(
       "select * from test where a <> 1",
-      filter(
+      project(vec![star()], filter(
         not_equals(identifier("a"), int(1)),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where a <> b",
-      filter(
+      project(vec![star()], filter(
         not_equals(identifier("a"), identifier("b")),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
   }
 
@@ -1636,26 +1635,26 @@ pub mod tests {
   fn test_parser_not() {
     assert_plan(
       "select * from test where not a",
-      filter(
+      project(vec![star()], filter(
         not(identifier("a")),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where not not a",
-      filter(
+      project(vec![star()], filter(
         not(not(identifier("a"))),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where not a and b",
-      filter(
+      project(vec![star()], filter(
         and(not(identifier("a")), identifier("b")),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
   }
 
@@ -1663,26 +1662,26 @@ pub mod tests {
   fn test_parser_is_null() {
     assert_plan(
       "select * from test where a is null",
-      filter(
+      project(vec![star()], filter(
         is_null(identifier("a")),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where a is not null",
-      filter(
+      project(vec![star()], filter(
         is_not_null(identifier("a")),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
 
     assert_plan(
       "select * from test where a is null and b is not null",
-      filter(
+      project(vec![star()], filter(
         and(is_null(identifier("a")), is_not_null(identifier("b"))),
-        project(vec![star()], from(None, "test", None))
-      )
+        from(None, "test", None)
+      ))
     );
   }
 
