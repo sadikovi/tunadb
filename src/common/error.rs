@@ -32,6 +32,26 @@ pub enum Error {
   InternalError(String /* msg */),
 }
 
+impl std::fmt::Display for Error {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Error::SQLParseError(msg) => write!(f, "Parse error: {}", msg),
+      Error::SQLAnalysisError(msg) => write!(f, "Analysis error: {}", msg),
+      Error::SQLAnalysisExpressionError(msg) => write!(f, "Analysis error: {}", msg),
+      Error::SQLExecutionError(msg) => write!(f, "Execution error: {}", msg),
+      Error::OperationIsNotAllowed(msg) => write!(f, "Operation not allowed: {}", msg),
+      Error::SchemaAlreadyExists(s) => write!(f, "Schema already exists: {}", s),
+      Error::SchemaDoesNotExist(s) => write!(f, "Schema does not exist: {}", s),
+      Error::SchemaIsNotEmpty(s) => write!(f, "Schema is not empty: {}", s),
+      Error::RelationAlreadyExists(s, t) => write!(f, "Relation already exists: {}.{}", s, t),
+      Error::RelationDoesNotExist(s, t) => write!(f, "Relation does not exist: {}.{}", s, t),
+      Error::RelationInvalidSchema(msg) => write!(f, "Invalid schema: {}", msg),
+      Error::InternalAlreadyExists(msg) => write!(f, "Internal error (already exists): {}", msg),
+      Error::InternalError(msg) => write!(f, "Internal error: {}", msg),
+    }
+  }
+}
+
 // Creates an internal error with the provided message.
 impl From<String> for Error {
   fn from(msg: String) -> Self {
