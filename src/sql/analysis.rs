@@ -411,6 +411,31 @@ fn analysis_expand_commands(session: &Session, plan: &LogicalPlan) -> Res<Option
       let filter = Rc::new(LogicalPlan::UnresolvedFilter(filter_expr, scan));
       Ok(Some(LogicalPlan::UnresolvedProject(star, filter)))
     },
+    LogicalPlan::UnresolvedDescribe(ref schema_name, ref table_name) => {
+      let schema = Rc::new(current_schema(session, schema_name).to_string());
+      let scan = Rc::new(LogicalPlan::UnresolvedTableScan(
+        info_schema,
+        Rc::new(catalog::INFORMATION_SCHEMA_COLUMNS.to_string()),
+        None,
+      ));
+      let schema_filter = Rc::new(Expression::Equals(
+        Rc::new(Expression::Identifier(
+          Rc::new(Vec::new()),
+          Rc::new(catalog::INFORMATION_SCHEMA_COLUMNS_TABLE_SCHEMA.to_string()),
+        )),
+        Rc::new(Expression::LiteralString(schema)),
+      ));
+      let table_filter = Rc::new(Expression::Equals(
+        Rc::new(Expression::Identifier(
+          Rc::new(Vec::new()),
+          Rc::new(catalog::INFORMATION_SCHEMA_COLUMNS_TABLE_NAME.to_string()),
+        )),
+        Rc::new(Expression::LiteralString(table_name.clone())),
+      ));
+      let filter = Rc::new(Expression::And(schema_filter, table_filter));
+      let filtered = Rc::new(LogicalPlan::UnresolvedFilter(filter, scan));
+      Ok(Some(LogicalPlan::UnresolvedProject(star, filtered)))
+    },
     _ => Ok(None),
   }
 }

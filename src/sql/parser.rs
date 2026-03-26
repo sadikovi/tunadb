@@ -717,6 +717,9 @@ impl<'a> Parser<'a> {
       stmt = Some(self.insert_statement()?);
     } else if self.matches(TokenType::SELECT)? {
       stmt = Some(self.select_statement()?);
+    } else if self.matches(TokenType::DESCRIBE)? {
+      let (schema_name, table_name) = self.table_identifier()?;
+      stmt = Some(LogicalPlan::UnresolvedDescribe(schema_name, table_name));
     } else if self.matches(TokenType::SHOW)? {
       if self.matches(TokenType::SCHEMAS)? {
         stmt = Some(LogicalPlan::UnresolvedShowSchemas);

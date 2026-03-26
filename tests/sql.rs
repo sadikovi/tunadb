@@ -420,3 +420,51 @@ fn test_show_tables_after_drop() {
   assert!(!names.contains(&"t1"));
   assert!(names.contains(&"t2"));
 }
+
+#[test]
+fn test_describe_table() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (id INT, name TEXT NOT NULL, score DOUBLE)");
+  let rows = query(&mut db, "DESCRIBE t");
+  // Returns one row per column: (table_schema, table_name, column_name, data_type, is_nullable).
+  assert_rows(&rows, &[
+    &[Val::Text("default"), Val::Text("t"), Val::Text("id"),    Val::Text("INT"),    Val::Text("YES")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("name"),  Val::Text("TEXT"),   Val::Text("NO")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("score"), Val::Text("DOUBLE"), Val::Text("YES")],
+  ]);
+}
+
+#[test]
+fn test_describe_table_schema_qualified() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE SCHEMA s",
+    "CREATE TABLE s.t (x BIGINT NOT NULL)",
+  ]);
+  let rows = query(&mut db, "DESCRIBE s.t");
+  assert_rows(&rows, &[
+    &[Val::Text("s"), Val::Text("t"), Val::Text("x"), Val::Text("BIGINT"), Val::Text("NO")],
+  ]);
+}
+
+#[test]
+fn test_describe_table_not_found_returns_empty() {
+  // Describing a non-existent table returns no rows (filtered out by WHERE).
+  let mut db = setup();
+  let rows = query(&mut db, "DESCRIBE nonexistent");
+  assert_rows(&rows, &[]);
+}
+
+#[test]
+fn test_information_schema_columns() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT, b TEXT NOT NULL)");
+  let sql = "SELECT column_name, data_type, is_nullable \
+    FROM information_schema.columns \
+    WHERE table_schema = 'default' AND table_name = 't'";
+  let rows = query(&mut db, sql);
+  assert_rows(&rows, &[
+    &[Val::Text("a"), Val::Text("INT"),  Val::Text("YES")],
+    &[Val::Text("b"), Val::Text("TEXT"), Val::Text("NO")],
+  ]);
+}

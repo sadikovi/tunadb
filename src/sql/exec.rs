@@ -5,6 +5,7 @@ use crate::common::error::{Error, Res};
 use crate::sql::catalog::{
   self,
   RelationType,
+  INFORMATION_SCHEMA_COLUMNS,
   INFORMATION_SCHEMA_RELATIONS,
   INFORMATION_SCHEMA_SCHEMATA,
 };
@@ -629,6 +630,24 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
             RelationType::SYSTEM_VIEW => "SYSTEM VIEW",
           });
           rows.push(row);
+        }
+      }
+      Ok(RowIter::from_vec(rows))
+    },
+    INFORMATION_SCHEMA_COLUMNS => {
+      let mut rows = Vec::new();
+      for schema in catalog::list_schemas(txn)? {
+        let (_, relations) = catalog::list_relations(txn, schema.schema_name())?;
+        for relation in relations {
+          for field in relation.relation_fields().get() {
+            let mut row = Row::new(5);
+            row.set_str(0, schema.schema_name());
+            row.set_str(1, relation.relation_name());
+            row.set_str(2, field.name());
+            row.set_str(3, &field.data_type().to_string());
+            row.set_str(4, if field.nullable() { "YES" } else { "NO" });
+            rows.push(row);
+          }
         }
       }
       Ok(RowIter::from_vec(rows))
