@@ -17,6 +17,15 @@ fn query(db: &mut Database, sql: &str) -> Vec<Row> {
   }).unwrap()
 }
 
+// Executes a single SQL statement and asserts that it returns an error.
+fn query_err(db: &mut Database, sql: &str) {
+  let result = db.with_transaction(|txn| {
+    let result = txn.execute(sql)?;
+    Ok(result.rows.map(|r| r.unwrap()).collect::<Vec<_>>())
+  });
+  assert!(result.is_err(), "expected error for: {}", sql);
+}
+
 // Executes multiple SQL statements in the same transaction and returns
 // the rows from the last one.
 fn query_txn(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
@@ -279,7 +288,9 @@ fn test_information_schema_relations() {
     "CREATE TABLE t1 (a INT)",
     "CREATE TABLE t2 (b TEXT)",
   ]);
-  let rows = query(&mut db, "SELECT relation_schema, relation_name FROM information_schema.relations WHERE relation_schema = 'default'");
+  let sql = "SELECT relation_schema, relation_name FROM information_schema.relations \
+    WHERE relation_schema = 'default'";
+  let rows = query(&mut db, sql);
   let names: Vec<(&str, &str)> = rows.iter().map(|r| (r.get_str(0), r.get_str(1))).collect();
   assert!(names.contains(&("default", "t1")));
   assert!(names.contains(&("default", "t2")));
@@ -301,4 +312,111 @@ fn test_select_all_types() {
     Val::Bool(true),
     Val::Text("hello"),
   ]]);
+}
+
+#[test]
+fn test_create_schema() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA myschema");
+  let rows = query(&mut db, "SHOW SCHEMAS");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(names.contains(&"myschema"));
+}
+
+#[test]
+fn test_create_schema_duplicate_error() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA s");
+  query_err(&mut db, "CREATE SCHEMA s");
+}
+
+#[test]
+fn test_drop_schema() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA s");
+  query(&mut db, "DROP SCHEMA s");
+  let rows = query(&mut db, "SHOW SCHEMAS");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(!names.contains(&"s"));
+}
+
+#[test]
+fn test_drop_schema_cascade_drops_tables() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE SCHEMA s",
+    "CREATE TABLE s.t (a INT)",
+  ]);
+  query(&mut db, "DROP SCHEMA s CASCADE");
+  // Schema is gone.
+  let schemas = query(&mut db, "SHOW SCHEMAS");
+  let schema_names: Vec<&str> = schemas.iter().map(|r| r.get_str(0)).collect();
+  assert!(!schema_names.contains(&"s"));
+  // Table is also gone from the catalog.
+  let sql = "SELECT relation_name FROM information_schema.relations \
+    WHERE relation_schema = 's'";
+  let rows = query(&mut db, sql);
+  assert_rows(&rows, &[]);
+}
+
+#[test]
+fn test_drop_schema_not_exists_error() {
+  let mut db = setup();
+  query_err(&mut db, "DROP SCHEMA nonexistent");
+}
+
+#[test]
+fn test_create_table_duplicate_error() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  query_err(&mut db, "CREATE TABLE t (a INT)");
+}
+
+#[test]
+fn test_drop_table() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+  ]);
+  query(&mut db, "DROP TABLE t");
+  // Table no longer appears in the catalog.
+  let sql = "SELECT relation_name FROM information_schema.relations \
+    WHERE relation_schema = 'default'";
+  let rows = query(&mut db, sql);
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(!names.contains(&"t"));
+}
+
+#[test]
+fn test_drop_table_not_exists_error() {
+  let mut db = setup();
+  query_err(&mut db, "DROP TABLE nonexistent");
+}
+
+#[test]
+fn test_show_schemas_after_drop() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA s");
+  query(&mut db, "DROP SCHEMA s");
+  let rows = query(&mut db, "SHOW SCHEMAS");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(!names.contains(&"s"));
+  // Built-in schemas still present.
+  assert!(names.contains(&"default"));
+  assert!(names.contains(&"information_schema"));
+}
+
+#[test]
+fn test_show_tables_after_drop() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t1 (a INT)",
+    "CREATE TABLE t2 (b TEXT)",
+  ]);
+  query(&mut db, "DROP TABLE t1");
+  let rows = query(&mut db, "SHOW TABLES");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(1)).collect();
+  assert!(!names.contains(&"t1"));
+  assert!(names.contains(&"t2"));
 }
