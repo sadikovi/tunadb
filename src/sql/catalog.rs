@@ -197,7 +197,9 @@ fn get_system_relations(txn: &TransactionRef) -> Res<Set> {
 // Catalog API
 //=============
 
-const INFORMATION_SCHEMA: &str = "INFORMATION_SCHEMA";
+pub const INFORMATION_SCHEMA: &str = "information_schema";
+pub const INFORMATION_SCHEMA_SCHEMATA: &str = "schemata";
+pub const INFORMATION_SCHEMA_RELATIONS: &str = "relations";
 
 // Returns true if the catalog is already initialised, false if it is not.
 // Errors if the catalog is in a partially initialised (corrupt) state.
@@ -221,11 +223,11 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_relation_internal(
     &txn,
     &schema,
-    "SCHEMATA",
+    INFORMATION_SCHEMA_SCHEMATA,
     RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("SCHEMA_NAME".to_string(), Type::TEXT, false),
+        Field::new("schema_name".to_string(), Type::TEXT, false),
       ]
     ),
     false
@@ -234,13 +236,13 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_relation_internal(
     &txn,
     &schema,
-    "RELATIONS",
+    INFORMATION_SCHEMA_RELATIONS,
     RelationType::SYSTEM_VIEW,
     Fields::new(
       vec![
-        Field::new("RELATION_SCHEMA".to_string(), Type::TEXT, false),
-        Field::new("RELATION_NAME".to_string(), Type::TEXT, false),
-        Field::new("RELATION_TYPE".to_string(), Type::TEXT, false),
+        Field::new("relation_schema".to_string(), Type::TEXT, false),
+        Field::new("relation_name".to_string(), Type::TEXT, false),
+        Field::new("relation_type".to_string(), Type::TEXT, false),
       ]
     ),
     false
@@ -704,19 +706,27 @@ pub mod tests {
       assert_eq!(schema.schema_id(), 0);
       assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
 
-      let (schema, relation) = get_relation(&txn, INFORMATION_SCHEMA, "SCHEMATA").unwrap();
+      let (schema, relation) = get_relation(
+        &txn,
+        INFORMATION_SCHEMA,
+        INFORMATION_SCHEMA_SCHEMATA
+      ).unwrap();
       assert_eq!(schema.schema_id(), 0);
       assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
       assert_eq!(relation.relation_id(), 1);
       assert_eq!(relation.schema_id(), 0);
-      assert_eq!(relation.relation_name(), "SCHEMATA");
+      assert_eq!(relation.relation_name(), INFORMATION_SCHEMA_SCHEMATA);
 
-      let (schema, relation) = get_relation(&txn, INFORMATION_SCHEMA, "RELATIONS").unwrap();
+      let (schema, relation) = get_relation(
+        &txn,
+        INFORMATION_SCHEMA,
+        INFORMATION_SCHEMA_RELATIONS
+      ).unwrap();
       assert_eq!(schema.schema_id(), 0);
       assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
       assert_eq!(relation.relation_id(), 2);
       assert_eq!(relation.schema_id(), 0);
-      assert_eq!(relation.relation_name(), "RELATIONS");
+      assert_eq!(relation.relation_name(), INFORMATION_SCHEMA_RELATIONS);
     });
 
     // catalog_exists returns true after initialisation.
@@ -741,7 +751,7 @@ pub mod tests {
   #[test]
   fn test_catalog_information_schema_modification() {
     // The test verifies that we cannot create or drop a schema with INFORMATION_SCHEMA name.
-    let err = Err(Error::OperationIsNotAllowed("Cannot modify INFORMATION_SCHEMA".to_string()));
+    let err = Err(Error::OperationIsNotAllowed(format!("Cannot modify {}", INFORMATION_SCHEMA)));
 
     let mut dbc = init_db();
 
@@ -969,8 +979,8 @@ pub mod tests {
       // Only INFORMATION_SCHEMA relations must be present.
       let mut set = get_system_relations(&txn).unwrap();
       let mut iter = set.list(None, None);
-      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, "RELATIONS"));
-      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, "SCHEMATA"));
+      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, INFORMATION_SCHEMA_RELATIONS));
+      assert_eq!(iter.next().unwrap().0, to_unique_relation_key(0, INFORMATION_SCHEMA_SCHEMATA));
       assert_eq!(iter.next(), None);
     });
   }
@@ -1094,8 +1104,8 @@ pub mod tests {
 
       let (schema, mut iter) = list_relations(&txn, INFORMATION_SCHEMA).unwrap();
       assert_eq!(schema.schema_name(), INFORMATION_SCHEMA);
-      assert_eq!(iter.next().unwrap().relation_name(), "RELATIONS");
-      assert_eq!(iter.next().unwrap().relation_name(), "SCHEMATA");
+      assert_eq!(iter.next().unwrap().relation_name(), INFORMATION_SCHEMA_RELATIONS);
+      assert_eq!(iter.next().unwrap().relation_name(), INFORMATION_SCHEMA_SCHEMATA);
       assert_eq!(iter.next(), None);
     });
   }

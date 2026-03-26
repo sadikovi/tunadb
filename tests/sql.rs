@@ -233,6 +233,33 @@ fn test_rollback() {
 }
 
 #[test]
+fn test_information_schema_schemata() {
+  let mut db = setup();
+  query(&mut db, "CREATE SCHEMA s1");
+  query(&mut db, "CREATE SCHEMA s2");
+  let mut rows = query(&mut db, "SELECT schema_name FROM information_schema.schemata");
+  rows.sort_by_key(|r| r.get_str(0).to_string());
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+  assert!(names.contains(&"s1"));
+  assert!(names.contains(&"s2"));
+  assert!(names.contains(&"default"));
+  assert!(names.contains(&"information_schema"));
+}
+
+#[test]
+fn test_information_schema_relations() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t1 (a INT)",
+    "CREATE TABLE t2 (b TEXT)",
+  ]);
+  let rows = query(&mut db, "SELECT relation_schema, relation_name FROM information_schema.relations WHERE relation_schema = 'default'");
+  let names: Vec<(&str, &str)> = rows.iter().map(|r| (r.get_str(0), r.get_str(1))).collect();
+  assert!(names.contains(&("default", "t1")));
+  assert!(names.contains(&("default", "t2")));
+}
+
+#[test]
 fn test_select_all_types() {
   let mut db = setup();
   query_txn(&mut db, &[

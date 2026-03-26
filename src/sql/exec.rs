@@ -2,7 +2,12 @@ use std::convert::TryFrom;
 use std::iter::FusedIterator;
 use std::rc::Rc;
 use crate::common::error::{Error, Res};
-use crate::sql::catalog;
+use crate::sql::catalog::{
+  self,
+  RelationType,
+  INFORMATION_SCHEMA_RELATIONS,
+  INFORMATION_SCHEMA_SCHEMATA,
+};
 use crate::sql::plan::{Expression, PhysicalPlan};
 use crate::sql::row::Row;
 use crate::sql::session::Session;
@@ -234,7 +239,7 @@ fn expr_eval(expr: &Expression, row: &Row) -> Res<ExprEvalResult> {
         (l, r) => unreachable!("Divide: unexpected type combination {:?} / {:?}", l, r),
       }
     },
-    // NaN = NaN → TRUE; NaN = x → FALSE for all non-NaN x (§8.6).
+    // NaN = NaN -> TRUE; NaN = x -> FALSE for all non-NaN x (§8.6).
     Expression::Equals(ref left, ref right) => {
       let lvalue = expr_eval(left, row)?;
       let rvalue = expr_eval(right, row)?;
@@ -598,6 +603,40 @@ impl Iterator for RowIter {
 
 impl FusedIterator for RowIter {}
 
+// Executes a system view scan and returns rows built from catalog metadata.
+fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
+  match view_name {
+    INFORMATION_SCHEMA_SCHEMATA => {
+      let rows = catalog::list_schemas(txn)?
+        .map(|schema| {
+          let mut row = Row::new(1);
+          row.set_str(0, schema.schema_name());
+          row
+        })
+        .collect();
+      Ok(RowIter::from_vec(rows))
+    },
+    INFORMATION_SCHEMA_RELATIONS => {
+      let mut rows = Vec::new();
+      for schema in catalog::list_schemas(txn)? {
+        let (_, relations) = catalog::list_relations(txn, schema.schema_name())?;
+        for relation in relations {
+          let mut row = Row::new(3);
+          row.set_str(0, schema.schema_name());
+          row.set_str(1, relation.relation_name());
+          row.set_str(2, match relation.relation_type() {
+            RelationType::TABLE => "TABLE",
+            RelationType::SYSTEM_VIEW => "SYSTEM VIEW",
+          });
+          rows.push(row);
+        }
+      }
+      Ok(RowIter::from_vec(rows))
+    },
+    name => unreachable!("Unknown system view: {}", name),
+  }
+}
+
 // Executes a physical plan inside the given transaction and returns the result
 // to the caller via the session.
 pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> Res<RowIter> {
@@ -701,13 +740,16 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
       Ok(RowIter::project(expressions.clone(), child_iter))
     },
     PhysicalPlan::SeqScan(ref _schema_info, ref table_info) => {
-      match catalog::get_relation_data(&txn, table_info) {
-        Some(mut set) => {
-          let num_fields = table_info.relation_fields().len();
-          let iter = set.list(None, None);
-          Ok(RowIter::ScanIter { num_fields, iter })
+      match table_info.relation_type() {
+        RelationType::SYSTEM_VIEW => scan_system_view(txn, table_info.relation_name()),
+        RelationType::TABLE => match catalog::get_relation_data(&txn, table_info) {
+          Some(mut set) => {
+            let num_fields = table_info.relation_fields().len();
+            let iter = set.list(None, None);
+            Ok(RowIter::ScanIter { num_fields, iter })
+          },
+          None => Ok(RowIter::empty()),
         },
-        None => Ok(RowIter::empty()),
       }
     },
   }
@@ -718,7 +760,15 @@ mod tests {
   use std::rc::Rc;
   use super::{ExprEvalResult, RowIter, execute, expr_eval};
   use crate::common::error::Error;
-  use crate::sql::catalog::{self, RelationInfo, RelationType, SchemaInfo};
+  use crate::sql::catalog::{
+    self,
+    RelationInfo,
+    RelationType,
+    SchemaInfo,
+    INFORMATION_SCHEMA,
+    INFORMATION_SCHEMA_RELATIONS,
+    INFORMATION_SCHEMA_SCHEMATA,
+  };
   use crate::sql::plan::{Expression, PhysicalPlan, dsl::*};
   use crate::sql::row::Row;
   use crate::sql::session::Session;
@@ -1339,7 +1389,13 @@ mod tests {
   fn test_exec_local_relation_empty() {
     let mut dbc = init_db();
     let rows = dbc.with_txn(false, |txn| {
-      collect_rows(execute(&Session::builder().build(), &txn, &PhysicalPlan::LocalRelation(Rc::new(vec![]))).unwrap())
+      collect_rows(
+        execute(
+          &Session::builder().build(),
+          &txn,
+          &PhysicalPlan::LocalRelation(Rc::new(vec![]))
+        ).unwrap()
+      )
     });
     assert!(rows.is_empty());
   }
@@ -1475,7 +1531,8 @@ mod tests {
 
   #[test]
   fn test_exec_insert_into_with_explicit_col_positions() {
-    // Insert into (b, a) order — positions [1, 0] map query col 0 → table col 1, query col 1 → table col 0.
+    // Insert into (b, a) order — positions [1, 0] map query col 0 -> table col 1,
+    // query col 1 -> table col 0.
     let mut dbc = init_db();
     setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
 
@@ -1500,5 +1557,42 @@ mod tests {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_i32(0), 42);   // a (table col 0)
     assert_eq!(rows[0].get_str(1), "hello"); // b (table col 1)
+  }
+
+  #[test]
+  fn test_exec_scan_system_view_schemata() {
+    let mut dbc = init_db();
+    dbc.with_txn(true, |txn| {
+      catalog::create_schema(&txn, "myschema", false).unwrap();
+    });
+    let rows = dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(
+        &txn, INFORMATION_SCHEMA, INFORMATION_SCHEMA_SCHEMATA
+      ).unwrap();
+      let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
+    });
+    let names: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
+    assert!(names.contains(&INFORMATION_SCHEMA));
+    assert!(names.contains(&"default"));
+    assert!(names.contains(&"myschema"));
+  }
+
+  #[test]
+  fn test_exec_scan_system_view_relations() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let rows = dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(
+        &txn, INFORMATION_SCHEMA, INFORMATION_SCHEMA_RELATIONS
+      ).unwrap();
+      let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
+    });
+    // information_schema system views and the user table should all appear.
+    let names: Vec<(&str, &str)> = rows.iter().map(|r| (r.get_str(0), r.get_str(1))).collect();
+    assert!(names.contains(&(INFORMATION_SCHEMA, INFORMATION_SCHEMA_SCHEMATA)));
+    assert!(names.contains(&(INFORMATION_SCHEMA, INFORMATION_SCHEMA_RELATIONS)));
+    assert!(names.contains(&("default", "t")));
   }
 }
