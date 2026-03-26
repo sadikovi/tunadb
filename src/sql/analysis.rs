@@ -1036,7 +1036,7 @@ mod tests {
     let mut dbc = init_db();
     let fields = Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]);
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, create_table(None, "t", fields.clone()))
+      analyse(&Session::builder().build(), &txn, create_table(None, "t", fields.clone()))
     });
     assert!(matches!(result, Ok(LogicalPlan::CreateTable(_, _, _))));
   }
@@ -1047,7 +1047,7 @@ mod tests {
     setup_table(&mut dbc, "t", &[("a", Type::INT)]);
     let fields = Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]);
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, create_table(None, "t", fields.clone()))
+      analyse(&Session::builder().build(), &txn, create_table(None, "t", fields.clone()))
     });
     assert!(result.is_err());
   }
@@ -1057,7 +1057,7 @@ mod tests {
     let mut dbc = init_db();
     setup_table(&mut dbc, "t", &[("a", Type::INT)]);
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, drop_table(None, "t"))
+      analyse(&Session::builder().build(), &txn, drop_table(None, "t"))
     });
     assert!(matches!(result, Ok(LogicalPlan::DropTable(_, _))));
   }
@@ -1066,7 +1066,7 @@ mod tests {
   fn test_analyse_drop_table_not_exists_error() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, drop_table(None, "t"))
+      analyse(&Session::builder().build(), &txn, drop_table(None, "t"))
     });
     assert!(result.is_err());
   }
@@ -1076,7 +1076,7 @@ mod tests {
     let mut dbc = init_db();
     setup_table(&mut dbc, "t", &[("a", Type::INT)]);
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, from(None, "t", None))
+      analyse(&Session::builder().build(), &txn, from(None, "t", None))
     });
     assert!(matches!(result, Ok(LogicalPlan::TableScan(_, _, _))));
   }
@@ -1085,7 +1085,7 @@ mod tests {
   fn test_analyse_table_scan_not_exists_error() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, from(None, "t", None))
+      analyse(&Session::builder().build(), &txn, from(None, "t", None))
     });
     assert!(result.is_err());
   }
@@ -1097,7 +1097,7 @@ mod tests {
     setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
     let result = dbc.with_txn(false, |txn| {
       let plan = insert_into_values(None, "t", vec![], vec![vec![int(1), string("x")]]);
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     match result.unwrap() {
       LogicalPlan::InsertInto(_, _, col_pos, _) => {
@@ -1118,7 +1118,7 @@ mod tests {
         vec!["b".to_string(), "a".to_string()],
         vec![vec![string("x"), int(1)]]
       );
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     match result.unwrap() {
       LogicalPlan::InsertInto(_, _, col_pos, _) => {
@@ -1138,7 +1138,7 @@ mod tests {
         vec!["a".to_string(), "a".to_string()],
         vec![vec![int(1), int(2)]]
       );
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     assert!(result.is_err());
   }
@@ -1153,7 +1153,7 @@ mod tests {
         vec!["z".to_string()],
         vec![vec![int(1)]]
       );
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     assert!(result.is_err());
   }
@@ -1165,7 +1165,7 @@ mod tests {
     setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::INT)]);
     let result = dbc.with_txn(false, |txn| {
       let plan = insert_into_values(None, "t", vec![], vec![vec![int(1)]]);
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     assert!(result.is_err());
   }
@@ -1177,7 +1177,7 @@ mod tests {
     setup_table(&mut dbc, "t", &[("a", Type::BIGINT)]);
     let result = dbc.with_txn(false, |txn| {
       let plan = insert_into_values(None, "t", vec![], vec![vec![int(1)]]);
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     match result.unwrap() {
       LogicalPlan::InsertInto(_, _, _, query) => {
@@ -1199,7 +1199,7 @@ mod tests {
     setup_table(&mut dbc, "t", &[("a", Type::INT)]);
     let result = dbc.with_txn(false, |txn| {
       let plan = insert_into_values(None, "t", vec![], vec![vec![string("hello")]]);
-      analyse(&Session::new(), &txn, plan)
+      analyse(&Session::builder().build(), &txn, plan)
     });
     assert!(result.is_err());
   }
@@ -1208,7 +1208,7 @@ mod tests {
   fn test_analyse_filter() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, filter(boolean(true), empty()))
+      analyse(&Session::builder().build(), &txn, filter(boolean(true), empty()))
     });
     assert!(matches!(result, Ok(LogicalPlan::Filter(_, _))));
   }
@@ -1218,7 +1218,7 @@ mod tests {
     // Projection with implicit widening: INT + BIGINT becomes Cast(INT, BIGINT) + BIGINT.
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, project(vec![add(int(1), bigint(2))], empty()))
+      analyse(&Session::builder().build(), &txn, project(vec![add(int(1), bigint(2))], empty()))
     });
     match result.unwrap() {
       LogicalPlan::Project(exprs, _) => {
@@ -1232,7 +1232,7 @@ mod tests {
   fn test_analyse_local_relation() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, local(vec![int(1), string("hello")]))
+      analyse(&Session::builder().build(), &txn, local(vec![int(1), string("hello")]))
     });
     match result.unwrap() {
       LogicalPlan::LocalRelation(rows) => {
@@ -1246,7 +1246,7 @@ mod tests {
   fn test_analyse_subquery_with_alias() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, subquery(empty(), Some("sq")))
+      analyse(&Session::builder().build(), &txn, subquery(empty(), Some("sq")))
     });
     match result.unwrap() {
       LogicalPlan::Subquery(alias, _) => assert_eq!(alias.as_str(), "sq"),
@@ -1259,7 +1259,7 @@ mod tests {
     // A subquery without an alias gets the default alias (§14.1).
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, subquery(empty(), None))
+      analyse(&Session::builder().build(), &txn, subquery(empty(), None))
     });
     match result.unwrap() {
       LogicalPlan::Subquery(alias, _) => assert_eq!(alias.as_str(), DEFAULT_SUBQUERY_NAME),
@@ -1271,7 +1271,7 @@ mod tests {
   fn test_analyse_limit() {
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::new(), &txn, limit(10, empty()))
+      analyse(&Session::builder().build(), &txn, limit(10, empty()))
     });
     assert!(matches!(result, Ok(LogicalPlan::Limit(10, _))));
   }

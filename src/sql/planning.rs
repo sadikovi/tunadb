@@ -1,10 +1,28 @@
 use std::rc::Rc;
 use crate::common::error::Res;
 use crate::sql::plan::{LogicalPlan, PhysicalPlan};
+use crate::sql::types::{Field, Fields};
 
-// Converts a resolved LogicalPlan into a PhysicalPlan node-for-node.
+// Converts a resolved LogicalPlan into a (Fields, PhysicalPlan) pair.
+// Fields describes the schema of the rows produced by the plan.
 // The input must be fully resolved — no Unresolved* variants should be present.
-pub fn plan(logical: &LogicalPlan) -> Res<PhysicalPlan> {
+pub fn plan(logical: &LogicalPlan) -> Res<(Fields, PhysicalPlan)> {
+  let fields = plan_schema(logical)?;
+  let physical = plan_node(logical)?;
+  Ok((fields, physical))
+}
+
+// Derives the output Fields from a logical plan by inspecting its output expressions.
+fn plan_schema(logical: &LogicalPlan) -> Res<Fields> {
+  let output = logical.output()?;
+  let fields = output.iter().map(|(_, expr)| {
+    Ok(Field::new(expr.name().to_string(), expr.data_type()?, expr.nullable()?))
+  }).collect::<Res<Vec<_>>>()?;
+  Ok(Fields::new(fields))
+}
+
+// Recursively converts a LogicalPlan node into a PhysicalPlan node.
+fn plan_node(logical: &LogicalPlan) -> Res<PhysicalPlan> {
   match logical {
     LogicalPlan::CreateSchema(ref name) => {
       Ok(PhysicalPlan::CreateSchema(name.clone()))
@@ -19,24 +37,24 @@ pub fn plan(logical: &LogicalPlan) -> Res<PhysicalPlan> {
       Ok(PhysicalPlan::DropTable(schema_info.clone(), table_info.clone()))
     },
     LogicalPlan::Filter(ref expr, ref child) => {
-      Ok(PhysicalPlan::Filter(expr.clone(), Rc::new(plan(child)?)))
+      Ok(PhysicalPlan::Filter(expr.clone(), Rc::new(plan_node(child)?)))
     },
     LogicalPlan::InsertInto(ref schema_info, ref table_info, ref col_positions, ref query) => {
       Ok(PhysicalPlan::InsertInto(
         schema_info.clone(),
         table_info.clone(),
         col_positions.clone(),
-        Rc::new(plan(query)?),
+        Rc::new(plan_node(query)?),
       ))
     },
     LogicalPlan::Limit(limit, ref child) => {
-      Ok(PhysicalPlan::Limit(*limit, Rc::new(plan(child)?)))
+      Ok(PhysicalPlan::Limit(*limit, Rc::new(plan_node(child)?)))
     },
     LogicalPlan::LocalRelation(ref expressions) => {
       Ok(PhysicalPlan::LocalRelation(expressions.clone()))
     },
     LogicalPlan::Project(ref expressions, ref child) => {
-      Ok(PhysicalPlan::Project(expressions.clone(), Rc::new(plan(child)?)))
+      Ok(PhysicalPlan::Project(expressions.clone(), Rc::new(plan_node(child)?)))
     },
     LogicalPlan::Subquery(_, ref child) => {
       // Subquery is a logical-only construct used to introduce an alias scope during analysis.
@@ -44,7 +62,7 @@ pub fn plan(logical: &LogicalPlan) -> Res<PhysicalPlan> {
       // (e.g. SELECT sq.id FROM (SELECT id FROM t) AS sq). By the time planning runs, all
       // identifiers have been resolved to ColumnRef nodes with concrete column indices, so
       // the alias is no longer needed. We convert the child directly and discard the wrapper.
-      plan(child)
+      plan_node(child)
     },
     LogicalPlan::TableScan(ref schema_info, ref table_info, _) => {
       // Alias is only needed for name resolution during analysis, drop it.
@@ -87,26 +105,31 @@ mod tests {
   #[test]
   fn test_plan_create_schema() {
     let logical = LogicalPlan::CreateSchema(Rc::new("s".to_string()));
-    assert_eq!(plan(&logical), Ok(PhysicalPlan::CreateSchema(Rc::new("s".to_string()))));
+    let (schema, physical) = plan(&logical).unwrap();
+    assert_eq!(physical, PhysicalPlan::CreateSchema(Rc::new("s".to_string())));
+    assert!(schema.get().is_empty());
   }
 
   #[test]
   fn test_plan_create_table() {
-    let fields = Rc::new(Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]));
+    let f = Rc::new(Fields::new(vec![Field::new("a".to_string(), Type::INT, false)]));
     let logical = LogicalPlan::CreateTable(
-      Rc::new("s".to_string()), Rc::new("t".to_string()), fields.clone()
+      Rc::new("s".to_string()), Rc::new("t".to_string()), f.clone()
     );
+    let (schema, physical) = plan(&logical).unwrap();
     assert_eq!(
-      plan(&logical),
-      Ok(PhysicalPlan::CreateTable(Rc::new("s".to_string()), Rc::new("t".to_string()), fields))
+      physical,
+      PhysicalPlan::CreateTable(Rc::new("s".to_string()), Rc::new("t".to_string()), f)
     );
+    assert!(schema.get().is_empty());
   }
 
   #[test]
   fn test_plan_local_relation() {
     let exprs = Rc::new(vec![vec![int(1), string("x")]]);
     let logical = LogicalPlan::LocalRelation(exprs.clone());
-    assert_eq!(plan(&logical), Ok(PhysicalPlan::LocalRelation(exprs)));
+    let (_, physical) = plan(&logical).unwrap();
+    assert_eq!(physical, PhysicalPlan::LocalRelation(exprs));
   }
 
   #[test]
@@ -115,9 +138,10 @@ mod tests {
     let child = Rc::new(LogicalPlan::LocalRelation(exprs.clone()));
     let expr = Rc::new(boolean(true));
     let logical = LogicalPlan::Filter(expr.clone(), child);
+    let (_, physical) = plan(&logical).unwrap();
     assert_eq!(
-      plan(&logical),
-      Ok(PhysicalPlan::Filter(expr, Rc::new(PhysicalPlan::LocalRelation(exprs))))
+      physical,
+      PhysicalPlan::Filter(expr, Rc::new(PhysicalPlan::LocalRelation(exprs)))
     );
   }
 
@@ -127,9 +151,10 @@ mod tests {
     let child = Rc::new(LogicalPlan::LocalRelation(exprs.clone()));
     let projections = Rc::new(vec![int(1), string("x")]);
     let logical = LogicalPlan::Project(projections.clone(), child);
+    let (_, physical) = plan(&logical).unwrap();
     assert_eq!(
-      plan(&logical),
-      Ok(PhysicalPlan::Project(projections, Rc::new(PhysicalPlan::LocalRelation(exprs))))
+      physical,
+      PhysicalPlan::Project(projections, Rc::new(PhysicalPlan::LocalRelation(exprs)))
     );
   }
 
@@ -138,10 +163,8 @@ mod tests {
     let exprs = Rc::new(vec![vec![int(1)]]);
     let child = Rc::new(LogicalPlan::LocalRelation(exprs.clone()));
     let logical = LogicalPlan::Limit(10, child);
-    assert_eq!(
-      plan(&logical),
-      Ok(PhysicalPlan::Limit(10, Rc::new(PhysicalPlan::LocalRelation(exprs))))
-    );
+    let (_, physical) = plan(&logical).unwrap();
+    assert_eq!(physical, PhysicalPlan::Limit(10, Rc::new(PhysicalPlan::LocalRelation(exprs))));
   }
 
   #[test]
@@ -150,7 +173,8 @@ mod tests {
     let exprs = Rc::new(vec![vec![int(1)]]);
     let child = Rc::new(LogicalPlan::LocalRelation(exprs.clone()));
     let logical = LogicalPlan::Subquery(Rc::new("sq".to_string()), child);
-    assert_eq!(plan(&logical), Ok(PhysicalPlan::LocalRelation(exprs)));
+    let (_, physical) = plan(&logical).unwrap();
+    assert_eq!(physical, PhysicalPlan::LocalRelation(exprs));
   }
 
   #[test]
@@ -159,7 +183,9 @@ mod tests {
     dbc.with_txn(false, |txn| {
       let schema_info = Rc::new(catalog::get_schema(&txn, "default").unwrap());
       let logical = LogicalPlan::DropSchema(schema_info.clone(), false);
-      assert_eq!(plan(&logical), Ok(PhysicalPlan::DropSchema(schema_info, false)));
+      let (schema, physical) = plan(&logical).unwrap();
+      assert_eq!(physical, PhysicalPlan::DropSchema(schema_info, false));
+      assert!(schema.get().is_empty());
     });
   }
 
@@ -172,7 +198,9 @@ mod tests {
       let schema_info = Rc::new(schema_info);
       let table_info = Rc::new(table_info);
       let logical = LogicalPlan::DropTable(schema_info.clone(), table_info.clone());
-      assert_eq!(plan(&logical), Ok(PhysicalPlan::DropTable(schema_info, table_info)));
+      let (schema, physical) = plan(&logical).unwrap();
+      assert_eq!(physical, PhysicalPlan::DropTable(schema_info, table_info));
+      assert!(schema.get().is_empty());
     });
   }
 
@@ -187,18 +215,31 @@ mod tests {
       let table_info = Rc::new(table_info);
 
       let without_alias = LogicalPlan::TableScan(schema_info.clone(), table_info.clone(), None);
-      assert_eq!(
-        plan(&without_alias),
-        Ok(PhysicalPlan::SeqScan(schema_info.clone(), table_info.clone()))
-      );
+      let (_, physical) = plan(&without_alias).unwrap();
+      assert_eq!(physical, PhysicalPlan::SeqScan(schema_info.clone(), table_info.clone()));
 
       let with_alias = LogicalPlan::TableScan(
         schema_info.clone(), table_info.clone(), Some(Rc::new("alias".to_string()))
       );
-      assert_eq!(
-        plan(&with_alias),
-        Ok(PhysicalPlan::SeqScan(schema_info, table_info))
-      );
+      let (_, physical) = plan(&with_alias).unwrap();
+      assert_eq!(physical, PhysicalPlan::SeqScan(schema_info, table_info));
+    });
+  }
+
+  #[test]
+  fn test_plan_seq_scan_plan_schema() {
+    // Fields from a TableScan match the table schema with correct names, types, and nullability.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
+    dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let logical = LogicalPlan::TableScan(Rc::new(schema_info), Rc::new(table_info), None);
+      let (schema, _) = plan(&logical).unwrap();
+      assert_eq!(schema.get().len(), 2);
+      assert_eq!(schema.get()[0].name(), "a");
+      assert_eq!(schema.get()[0].data_type(), &Type::INT);
+      assert_eq!(schema.get()[1].name(), "b");
+      assert_eq!(schema.get()[1].data_type(), &Type::TEXT);
     });
   }
 
@@ -217,15 +258,17 @@ mod tests {
       let logical = LogicalPlan::InsertInto(
         schema_info.clone(), table_info.clone(), col_positions.clone(), source
       );
+      let (schema, physical) = plan(&logical).unwrap();
       assert_eq!(
-        plan(&logical),
-        Ok(PhysicalPlan::InsertInto(
+        physical,
+        PhysicalPlan::InsertInto(
           schema_info,
           table_info,
           col_positions,
           Rc::new(PhysicalPlan::LocalRelation(source_exprs)),
-        ))
+        )
       );
+      assert!(schema.get().is_empty());
     });
   }
 }

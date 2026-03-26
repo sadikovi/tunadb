@@ -1270,7 +1270,7 @@ mod tests {
     let mut dbc = init_db();
     dbc.with_txn(true, |txn| {
       let plan = PhysicalPlan::CreateSchema(Rc::new("s".to_string()));
-      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      let rows = collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap());
       assert!(rows.is_empty());
       assert!(catalog::get_schema(&txn, "s").is_ok());
     });
@@ -1284,7 +1284,7 @@ mod tests {
       let plan = PhysicalPlan::CreateTable(
         Rc::new("default".to_string()), Rc::new("t".to_string()), fields
       );
-      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      let rows = collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap());
       assert!(rows.is_empty());
       assert!(catalog::get_relation(&txn, "default", "t").is_ok());
     });
@@ -1299,7 +1299,7 @@ mod tests {
     dbc.with_txn(true, |txn| {
       let schema_info = Rc::new(catalog::get_schema(&txn, "todelete").unwrap());
       let plan = PhysicalPlan::DropSchema(schema_info, false);
-      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      let rows = collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap());
       assert!(rows.is_empty());
       assert!(catalog::get_schema(&txn, "todelete").is_err());
     });
@@ -1312,7 +1312,7 @@ mod tests {
     dbc.with_txn(true, |txn| {
       let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
       let plan = PhysicalPlan::DropTable(Rc::new(schema_info), Rc::new(table_info));
-      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      let rows = collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap());
       assert!(rows.is_empty());
       assert!(catalog::get_relation(&txn, "default", "t").is_err());
     });
@@ -1326,7 +1326,7 @@ mod tests {
         vec![int(1), string("hello")],
         vec![int(2), string("world")],
       ]));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get_i32(0), 1);
@@ -1339,7 +1339,7 @@ mod tests {
   fn test_exec_local_relation_empty() {
     let mut dbc = init_db();
     let rows = dbc.with_txn(false, |txn| {
-      collect_rows(execute(&Session::new(), &txn, &PhysicalPlan::LocalRelation(Rc::new(vec![]))).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &PhysicalPlan::LocalRelation(Rc::new(vec![]))).unwrap())
     });
     assert!(rows.is_empty());
   }
@@ -1350,7 +1350,7 @@ mod tests {
     let rows = dbc.with_txn(false, |txn| {
       let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)], vec![int(2)]]));
       let plan = PhysicalPlan::Filter(Rc::new(boolean(true)), Rc::new(source));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 2);
   }
@@ -1361,7 +1361,7 @@ mod tests {
     let rows = dbc.with_txn(false, |txn| {
       let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)], vec![int(2)]]));
       let plan = PhysicalPlan::Filter(Rc::new(boolean(false)), Rc::new(source));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert!(rows.is_empty());
   }
@@ -1378,7 +1378,7 @@ mod tests {
         Rc::new(equals(col_ref(table.clone(), 0), int(2))),
         Rc::new(source),
       );
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_i32(0), 2);
@@ -1392,7 +1392,7 @@ mod tests {
         vec![int(1)], vec![int(2)], vec![int(3)],
       ]));
       let plan = PhysicalPlan::Limit(2, Rc::new(source));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 2);
   }
@@ -1403,7 +1403,7 @@ mod tests {
     let rows = dbc.with_txn(false, |txn| {
       let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)]]));
       let plan = PhysicalPlan::Limit(0, Rc::new(source));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert!(rows.is_empty());
   }
@@ -1422,7 +1422,7 @@ mod tests {
         Rc::new(vec![col_ref(table.clone(), 1), col_ref(table.clone(), 0)]),
         Rc::new(source),
       );
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_i32(0), 2); // col 1 is now at position 0
@@ -1436,7 +1436,7 @@ mod tests {
     let rows = dbc.with_txn(false, |txn| {
       let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
       let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert!(rows.is_empty());
   }
@@ -1457,13 +1457,13 @@ mod tests {
           vec![int(2), string("world")],
         ]))),
       );
-      assert!(collect_rows(execute(&Session::new(), &txn, &plan).unwrap()).is_empty());
+      assert!(collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap()).is_empty());
     });
 
     let mut rows = dbc.with_txn(false, |txn| {
       let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
       let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 2);
     rows.sort_by_key(|r| r.get_i32(0));
@@ -1489,13 +1489,13 @@ mod tests {
           vec![string("hello"), int(42)],
         ]))),
       );
-      execute(&Session::new(), &txn, &plan).unwrap();
+      execute(&Session::builder().build(), &txn, &plan).unwrap();
     });
 
     let rows = dbc.with_txn(false, |txn| {
       let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
       let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
-      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+      collect_rows(execute(&Session::builder().build(), &txn, &plan).unwrap())
     });
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_i32(0), 42);   // a (table col 0)
