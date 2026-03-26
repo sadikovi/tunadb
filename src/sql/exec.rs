@@ -1,10 +1,14 @@
 use std::convert::TryFrom;
+use std::iter::FusedIterator;
+use std::rc::Rc;
 use crate::common::error::{Error, Res};
+use crate::sql::catalog;
 use crate::sql::plan::{Expression, PhysicalPlan};
 use crate::sql::row::Row;
 use crate::sql::session::Session;
 use crate::sql::types::Type;
-use crate::storage::txn::TransactionRef;
+use crate::storage::btree::BTreeIter;
+use crate::storage::txn::{TransactionRef, next_object_id};
 
 // The runtime value produced by evaluating a single expression against a row.
 // Mirrors the SQL type system (Section 1.1 of SQL_SEMANTICS.md) but lives only
@@ -463,21 +467,263 @@ fn expr_eval(expr: &Expression, row: &Row) -> Res<ExprEvalResult> {
   }
 }
 
+pub enum RowIter {
+  EmptyIter,
+  FromVecIter { rows: Vec<Row> },
+  FilterIter { is_stopped: bool, expr: Rc<Expression>, parent: Box<RowIter> },
+  LimitIter { is_stopped: bool, limit: usize, parent: Box<RowIter> },
+  ProjectIter { is_stopped: bool, exprs: Rc<Vec<Expression>>, parent: Box<RowIter> },
+  ScanIter { num_fields: usize, iter: BTreeIter },
+}
+
+impl RowIter {
+  // Returns an empty iterator.
+  #[inline]
+  fn empty() -> Self {
+    Self::EmptyIter
+  }
+
+  // Returns an iterator from the vector of rows.
+  #[inline]
+  fn from_vec(mut rows: Vec<Row>) -> Self {
+    rows.reverse();
+    Self::FromVecIter { rows: rows }
+  }
+
+  // Returns an iterator that yields only rows for which `expr` evaluates to true.
+  fn filter(expr: Rc<Expression>, plan: RowIter) -> Self {
+    Self::FilterIter { is_stopped: false, expr, parent: Box::new(plan) }
+  }
+
+  // Returns an iterator that projects each row from `parent` through `exprs`.
+  fn project(exprs: Rc<Vec<Expression>>, plan: RowIter) -> Self {
+    Self::ProjectIter { is_stopped: false, exprs, parent: Box::new(plan) }
+  }
+
+  // Returns an iterator that is limited to `limit` rows from the `parent`.
+  #[inline]
+  fn limit(limit: usize, plan: RowIter) -> Self {
+    Self::LimitIter { is_stopped: false, limit: limit, parent: Box::new(plan) }
+  }
+}
+
+impl Iterator for RowIter {
+  type Item = Res<Row>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    match self {
+      RowIter::EmptyIter => None,
+      RowIter::FromVecIter { rows } => rows.pop().map(Ok),
+      RowIter::FilterIter { ref mut is_stopped, ref expr, parent } => {
+        while !*is_stopped {
+          match parent.next() {
+            Some(Ok(row)) => {
+              match expr_eval(expr.as_ref(), &row) {
+                Ok(ExprEvalResult::Bool(true)) => {
+                  return Some(Ok(row));
+                },
+                Ok(ExprEvalResult::Bool(false)) => {
+                  continue;
+                },
+                Ok(res) => {
+                  unreachable!("FilterIter: unexpected eval result {:?}", res)
+                },
+                Err(err) => {
+                  *is_stopped = true;
+                  return Some(Err(err));
+                },
+              }
+            },
+            Some(Err(err)) => {
+              *is_stopped = true;
+              return Some(Err(err));
+            }
+            None => {
+              return None;
+            }
+          }
+        }
+
+        None
+      },
+      RowIter::LimitIter { ref mut is_stopped, ref mut limit, parent } => {
+        if *limit > 0 && !*is_stopped {
+          *limit -= 1;
+          let row = parent.next();
+          if let Some(Err(_)) = row {
+            *is_stopped = true;
+          }
+          row
+        } else {
+          None
+        }
+      },
+      RowIter::ProjectIter { ref mut is_stopped, ref exprs, parent } => {
+        if *is_stopped {
+          return None;
+        }
+        match parent.next() {
+          Some(Ok(row)) => {
+            let mut out = Row::new(exprs.len());
+            for (i, expr) in exprs.iter().enumerate() {
+              match expr_eval(expr, &row) {
+                Ok(ExprEvalResult::Null) => out.set_null(i, true),
+                Ok(ExprEvalResult::Bool(v)) => out.set_bool(i, v),
+                Ok(ExprEvalResult::Int(v)) => out.set_i32(i, v),
+                Ok(ExprEvalResult::BigInt(v)) => out.set_i64(i, v),
+                Ok(ExprEvalResult::Float(v)) => out.set_f32(i, v),
+                Ok(ExprEvalResult::Double(v)) => out.set_f64(i, v),
+                Ok(ExprEvalResult::Text(v)) => out.set_str(i, &v),
+                Err(err) => {
+                  *is_stopped = true;
+                  return Some(Err(err));
+                },
+              }
+            }
+            Some(Ok(out))
+          },
+          Some(Err(err)) => {
+            *is_stopped = true;
+            Some(Err(err))
+          },
+          None => None,
+        }
+      },
+      RowIter::ScanIter { num_fields, iter } => {
+        iter.next().map(|(_key, data)| Ok(Row::from_buf(*num_fields, data)))
+      },
+    }
+  }
+}
+
+impl FusedIterator for RowIter {}
+
 // Executes a physical plan inside the given transaction and returns the result
 // to the caller via the session.
-pub fn execute(session: &Session, txn: &TransactionRef, plan: PhysicalPlan) -> Res<()> {
-  todo!()
+pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> Res<RowIter> {
+  match plan {
+    PhysicalPlan::CreateSchema(ref schema_name) => {
+      match catalog::create_schema(txn, schema_name.as_ref(), false) {
+        Ok(()) => Ok(RowIter::empty()),
+        Err(_) => unreachable!("Create schema {}: unexpected error", schema_name),
+      }
+    },
+    PhysicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
+      match catalog::create_relation(
+        txn,
+        schema_name.as_ref(),
+        table_name.as_ref(),
+        catalog::RelationType::TABLE,
+        // TODO: remove clone.
+        fields.as_ref().clone(),
+        false
+      ) {
+        Ok(()) => Ok(RowIter::empty()),
+        Err(_) => unreachable!("Create table {}: unexpected error", table_name),
+      }
+    },
+    PhysicalPlan::DropSchema(ref schema_info, cascade) => {
+      match catalog::drop_schema(txn, schema_info.schema_name(), *cascade, false) {
+        Ok(()) => Ok(RowIter::empty()),
+        Err(_) => unreachable!("Drop schema {}: unexpected error", schema_info.schema_name()),
+      }
+    },
+    PhysicalPlan::DropTable(ref schema_info, ref table_info) => {
+      let schema_name = schema_info.schema_name();
+      let table_name = table_info.relation_name();
+      match catalog::drop_relation(txn, schema_name, table_name, false) {
+        Ok(()) => Ok(RowIter::empty()),
+        Err(_) => unreachable!("Drop table {}: unexpected error", table_name),
+      }
+    },
+    PhysicalPlan::Filter(ref expression, ref child) => {
+      let child_iter = execute(session, txn, child)?;
+      Ok(RowIter::filter(expression.clone(), child_iter))
+    },
+    PhysicalPlan::InsertInto(_, ref table_info, ref col_positions, ref query) => {
+      let mut child_iter = execute(session, txn, query)?;
+      let mut set = match catalog::get_relation_data(txn, table_info) {
+        Some(set) => set,
+        None => catalog::create_relation_data(txn, table_info)?,
+      };
+      let table_fields = table_info.relation_fields();
+      let num_table_fields = table_fields.get().len();
+
+      while let Some(result) = child_iter.next() {
+        let src = result?;
+        let mut dst = Row::new(num_table_fields);
+        for (i, &pos) in col_positions.iter().enumerate() {
+          if !src.is_null(i) {
+            match table_fields.get()[pos].data_type() {
+              Type::BOOL => dst.set_bool(pos, src.get_bool(i)),
+              Type::INT => dst.set_i32(pos, src.get_i32(i)),
+              Type::BIGINT => dst.set_i64(pos, src.get_i64(i)),
+              Type::FLOAT => dst.set_f32(pos, src.get_f32(i)),
+              Type::DOUBLE => dst.set_f64(pos, src.get_f64(i)),
+              Type::TEXT => dst.set_str(pos, src.get_str(i)),
+              Type::NULL => {},
+              Type::STRUCT(_) => unreachable!("InsertInto: STRUCT fields are not supported"),
+            }
+          }
+        }
+        let key = u64_u8!(next_object_id(txn));
+        set.put(&key, &dst.to_vec());
+      }
+
+      Ok(RowIter::empty())
+    },
+    PhysicalPlan::Limit(ref limit, ref child) => {
+      let child_iter = execute(session, txn, child)?;
+      Ok(RowIter::limit(*limit, child_iter))
+    },
+    PhysicalPlan::LocalRelation(ref expressions) => {
+      let empty_row = Row::new(0);
+      let mut rows = Vec::with_capacity(expressions.len());
+      for row_exprs in expressions.as_ref() {
+        let mut row = Row::new(row_exprs.len());
+        for (i, expr) in row_exprs.iter().enumerate() {
+          match expr_eval(expr, &empty_row)? {
+            ExprEvalResult::Null => row.set_null(i, true),
+            ExprEvalResult::Bool(v) => row.set_bool(i, v),
+            ExprEvalResult::Int(v) => row.set_i32(i, v),
+            ExprEvalResult::BigInt(v) => row.set_i64(i, v),
+            ExprEvalResult::Float(v) => row.set_f32(i, v),
+            ExprEvalResult::Double(v) => row.set_f64(i, v),
+            ExprEvalResult::Text(v) => row.set_str(i, &v),
+          }
+        }
+        rows.push(row);
+      }
+      Ok(RowIter::from_vec(rows))
+    },
+    PhysicalPlan::Project(ref expressions, ref child) => {
+      let child_iter = execute(session, txn, child)?;
+      Ok(RowIter::project(expressions.clone(), child_iter))
+    },
+    PhysicalPlan::SeqScan(ref _schema_info, ref table_info) => {
+      match catalog::get_relation_data(&txn, table_info) {
+        Some(mut set) => {
+          let num_fields = table_info.relation_fields().len();
+          let iter = set.list(None, None);
+          Ok(RowIter::ScanIter { num_fields, iter })
+        },
+        None => Ok(RowIter::empty()),
+      }
+    },
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use std::rc::Rc;
-  use super::{ExprEvalResult, expr_eval};
+  use super::{ExprEvalResult, RowIter, execute, expr_eval};
   use crate::common::error::Error;
-  use crate::sql::catalog::{RelationInfo, RelationType, SchemaInfo};
-  use crate::sql::plan::{Expression, dsl::*};
+  use crate::sql::catalog::{self, RelationInfo, RelationType, SchemaInfo};
+  use crate::sql::plan::{Expression, PhysicalPlan, dsl::*};
   use crate::sql::row::Row;
+  use crate::sql::session::Session;
   use crate::sql::types::{Field, Fields, Type};
+  use crate::storage::db;
 
   // Convenience: evaluate a literal-only expression against an empty row.
   fn eval(expr: Expression) -> ExprEvalResult {
@@ -868,5 +1114,391 @@ mod tests {
   fn test_cast_null_passthrough() {
     assert_eq!(eval(cast(null(), Type::INT)),  ExprEvalResult::Null);
     assert_eq!(eval(cast(null(), Type::TEXT)), ExprEvalResult::Null);
+  }
+
+  //=========
+  // RowIter
+  //=========
+
+  fn int_row(value: i32) -> Row {
+    let mut row = Row::new(1);
+    row.set_i32(0, value);
+    row
+  }
+
+  fn row_val(result: Option<Result<Row, Error>>) -> i32 {
+    result.unwrap().unwrap().get_i32(0)
+  }
+
+  // An iterator that yields one error (division by zero on the first row).
+  fn error_iter() -> RowIter {
+    RowIter::filter(
+      Rc::new(divide(int(1), int(0))),
+      RowIter::from_vec(vec![int_row(1)]),
+    )
+  }
+
+  #[test]
+  fn test_row_iter_empty() {
+    let mut iter = RowIter::empty();
+    assert!(iter.next().is_none());
+    assert!(iter.next().is_none()); // stays None (fused)
+  }
+
+  #[test]
+  fn test_row_iter_from_vec_empty() {
+    let mut iter = RowIter::from_vec(vec![]);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_from_vec_preserves_order() {
+    let mut iter = RowIter::from_vec(vec![int_row(1), int_row(2), int_row(3)]);
+    assert_eq!(row_val(iter.next()), 1);
+    assert_eq!(row_val(iter.next()), 2);
+    assert_eq!(row_val(iter.next()), 3);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_filter_all_pass() {
+    let mut iter = RowIter::filter(
+      Rc::new(boolean(true)),
+      RowIter::from_vec(vec![int_row(1), int_row(2)]),
+    );
+    assert_eq!(row_val(iter.next()), 1);
+    assert_eq!(row_val(iter.next()), 2);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_filter_none_pass() {
+    let mut iter = RowIter::filter(
+      Rc::new(boolean(false)),
+      RowIter::from_vec(vec![int_row(1), int_row(2)]),
+    );
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_filter_partial() {
+    let table = make_table(vec![Field::new("a".to_string(), Type::INT, false)]);
+    let expr = equals(col_ref(table, 0), int(2));
+    let mut iter = RowIter::filter(
+      Rc::new(expr),
+      RowIter::from_vec(vec![int_row(1), int_row(2), int_row(3)]),
+    );
+    assert_eq!(row_val(iter.next()), 2);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_filter_stops_after_error() {
+    let mut iter = RowIter::filter(
+      Rc::new(divide(int(1), int(0))),
+      RowIter::from_vec(vec![int_row(1), int_row(2)]),
+    );
+    assert!(matches!(iter.next(), Some(Err(Error::SQLExecutionError(_)))));
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_filter_propagates_parent_error() {
+    let mut iter = RowIter::filter(Rc::new(boolean(true)), error_iter());
+    assert!(matches!(iter.next(), Some(Err(Error::SQLExecutionError(_)))));
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_limit_basic() {
+    let mut iter = RowIter::limit(2, RowIter::from_vec(vec![int_row(1), int_row(2), int_row(3)]));
+    assert_eq!(row_val(iter.next()), 1);
+    assert_eq!(row_val(iter.next()), 2);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_limit_zero() {
+    let mut iter = RowIter::limit(0, RowIter::from_vec(vec![int_row(1)]));
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_limit_exceeds_rows() {
+    let mut iter = RowIter::limit(10, RowIter::from_vec(vec![int_row(1), int_row(2)]));
+    assert_eq!(row_val(iter.next()), 1);
+    assert_eq!(row_val(iter.next()), 2);
+    assert!(iter.next().is_none());
+  }
+
+  #[test]
+  fn test_row_iter_limit_stops_after_error() {
+    let mut iter = RowIter::limit(5, error_iter());
+    assert!(matches!(iter.next(), Some(Err(Error::SQLExecutionError(_)))));
+    assert!(iter.next().is_none());
+  }
+
+  //=========
+  // execute
+  //=========
+
+  fn init_db() -> db::DB {
+    let mut dbc = db::open(None).try_build().unwrap();
+    dbc.with_txn(true, |txn| {
+      catalog::init_catalog(&txn).unwrap();
+      catalog::create_schema(&txn, "default", false).unwrap();
+    });
+    dbc
+  }
+
+  fn setup_table(dbc: &mut db::DB, table: &str, cols: &[(&str, Type)]) {
+    let fields = Fields::new(
+      cols.iter().map(|(name, tpe)| Field::new(name.to_string(), tpe.clone(), true)).collect()
+    );
+    dbc.with_txn(true, |txn| {
+      catalog::create_relation(&txn, "default", table, RelationType::TABLE, fields.clone(), false)
+        .unwrap();
+    });
+  }
+
+  fn collect_rows(iter: RowIter) -> Vec<Row> {
+    iter.map(|r| r.unwrap()).collect()
+  }
+
+  #[test]
+  fn test_exec_create_schema() {
+    let mut dbc = init_db();
+    dbc.with_txn(true, |txn| {
+      let plan = PhysicalPlan::CreateSchema(Rc::new("s".to_string()));
+      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      assert!(rows.is_empty());
+      assert!(catalog::get_schema(&txn, "s").is_ok());
+    });
+  }
+
+  #[test]
+  fn test_exec_create_table() {
+    let mut dbc = init_db();
+    dbc.with_txn(true, |txn| {
+      let fields = Rc::new(Fields::new(vec![Field::new("a".to_string(), Type::INT, true)]));
+      let plan = PhysicalPlan::CreateTable(
+        Rc::new("default".to_string()), Rc::new("t".to_string()), fields
+      );
+      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      assert!(rows.is_empty());
+      assert!(catalog::get_relation(&txn, "default", "t").is_ok());
+    });
+  }
+
+  #[test]
+  fn test_exec_drop_schema() {
+    let mut dbc = init_db();
+    dbc.with_txn(true, |txn| {
+      catalog::create_schema(&txn, "todelete", false).unwrap();
+    });
+    dbc.with_txn(true, |txn| {
+      let schema_info = Rc::new(catalog::get_schema(&txn, "todelete").unwrap());
+      let plan = PhysicalPlan::DropSchema(schema_info, false);
+      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      assert!(rows.is_empty());
+      assert!(catalog::get_schema(&txn, "todelete").is_err());
+    });
+  }
+
+  #[test]
+  fn test_exec_drop_table() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    dbc.with_txn(true, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::DropTable(Rc::new(schema_info), Rc::new(table_info));
+      let rows = collect_rows(execute(&Session::new(), &txn, &plan).unwrap());
+      assert!(rows.is_empty());
+      assert!(catalog::get_relation(&txn, "default", "t").is_err());
+    });
+  }
+
+  #[test]
+  fn test_exec_local_relation() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      let plan = PhysicalPlan::LocalRelation(Rc::new(vec![
+        vec![int(1), string("hello")],
+        vec![int(2), string("world")],
+      ]));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get_i32(0), 1);
+    assert_eq!(rows[0].get_str(1), "hello");
+    assert_eq!(rows[1].get_i32(0), 2);
+    assert_eq!(rows[1].get_str(1), "world");
+  }
+
+  #[test]
+  fn test_exec_local_relation_empty() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      collect_rows(execute(&Session::new(), &txn, &PhysicalPlan::LocalRelation(Rc::new(vec![]))).unwrap())
+    });
+    assert!(rows.is_empty());
+  }
+
+  #[test]
+  fn test_exec_filter_passes_all() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)], vec![int(2)]]));
+      let plan = PhysicalPlan::Filter(Rc::new(boolean(true)), Rc::new(source));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 2);
+  }
+
+  #[test]
+  fn test_exec_filter_blocks_all() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)], vec![int(2)]]));
+      let plan = PhysicalPlan::Filter(Rc::new(boolean(false)), Rc::new(source));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert!(rows.is_empty());
+  }
+
+  #[test]
+  fn test_exec_filter_by_column_value() {
+    let mut dbc = init_db();
+    let table = make_table(vec![Field::new("a".to_string(), Type::INT, false)]);
+    let rows = dbc.with_txn(false, |txn| {
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![
+        vec![int(1)], vec![int(2)], vec![int(3)],
+      ]));
+      let plan = PhysicalPlan::Filter(
+        Rc::new(equals(col_ref(table.clone(), 0), int(2))),
+        Rc::new(source),
+      );
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_i32(0), 2);
+  }
+
+  #[test]
+  fn test_exec_limit() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![
+        vec![int(1)], vec![int(2)], vec![int(3)],
+      ]));
+      let plan = PhysicalPlan::Limit(2, Rc::new(source));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 2);
+  }
+
+  #[test]
+  fn test_exec_limit_zero() {
+    let mut dbc = init_db();
+    let rows = dbc.with_txn(false, |txn| {
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1)]]));
+      let plan = PhysicalPlan::Limit(0, Rc::new(source));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert!(rows.is_empty());
+  }
+
+  #[test]
+  fn test_exec_project() {
+    let mut dbc = init_db();
+    let table = make_table(vec![
+      Field::new("a".to_string(), Type::INT, false),
+      Field::new("b".to_string(), Type::INT, false),
+    ]);
+    let rows = dbc.with_txn(false, |txn| {
+      // Source rows have 2 columns; project swaps their order.
+      let source = PhysicalPlan::LocalRelation(Rc::new(vec![vec![int(1), int(2)]]));
+      let plan = PhysicalPlan::Project(
+        Rc::new(vec![col_ref(table.clone(), 1), col_ref(table.clone(), 0)]),
+        Rc::new(source),
+      );
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_i32(0), 2); // col 1 is now at position 0
+    assert_eq!(rows[0].get_i32(1), 1); // col 0 is now at position 1
+  }
+
+  #[test]
+  fn test_exec_seq_scan_empty_table() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let rows = dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert!(rows.is_empty());
+  }
+
+  #[test]
+  fn test_exec_insert_into_and_seq_scan() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
+
+    dbc.with_txn(true, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::InsertInto(
+        Rc::new(schema_info),
+        Rc::new(table_info),
+        Rc::new(vec![0, 1]),
+        Rc::new(PhysicalPlan::LocalRelation(Rc::new(vec![
+          vec![int(1), string("hello")],
+          vec![int(2), string("world")],
+        ]))),
+      );
+      assert!(collect_rows(execute(&Session::new(), &txn, &plan).unwrap()).is_empty());
+    });
+
+    let mut rows = dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 2);
+    rows.sort_by_key(|r| r.get_i32(0));
+    assert_eq!(rows[0].get_i32(0), 1);
+    assert_eq!(rows[0].get_str(1), "hello");
+    assert_eq!(rows[1].get_i32(0), 2);
+    assert_eq!(rows[1].get_str(1), "world");
+  }
+
+  #[test]
+  fn test_exec_insert_into_with_explicit_col_positions() {
+    // Insert into (b, a) order — positions [1, 0] map query col 0 → table col 1, query col 1 → table col 0.
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT), ("b", Type::TEXT)]);
+
+    dbc.with_txn(true, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::InsertInto(
+        Rc::new(schema_info),
+        Rc::new(table_info),
+        Rc::new(vec![1, 0]), // b first, then a
+        Rc::new(PhysicalPlan::LocalRelation(Rc::new(vec![
+          vec![string("hello"), int(42)],
+        ]))),
+      );
+      execute(&Session::new(), &txn, &plan).unwrap();
+    });
+
+    let rows = dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let plan = PhysicalPlan::SeqScan(Rc::new(schema_info), Rc::new(table_info));
+      collect_rows(execute(&Session::new(), &txn, &plan).unwrap())
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_i32(0), 42);   // a (table col 0)
+    assert_eq!(rows[0].get_str(1), "hello"); // b (table col 1)
   }
 }
