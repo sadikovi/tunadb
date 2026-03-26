@@ -199,8 +199,18 @@ fn get_system_relations(txn: &TransactionRef) -> Res<Set> {
 
 const INFORMATION_SCHEMA: &str = "INFORMATION_SCHEMA";
 
+// Returns true if the catalog is already initialised, false if it is not.
+// Errors if the catalog is in a partially initialised (corrupt) state.
+pub fn catalog_exists(txn: &TransactionRef) -> Res<bool> {
+  match (get_set(txn, SYSTEM_SCHEMAS).is_some(), get_set(txn, SYSTEM_RELATIONS).is_some()) {
+    (true, true) => Ok(true),
+    (false, false) => Ok(false),
+    _ => Err(internal_err!("Catalog is in a corrupt state")),
+  }
+}
+
 // Initialise catalog and system relations.
-// This method must only be called once during the database setup.
+// Does not check whether the catalog already exists — call catalog_exists first if needed.
 pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
   create_set(&txn, SYSTEM_SCHEMAS)?;
   create_set(&txn, SYSTEM_RELATIONS)?;
@@ -707,6 +717,24 @@ pub mod tests {
       assert_eq!(relation.relation_id(), 2);
       assert_eq!(relation.schema_id(), 0);
       assert_eq!(relation.relation_name(), "RELATIONS");
+    });
+
+    // catalog_exists returns true after initialisation.
+    dbc.with_txn(true, |txn| {
+      assert_eq!(catalog_exists(&txn).unwrap(), true);
+    });
+
+    // init_catalog on an already-initialised catalog is an error.
+    dbc.with_txn(true, |txn| {
+      assert!(init_catalog(&txn).is_err());
+    });
+  }
+
+  #[test]
+  fn test_catalog_exists_empty() {
+    let mut dbc = db::open(None).try_build().unwrap();
+    dbc.with_txn(true, |txn| {
+      assert_eq!(catalog_exists(&txn).unwrap(), false);
     });
   }
 

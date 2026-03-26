@@ -87,7 +87,9 @@ impl Database {
   pub fn open(path: Option<&str>) -> Res<Self> {
     let mut db = db::open(path).try_build()?;
     db.with_txn(true, |txn| {
-      catalog::init_catalog(&txn).unwrap();
+      if !catalog::catalog_exists(&txn).unwrap() {
+        catalog::init_catalog(&txn).unwrap();
+      }
       catalog::create_schema(&txn, "default", true).unwrap();
     });
     Ok(Self { db })
