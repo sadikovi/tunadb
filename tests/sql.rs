@@ -17,13 +17,16 @@ fn query(db: &mut Database, sql: &str) -> Vec<Row> {
   }).unwrap()
 }
 
-// Executes a single SQL statement and asserts that it returns an error.
-fn query_err(db: &mut Database, sql: &str) {
+// Executes a single SQL statement and asserts that it returns an error
+// containing the expected substring.
+fn query_err(db: &mut Database, sql: &str, expected: &str) {
   let result = db.with_transaction(|txn| {
     let result = txn.execute(sql)?;
     Ok(result.rows.map(|r| r.unwrap()).collect::<Vec<_>>())
   });
-  assert!(result.is_err(), "expected error for: {}", sql);
+  let err = result.expect_err(&format!("expected error for: {}", sql));
+  let msg = err.to_string();
+  assert!(msg.contains(expected), "error message {:?} does not contain {:?}", msg, expected);
 }
 
 // Executes multiple SQL statements in the same transaction and returns
@@ -327,7 +330,7 @@ fn test_create_schema() {
 fn test_create_schema_duplicate_error() {
   let mut db = setup();
   query(&mut db, "CREATE SCHEMA s");
-  query_err(&mut db, "CREATE SCHEMA s");
+  query_err(&mut db, "CREATE SCHEMA s", "already exists");
 }
 
 #[test]
@@ -362,14 +365,14 @@ fn test_drop_schema_cascade_drops_tables() {
 #[test]
 fn test_drop_schema_not_exists_error() {
   let mut db = setup();
-  query_err(&mut db, "DROP SCHEMA nonexistent");
+  query_err(&mut db, "DROP SCHEMA nonexistent", "does not exist");
 }
 
 #[test]
 fn test_create_table_duplicate_error() {
   let mut db = setup();
   query(&mut db, "CREATE TABLE t (a INT)");
-  query_err(&mut db, "CREATE TABLE t (a INT)");
+  query_err(&mut db, "CREATE TABLE t (a INT)", "already exists");
 }
 
 #[test]
@@ -391,7 +394,7 @@ fn test_drop_table() {
 #[test]
 fn test_drop_table_not_exists_error() {
   let mut db = setup();
-  query_err(&mut db, "DROP TABLE nonexistent");
+  query_err(&mut db, "DROP TABLE nonexistent", "does not exist");
 }
 
 #[test]
@@ -467,4 +470,49 @@ fn test_information_schema_columns() {
     &[Val::Text("a"), Val::Text("INT"),  Val::Text("YES")],
     &[Val::Text("b"), Val::Text("TEXT"), Val::Text("NO")],
   ]);
+}
+
+#[test]
+fn test_insert_not_null_violation_error() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT NOT NULL, b TEXT)");
+  query_err(&mut db, "INSERT INTO t VALUES (NULL, 'hello')", "NOT NULL constraint");
+}
+
+#[test]
+fn test_insert_not_null_violation_explicit_columns_error() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT NOT NULL, b TEXT)");
+  query_err(&mut db, "INSERT INTO t (a) VALUES (NULL)", "NOT NULL constraint");
+}
+
+#[test]
+fn test_insert_nullable_column_allows_null() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT NOT NULL, b TEXT)",
+    "INSERT INTO t VALUES (1, NULL)",
+  ]);
+  let rows = query(&mut db, "SELECT a, b FROM t");
+  assert_rows(&rows, &[&[Val::Int(1), Val::Null]]);
+}
+
+#[test]
+fn test_insert_not_null_omitted_column_allows_null() {
+  // Omitting a nullable column from the explicit list inserts NULL — allowed.
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT NOT NULL, b TEXT)",
+    "INSERT INTO t (a) VALUES (42)",
+  ]);
+  let rows = query(&mut db, "SELECT a, b FROM t");
+  assert_rows(&rows, &[&[Val::Int(42), Val::Null]]);
+}
+
+#[test]
+fn test_insert_not_null_omitted_column_error() {
+  // Omitting a NOT NULL column from the explicit list should fail.
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT, b TEXT NOT NULL)");
+  query_err(&mut db, "INSERT INTO t (a) VALUES (1)", "NOT NULL constraint");
 }

@@ -706,13 +706,18 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
       };
       let table_fields = table_info.relation_fields();
       let num_table_fields = table_fields.get().len();
+      // Map each table column position to its source index, or None if omitted.
+      let mut src_map = vec![None::<usize>; num_table_fields];
+      for (i, &pos) in col_positions.iter().enumerate() {
+        src_map[pos] = Some(i);
+      }
 
       while let Some(result) = child_iter.next() {
         let src = result?;
         let mut dst = Row::new(num_table_fields);
-        for (i, &pos) in col_positions.iter().enumerate() {
-          if !src.is_null(i) {
-            match table_fields.get()[pos].data_type() {
+        for (pos, field) in table_fields.get().iter().enumerate() {
+          match src_map[pos] {
+            Some(i) if !src.is_null(i) => match field.data_type() {
               Type::BOOL => dst.set_bool(pos, src.get_bool(i)),
               Type::INT => dst.set_i32(pos, src.get_i32(i)),
               Type::BIGINT => dst.set_i64(pos, src.get_i64(i)),
@@ -721,7 +726,11 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
               Type::TEXT => dst.set_str(pos, src.get_str(i)),
               Type::NULL => {},
               Type::STRUCT(_) => unreachable!("InsertInto: STRUCT fields are not supported"),
-            }
+            },
+            _ if !field.nullable() => return Err(Error::SQLExecutionError(
+              format!("NULL value in column '{}' violates NOT NULL constraint", field.name())
+            )),
+            _ => {},
           }
         }
         let key = u64_u8!(next_object_id(txn));
