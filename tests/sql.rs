@@ -467,11 +467,35 @@ fn test_describe_table_schema_qualified() {
 }
 
 #[test]
-fn test_describe_table_not_found_returns_empty() {
-  // Describing a non-existent table returns no rows (filtered out by WHERE).
+fn test_describe_table_not_found_error() {
   let mut db = setup();
-  let rows = query(&mut db, "DESCRIBE nonexistent");
-  assert_rows(&rows, &[]);
+  query_err(&mut db, "DESCRIBE nonexistent", "does not exist");
+}
+
+#[test]
+fn test_describe_table_schema_not_found_error() {
+  let mut db = setup();
+  query_err(&mut db, "DESCRIBE nonexistent.t", "does not exist");
+}
+
+#[test]
+fn test_show_tables_in_schema() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE SCHEMA s",
+    "CREATE TABLE s.t1 (a INT)",
+    "CREATE TABLE t2 (b TEXT)",
+  ]);
+  let rows = query(&mut db, "SHOW TABLES IN s");
+  let names: Vec<&str> = rows.iter().map(|r| r.get_str(1)).collect();
+  assert!(names.contains(&"t1"));
+  assert!(!names.contains(&"t2"));
+}
+
+#[test]
+fn test_show_tables_in_schema_not_found_error() {
+  let mut db = setup();
+  query_err(&mut db, "SHOW TABLES IN nonexistent", "does not exist");
 }
 
 #[test]

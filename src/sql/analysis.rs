@@ -361,7 +361,7 @@ fn resolve_expression_type(expr: &Expression) -> Res<Expression> {
 }
 
 enum AnalysisRule<'a> {
-  ExpandCommands(&'a Session),
+  ExpandCommands(&'a Session, &'a TransactionRef),
   ResolveNodes(&'a Session, &'a TransactionRef),
   ResolveTypes,
 }
@@ -369,8 +369,8 @@ enum AnalysisRule<'a> {
 impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
   fn apply(&self, plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
     match self {
-      AnalysisRule::ExpandCommands(session) => {
-        analysis_expand_commands(session, plan)
+      AnalysisRule::ExpandCommands(session, txn) => {
+        analysis_expand_unresolved(session, txn, plan)
       },
       AnalysisRule::ResolveNodes(ref session, ref txn) => {
         analysis_resolve_nodes(session, txn, plan)
@@ -382,7 +382,14 @@ impl<'a> trees::Rule<LogicalPlan> for AnalysisRule<'a> {
   }
 }
 
-fn analysis_expand_commands(session: &Session, plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
+// Expands high-level command nodes (SHOW TABLES, DESCRIBE, etc.) into sub-trees of lower-level
+// unresolved nodes that are processed by subsequent analysis rules. Also validates catalog
+// existence (schema, table) eagerly so that commands fail fast with a clear error.
+fn analysis_expand_unresolved(
+  session: &Session,
+  txn: &TransactionRef,
+  plan: &LogicalPlan
+) -> Res<Option<LogicalPlan>> {
   let info_schema = Some(Rc::new(catalog::INFORMATION_SCHEMA.to_string()));
   let star = Rc::new(vec![Expression::Star(Rc::new(Vec::new()))]);
 
@@ -395,7 +402,13 @@ fn analysis_expand_commands(session: &Session, plan: &LogicalPlan) -> Res<Option
       ));
       Ok(Some(LogicalPlan::UnresolvedProject(star, scan)))
     },
-    LogicalPlan::UnresolvedShowTables => {
+    LogicalPlan::UnresolvedShowTables(ref schema_name) => {
+      if let Some(ref name) = schema_name {
+        if let Err(Error::SchemaDoesNotExist(s)) = catalog::get_schema(txn, name) {
+          return Err(Error::SQLAnalysisError(format!("Schema {} does not exist", s)));
+        }
+      }
+      let schema_str = current_schema(session, schema_name);
       let scan = Rc::new(LogicalPlan::UnresolvedTableScan(
         info_schema,
         Rc::new(catalog::INFORMATION_SCHEMA_RELATIONS.to_string()),
@@ -406,13 +419,24 @@ fn analysis_expand_commands(session: &Session, plan: &LogicalPlan) -> Res<Option
           Rc::new(Vec::new()),
           Rc::new(catalog::INFORMATION_SCHEMA_RELATIONS_RELATION_SCHEMA.to_string()),
         )),
-        Rc::new(Expression::LiteralString(Rc::new(session.current_schema().to_string()))),
+        Rc::new(Expression::LiteralString(Rc::new(schema_str.to_string()))),
       ));
       let filter = Rc::new(LogicalPlan::UnresolvedFilter(filter_expr, scan));
       Ok(Some(LogicalPlan::UnresolvedProject(star, filter)))
     },
     LogicalPlan::UnresolvedDescribe(ref schema_name, ref table_name) => {
-      let schema = Rc::new(current_schema(session, schema_name).to_string());
+      let schema_str = current_schema(session, schema_name);
+      match catalog::get_relation(txn, schema_str, table_name) {
+        Ok(_) => {},
+        Err(Error::SchemaDoesNotExist(s)) => {
+          return Err(Error::SQLAnalysisError(format!("Schema {} does not exist", s)));
+        },
+        Err(Error::RelationDoesNotExist(s, t)) => {
+          return Err(Error::SQLAnalysisError(format!("Table {}.{} does not exist", s, t)));
+        },
+        Err(err) => return Err(err),
+      }
+      let schema = Rc::new(schema_str.to_string());
       let scan = Rc::new(LogicalPlan::UnresolvedTableScan(
         info_schema,
         Rc::new(catalog::INFORMATION_SCHEMA_COLUMNS.to_string()),
@@ -769,7 +793,7 @@ fn analysis_resolve_types(plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
 // If it is not possible, returns an error.
 pub fn analyse(session: &Session, txn: &TransactionRef, plan: LogicalPlan) -> Res<LogicalPlan> {
   let rules = vec![
-    AnalysisRule::ExpandCommands(session),
+    AnalysisRule::ExpandCommands(session, txn),
     AnalysisRule::ResolveNodes(session, txn),
     AnalysisRule::ResolveTypes,
   ];
@@ -1342,14 +1366,17 @@ mod tests {
     assert!(matches!(result, Ok(LogicalPlan::Limit(10, _))));
   }
 
-  //==========================
-  // analysis_expand_commands
-  //==========================
+  //============================
+  // analysis_expand_unresolved
+  //============================
 
   #[test]
   fn test_expand_commands_show_schemas() {
     let session = Session::builder().build();
-    let result = analysis_expand_commands(&session, &LogicalPlan::UnresolvedShowSchemas).unwrap();
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analysis_expand_unresolved(&session, &txn, &LogicalPlan::UnresolvedShowSchemas)
+    }).unwrap();
     match result {
       Some(LogicalPlan::UnresolvedProject(exprs, scan)) => {
         assert!(matches!(exprs[0], Expression::Star(_)));
@@ -1368,7 +1395,10 @@ mod tests {
   #[test]
   fn test_expand_commands_show_tables() {
     let session = Session::builder().build();
-    let result = analysis_expand_commands(&session, &LogicalPlan::UnresolvedShowTables).unwrap();
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analysis_expand_unresolved(&session, &txn, &LogicalPlan::UnresolvedShowTables(None))
+    }).unwrap();
     match result {
       Some(LogicalPlan::UnresolvedProject(exprs, filter)) => {
         assert!(matches!(exprs[0], Expression::Star(_)));
@@ -1414,8 +1444,11 @@ mod tests {
   #[test]
   fn test_expand_commands_other_unchanged() {
     let session = Session::builder().build();
+    let mut dbc = init_db();
     // Non-SHOW plan nodes return None (no expansion).
-    let result = analysis_expand_commands(&session, &empty()).unwrap();
+    let result = dbc.with_txn(false, |txn| {
+      analysis_expand_unresolved(&session, &txn, &empty())
+    }).unwrap();
     assert!(result.is_none());
   }
 
@@ -1440,7 +1473,7 @@ mod tests {
     // Full analyse() of UnresolvedShowTables resolves to Project(Filter(TableScan)).
     let mut dbc = init_db();
     let result = dbc.with_txn(false, |txn| {
-      analyse(&Session::builder().build(), &txn, LogicalPlan::UnresolvedShowTables)
+      analyse(&Session::builder().build(), &txn, LogicalPlan::UnresolvedShowTables(None))
     });
     assert!(matches!(result, Ok(LogicalPlan::Project(_, _))));
     match result.unwrap() {
@@ -1454,5 +1487,142 @@ mod tests {
       },
       _ => unreachable!(),
     }
+  }
+
+  #[test]
+  fn test_expand_commands_show_tables_with_schema() {
+    let session = Session::builder().build();
+    let mut dbc = init_db();
+    let schema_name = Some(Rc::new("default".to_string()));
+    let result = dbc.with_txn(false, |txn| {
+      analysis_expand_unresolved(
+        &session,
+        &txn,
+        &LogicalPlan::UnresolvedShowTables(schema_name.clone())
+      )
+    }).unwrap();
+    match result {
+      Some(LogicalPlan::UnresolvedProject(_, filter)) => {
+        match filter.as_ref() {
+          LogicalPlan::UnresolvedFilter(filter_expr, _) => {
+            // Filter uses the explicitly provided schema name, not the session default.
+            assert!(
+              matches!(
+                filter_expr.as_ref(),
+                Expression::Equals(_, right) if matches!(
+                  right.as_ref(),
+                  Expression::LiteralString(s) if s.as_str() == "default"
+                )
+              )
+            );
+          },
+          other => panic!("expected UnresolvedFilter, got {:?}", other),
+        }
+      },
+      other => panic!("expected UnresolvedProject, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_analyse_show_tables_with_schema() {
+    // SHOW TABLES IN <existing schema> resolves to Project(Filter(TableScan)).
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        LogicalPlan::UnresolvedShowTables(Some(Rc::new("default".to_string()))),
+      )
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Project(_, _))));
+    match result.unwrap() {
+      LogicalPlan::Project(_, child) => {
+        match child.as_ref() {
+          LogicalPlan::Filter(_, scan) => {
+            assert!(matches!(scan.as_ref(), LogicalPlan::TableScan(_, _, _)))
+          },
+          other => panic!("expected Filter, got {:?}", other),
+        }
+      },
+      _ => unreachable!(),
+    }
+  }
+
+  #[test]
+  fn test_analyse_show_tables_nonexistent_schema() {
+    // SHOW TABLES IN <nonexistent schema> returns a SQLAnalysisError.
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        LogicalPlan::UnresolvedShowTables(Some(Rc::new("nonexistent".to_string()))),
+      )
+    });
+    assert!(
+      matches!(&result, Err(Error::SQLAnalysisError(msg)) if msg.contains("nonexistent")),
+      "expected SQLAnalysisError mentioning schema name, got {:?}",
+      result,
+    );
+  }
+
+  #[test]
+  fn test_analyse_describe_existing_table() {
+    // DESCRIBE <existing table> resolves to Project(Filter(TableScan)).
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        LogicalPlan::UnresolvedDescribe(None, Rc::new("t".to_string())),
+      )
+    });
+    assert!(matches!(result, Ok(LogicalPlan::Project(_, _))));
+    match result.unwrap() {
+      LogicalPlan::Project(_, child) => {
+        assert!(matches!(child.as_ref(), LogicalPlan::Filter(_, _)))
+      },
+      _ => unreachable!(),
+    }
+  }
+
+  #[test]
+  fn test_analyse_describe_nonexistent_table() {
+    // DESCRIBE <nonexistent table> returns a SQLAnalysisError.
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        LogicalPlan::UnresolvedDescribe(None, Rc::new("nonexistent".to_string())),
+      )
+    });
+    assert!(
+      matches!(&result, Err(Error::SQLAnalysisError(msg)) if msg.contains("nonexistent")),
+      "expected SQLAnalysisError mentioning table name, got {:?}",
+      result,
+    );
+  }
+
+  #[test]
+  fn test_analyse_describe_nonexistent_schema() {
+    // DESCRIBE <nonexistent schema>.<table> returns a SQLAnalysisError.
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        LogicalPlan::UnresolvedDescribe(
+          Some(Rc::new("badschema".to_string())),
+          Rc::new("t".to_string()),
+        ),
+      )
+    });
+    assert!(
+      matches!(&result, Err(Error::SQLAnalysisError(msg)) if msg.contains("badschema")),
+      "expected SQLAnalysisError mentioning schema name, got {:?}",
+      result,
+    );
   }
 }

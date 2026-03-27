@@ -696,6 +696,17 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn show_tables_statement(&mut self) -> Res<LogicalPlan> {
+    let schema_name = if self.matches(TokenType::IN)? {
+      let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
+      Some(Rc::new(str_to_norm_identifier(token.value(&self.sql))))
+    } else {
+      None
+    };
+    Ok(LogicalPlan::UnresolvedShowTables(schema_name))
+  }
+
+  #[inline]
   fn statement(&mut self) -> Res<LogicalPlan> {
     // Each statement can have an optional `;` at the end.
     // We need to capture errors when there are extra tokens at the end of the statement.
@@ -728,7 +739,7 @@ impl<'a> Parser<'a> {
       if self.matches(TokenType::SCHEMAS)? {
         stmt = Some(LogicalPlan::UnresolvedShowSchemas);
       } else if self.matches(TokenType::TABLES)? {
-        stmt = Some(LogicalPlan::UnresolvedShowTables);
+        stmt = Some(self.show_tables_statement()?);
       }
     }
 
@@ -1751,8 +1762,16 @@ pub mod tests {
 
   #[test]
   fn test_parser_show_tables() {
-    assert_plan("show tables", LogicalPlan::UnresolvedShowTables);
-    assert_plan("SHOW TABLES", LogicalPlan::UnresolvedShowTables);
+    assert_plan("show tables", LogicalPlan::UnresolvedShowTables(None));
+    assert_plan("SHOW TABLES", LogicalPlan::UnresolvedShowTables(None));
+    assert_plan(
+      "SHOW TABLES IN myschema",
+      LogicalPlan::UnresolvedShowTables(Some(Rc::new("myschema".to_string()))),
+    );
+    assert_plan(
+      "show tables in MySchema",
+      LogicalPlan::UnresolvedShowTables(Some(Rc::new("myschema".to_string()))),
+    );
   }
 
   #[test]
