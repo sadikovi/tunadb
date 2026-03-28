@@ -94,7 +94,19 @@ pub struct RelationInfo {
   relation_id: u64, // globally unique id
   relation_name: String, // unique within the schema
   relation_type: RelationType,
-  relation_fields: Fields,
+  relation_fields: Fields, // user-defined columns, serialised to disk
+  internal_fields: Fields, // engine-generated pseudo-columns, computed at construction time
+}
+
+// Computes the internal pseudo-columns for the given relation type.
+// For TABLE relations this is [_rowid_]; for SYSTEM_VIEW there are none.
+pub fn build_internal_fields(relation_type: RelationType) -> Fields {
+  match relation_type {
+    RelationType::TABLE => Fields::new(vec![
+      Field::new_internal(INTERNAL_ROWID_COLUMN_NAME.to_string(), Type::BIGINT, false),
+    ]),
+    RelationType::SYSTEM_VIEW => Fields::new(Vec::new()),
+  }
 }
 
 impl RelationInfo {
@@ -106,7 +118,8 @@ impl RelationInfo {
     relation_type: RelationType,
     relation_fields: Fields,
   ) -> Self {
-    Self { schema_id, relation_id, relation_name, relation_type, relation_fields }
+    let internal_fields = build_internal_fields(relation_type);
+    Self { schema_id, relation_id, relation_name, relation_type, relation_fields, internal_fields }
   }
 
   // Returns globally unique id for the schema.
@@ -133,10 +146,34 @@ impl RelationInfo {
     self.relation_type
   }
 
-  // Returns the relation fields/schema.
+  // Returns the user-defined relation fields/schema.
   #[inline]
   pub fn relation_fields(&self) -> &Fields {
     &self.relation_fields
+  }
+
+  // Returns engine-generated internal pseudo-columns (e.g. _rowid_ for TABLE relations).
+  #[inline]
+  pub fn internal_fields(&self) -> &Fields {
+    &self.internal_fields
+  }
+
+  // Returns the field at the given index across user fields followed by internal fields.
+  // Panics if idx is out of range.
+  #[inline]
+  pub fn field_at(&self, idx: usize) -> &Field {
+    let n = self.relation_fields.len();
+    if idx < n {
+      &self.relation_fields.get()[idx]
+    } else {
+      &self.internal_fields.get()[idx - n]
+    }
+  }
+
+  // Returns the total number of fields: user fields + internal fields.
+  #[inline]
+  pub fn num_fields(&self) -> usize {
+    self.relation_fields.len() + self.internal_fields.len()
   }
 
   // Returns relation name consuming RelationInfo.
@@ -161,7 +198,8 @@ impl SerDe for RelationInfo {
     let relation_name = reader.read_str().to_string();
     let relation_type = RelationType::deserialise(reader);
     let relation_fields = Fields::deserialise(reader);
-    Self { schema_id, relation_id, relation_name, relation_type, relation_fields }
+    let internal_fields = build_internal_fields(relation_type);
+    Self { schema_id, relation_id, relation_name, relation_type, relation_fields, internal_fields }
   }
 }
 
@@ -210,6 +248,11 @@ pub const INFORMATION_SCHEMA_COLUMNS_TABLE_NAME: &str = "table_name";
 pub const INFORMATION_SCHEMA_COLUMNS_COLUMN_NAME: &str = "column_name";
 pub const INFORMATION_SCHEMA_COLUMNS_DATA_TYPE: &str = "data_type";
 pub const INFORMATION_SCHEMA_COLUMNS_IS_NULLABLE: &str = "is_nullable";
+pub const INFORMATION_SCHEMA_COLUMNS_IS_INTERNAL: &str = "is_internal";
+
+// Name of the internal pseudo-column that exposes the B+tree row key for user tables.
+// This name is reserved and cannot be used as a user column name in CREATE TABLE.
+pub const INTERNAL_ROWID_COLUMN_NAME: &str = "_rowid_";
 
 // Returns true if the catalog is already initialised, false if it is not.
 // Errors if the catalog is in a partially initialised (corrupt) state.
@@ -270,6 +313,7 @@ pub fn init_catalog(txn: &TransactionRef) -> Res<()> {
         Field::new(INFORMATION_SCHEMA_COLUMNS_COLUMN_NAME.to_string(), Type::TEXT, false),
         Field::new(INFORMATION_SCHEMA_COLUMNS_DATA_TYPE.to_string(), Type::TEXT, false),
         Field::new(INFORMATION_SCHEMA_COLUMNS_IS_NULLABLE.to_string(), Type::TEXT, false),
+        Field::new(INFORMATION_SCHEMA_COLUMNS_IS_INTERNAL.to_string(), Type::TEXT, false),
       ]
     ),
     false
@@ -515,13 +559,13 @@ fn create_relation_internal(
       Ok(()) // the relation already exists
     }
   } else {
-    let relation = RelationInfo {
-      schema_id: schema.schema_id,
-      relation_id: next_object_id(&txn),
-      relation_name: relation_name.to_string(),
-      relation_type: relation_type,
-      relation_fields: relation_fields,
-    };
+    let relation = RelationInfo::new(
+      schema.schema_id,
+      next_object_id(&txn),
+      relation_name.to_string(),
+      relation_type,
+      relation_fields,
+    );
     // Serialise to store in the set. Pre-allocate 256 bytes to avoid Vec reallocations
     // during serialisation — relation rows include variable-length fields but 256 bytes
     // covers all realistic cases in a single allocation.
@@ -689,28 +733,26 @@ pub mod tests {
       RelationInfo::deserialise(&mut reader)
     }
 
-    let relation = RelationInfo {
-      schema_id: 0,
-      relation_id: 0,
-      relation_name: String::from(""),
-      relation_type: RelationType::SYSTEM_VIEW,
-      relation_fields: empty_fields(),
-    };
+    let relation = RelationInfo::new(
+      0,
+      0,
+      String::from(""),
+      RelationType::SYSTEM_VIEW,
+      empty_fields()
+    );
     assert_eq!(serde(&relation), relation);
 
-    let relation = RelationInfo {
-      schema_id: 123,
-      relation_id: 234,
-      relation_name: String::from("TEST"),
-      relation_type: RelationType::TABLE,
-      relation_fields: Fields::new(
-        vec![
-          Field::new("c1".to_string(), Type::INT, false),
-          Field::new("c2".to_string(), Type::TEXT, false),
-          Field::new("c3".to_string(), Type::STRUCT(empty_fields()), true),
-        ]
-      ),
-    };
+    let relation = RelationInfo::new(
+      123,
+      234,
+      String::from("TEST"),
+      RelationType::TABLE,
+      Fields::new(vec![
+        Field::new("c1".to_string(), Type::INT, false),
+        Field::new("c2".to_string(), Type::TEXT, false),
+        Field::new("c3".to_string(), Type::STRUCT(empty_fields()), true),
+      ])
+    );
     assert_eq!(serde(&relation), relation);
   }
 

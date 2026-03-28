@@ -241,9 +241,7 @@ impl Expression {
       Expression::And(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Cast(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Concat(_, _) => DEFAULT_EXPRESSION_NAME,
-      Expression::ColumnRef(_, ref table_info, _, ref idx) => {
-        table_info.relation_fields().get()[*idx].name()
-      },
+      Expression::ColumnRef(_, ref table_info, _, ref idx) => table_info.field_at(*idx).name(),
       Expression::Divide(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Equals(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::GreaterThan(_, _) => DEFAULT_EXPRESSION_NAME,
@@ -282,7 +280,7 @@ impl Expression {
       Expression::Cast(_, ref tpe) => Ok(tpe.as_ref().clone()),
       Expression::Concat(_, _) => Ok(Type::TEXT),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
-        Ok(table_info.relation_fields().get()[*idx].data_type().clone())
+        Ok(table_info.field_at(*idx).data_type().clone())
       },
       Expression::Divide(ref left, ref right) => {
         promote_arithmetic_type(&left.data_type()?, &right.data_type()?)
@@ -344,7 +342,7 @@ impl Expression {
       Expression::Cast(ref expr, _) => expr.nullable(),
       Expression::Concat(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
-        Ok(table_info.relation_fields().get()[*idx].nullable())
+        Ok(table_info.field_at(*idx).nullable())
       },
       Expression::Divide(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Equals(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
@@ -411,8 +409,8 @@ impl TreeNode<Expression> for Expression {
       },
       Expression::Concat(ref left, ref right) => display_binary!(f, left, "||", right),
       Expression::ColumnRef(_, ref table_info, _, ref index) => {
-        let name = table_info.relation_fields().get()[*index].name();
-        let tpe = table_info.relation_fields().get()[*index].data_type();
+        let name = table_info.field_at(*index).name();
+        let tpe = table_info.field_at(*index).data_type();
         write!(f, "{}:{}:{}", name, index, tpe)
       },
       Expression::Divide(ref left, ref right) => display_binary!(f, left, "/", right),
@@ -701,9 +699,9 @@ impl LogicalPlan {
             ]
           )
         );
-        let fields = table_info.relation_fields().get();
+        let num_fields = table_info.num_fields();
         let mut expressions = Vec::new();
-        for idx in 0..fields.len() {
+        for idx in 0..num_fields {
           expressions.push(
             (
               ctx.clone(),

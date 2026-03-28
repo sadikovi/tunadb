@@ -332,6 +332,14 @@ fn resolve_expression(
   trees::transform_up(expr, &ExpressionRule::ResolveIdentifiers(input))
 }
 
+// Returns true if the expression is a ColumnRef pointing to an internal pseudo-column.
+fn is_internal_column_ref(expr: &Expression) -> bool {
+  match expr {
+    Expression::ColumnRef(_, ref table_info, _, ref idx) => table_info.field_at(*idx).internal(),
+    _ => false,
+  }
+}
+
 // Resolves single expression into one or more expressions provided the input.
 // Expressions like `Star` could result in more than one expression.
 fn resolve_expressions(
@@ -345,7 +353,11 @@ fn resolve_expressions(
       Expression::Star(ref parts) => {
         for (ctx, input_expr) in input {
           if ctx.matches_suffix(parts) {
-            resolved_expressions.push(input_expr.clone());
+            // Internal pseudo-columns (e.g. _rowid_) are excluded from star expansion.
+            // They can still be selected explicitly by name.
+            if !is_internal_column_ref(input_expr) {
+              resolved_expressions.push(input_expr.clone());
+            }
           }
         }
       },
@@ -498,6 +510,15 @@ fn analysis_resolve_nodes(
           Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(ref schema_name, ref table_name)) => {
+          // Reject reserved internal pseudo-column names.
+          let reserved = catalog::build_internal_fields(catalog::RelationType::TABLE);
+          for field in fields.get() {
+            if reserved.get_field(field.name()).is_some() {
+              return Err(Error::SQLAnalysisError(
+                format!("Column {} is reserved and cannot be used in CREATE TABLE", field.name())
+              ));
+            }
+          }
           // Validate fields to make sure there are no duplicates.
           assert_unique_fields(fields)?;
           Ok(
@@ -563,13 +584,20 @@ fn analysis_resolve_nodes(
               if !set.insert(col) {
                 return Err(
                   Error::SQLAnalysisError(
-                    format!("Duplicate column {} in Insert", col)
+                    format!("Duplicate column {} in INSERT", col)
                   )
                 );
               }
             }
 
             for col in columns.as_slice() {
+              if table_info.internal_fields().get_field(col).is_some() {
+                return Err(
+                  Error::SQLAnalysisError(
+                    format!("Column {} is reserved and cannot be used in INSERT", col)
+                  )
+                );
+              }
               match table_info.relation_fields().get_field_pos(col) {
                 Some(pos) => col_positions.push(pos),
                 None => {
@@ -596,7 +624,7 @@ fn analysis_resolve_nodes(
             return Err(
               Error::SQLAnalysisError(
                 format!(
-                  "Input columns match for Insert, expected {} columns, found {}",
+                  "Input columns match for INSERT, expected {} columns, found {}",
                   col_positions.len(),
                   query_cols.len()
                 )
@@ -713,7 +741,7 @@ fn analysis_resolve_types(plan: &LogicalPlan) -> Res<Option<LogicalPlan>> {
           return Err(
             Error::SQLAnalysisError(
               format!(
-                "Expected {} type for expression {} but received {} in Insert",
+                "Expected {} type for expression {} but received {} in INSERT",
                 in_field_tpe,
                 out_expr_tpe,
                 trees::plan_output(&out_expr)

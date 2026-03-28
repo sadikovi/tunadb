@@ -108,17 +108,33 @@ impl fmt::Display for Type {
 }
 
 // Field of a STRUCT.
+//
+// The `internal` flag marks pseudo-columns that are generated at runtime by the engine
+// and are not stored on disk. The canonical example is `_rowid_`, which is appended to
+// every user-table scan and exposes the underlying B+tree key. Internal fields are:
+//   - excluded from `SELECT *` expansion
+//   - shown in DESCRIBE output (with is_internal = "YES")
+//   - disallowed as names in CREATE TABLE
+//
+// `internal` is serialised as part of the field. Fields stored by the engine
+// (e.g. catalog schema entries) always have internal = false.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
   name: String,
   data_type: Type,
   nullable: bool,
+  internal: bool,
 }
 
 impl Field {
-  // Creates a new Field.
+  // Creates a new non-internal field.
   pub fn new(name: String, data_type: Type, nullable: bool) -> Self {
-    Self { name, data_type, nullable }
+    Self { name, data_type, nullable, internal: false }
+  }
+
+  // Creates a new internal (engine-generated) pseudo-column field.
+  pub fn new_internal(name: String, data_type: Type, nullable: bool) -> Self {
+    Self { name, data_type, nullable, internal: true }
   }
 
   // Returns name of the field.
@@ -138,6 +154,12 @@ impl Field {
   pub fn nullable(&self) -> bool {
     self.nullable
   }
+
+  // Returns true if this is an engine-generated internal pseudo-column.
+  #[inline]
+  pub fn internal(&self) -> bool {
+    self.internal
+  }
 }
 
 impl SerDe for Field {
@@ -146,6 +168,7 @@ impl SerDe for Field {
     writer.write_str(&self.name);
     self.data_type.serialise(writer);
     writer.write_bool(self.nullable);
+    writer.write_bool(self.internal);
   }
 
   fn deserialise(reader: &mut Reader) -> Self {
@@ -158,7 +181,8 @@ impl SerDe for Field {
     let name = reader.read_str().to_string();
     let data_type = Type::deserialise(reader);
     let nullable = reader.read_bool();
-    Self { name, data_type, nullable }
+    let internal = reader.read_bool();
+    Self { name, data_type, nullable, internal }
   }
 }
 
