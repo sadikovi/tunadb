@@ -589,6 +589,7 @@ pub enum LogicalPlan {
     Rc<String> /* table name */,
     Rc<Fields> /* table schema */,
   ),
+  DeleteFrom(Rc<LogicalPlan> /* child */),
   DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
   DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
   Explain(
@@ -618,6 +619,7 @@ pub enum LogicalPlan {
     Rc<String> /* table name */,
     Rc<Fields> /* table schema/fields */,
   ),
+  UnresolvedDeleteFrom(Rc<LogicalPlan> /* child */),
   UnresolvedDropSchema(Rc<String> /* schema name */, bool /* cascade */),
   UnresolvedDropTable(Option<Rc<String>> /* optional schema name */, Rc<String> /* table name */),
   UnresolvedExplain(
@@ -656,6 +658,7 @@ impl LogicalPlan {
     match self {
       LogicalPlan::CreateSchema(_) => Ok(Vec::new()),
       LogicalPlan::CreateTable(_, _, _) => Ok(Vec::new()),
+      LogicalPlan::DeleteFrom(_) => Ok(Vec::new()),
       LogicalPlan::DropSchema(_, _) => Ok(Vec::new()),
       LogicalPlan::DropTable(_, _) => Ok(Vec::new()),
       LogicalPlan::Explain(_, _, _) => Ok(Vec::new()),
@@ -717,6 +720,9 @@ impl LogicalPlan {
       LogicalPlan::UnresolvedCreateTable(_, _, _) => {
         Err(Error::SQLAnalysisError("UnresolvedCreateTable".to_string()))
       },
+      LogicalPlan::UnresolvedDeleteFrom(_) => {
+        Err(Error::SQLAnalysisError("UnresolvedDeleteFrom".to_string()))
+      },
       LogicalPlan::UnresolvedDropSchema(_, _) => {
         Err(Error::SQLAnalysisError("UnresolvedDropSchema".to_string()))
       },
@@ -768,6 +774,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
         write!(f, "CreateTable({}.{}, {})", schema_name, table_name, fields)
       },
+      LogicalPlan::DeleteFrom(_) => write!(f, "DeleteFrom"),
       LogicalPlan::DropSchema(ref schema_info, cascade) => {
         write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
       },
@@ -808,6 +815,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       },
       LogicalPlan::UnresolvedCreateSchema(_) => write!(f, "UnresolvedCreateSchema"),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => write!(f, "UnresolvedCreateTable"),
+      LogicalPlan::UnresolvedDeleteFrom(_) => write!(f, "UnresolvedDeleteFrom"),
       LogicalPlan::UnresolvedDropSchema(_, _) => write!(f, "UnresolvedDropSchema"),
       LogicalPlan::UnresolvedDropTable(_, _) => write!(f, "UnresolvedDropTable"),
       LogicalPlan::UnresolvedExplain(_, _, _) => write!(f, "UnresolvedExplain"),
@@ -834,6 +842,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
     match self {
       LogicalPlan::CreateSchema(_) => Vec::new(),
       LogicalPlan::CreateTable(_, _, _) => Vec::new(),
+      LogicalPlan::DeleteFrom(ref child) => vec![child],
       LogicalPlan::DropSchema(_, _) => Vec::new(),
       LogicalPlan::DropTable(_, _) => Vec::new(),
       LogicalPlan::Explain(_, _, ref child) => vec![child],
@@ -846,6 +855,7 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::TableScan(_, _, _) => Vec::new(),
       LogicalPlan::UnresolvedCreateSchema(_) => Vec::new(),
       LogicalPlan::UnresolvedCreateTable(_, _, _) => Vec::new(),
+      LogicalPlan::UnresolvedDeleteFrom(ref child) => vec![child],
       LogicalPlan::UnresolvedDropSchema(_, _) => Vec::new(),
       LogicalPlan::UnresolvedDropTable(_, _) => Vec::new(),
       LogicalPlan::UnresolvedExplain(_, _, ref child) => vec![child],
@@ -870,6 +880,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       },
       LogicalPlan::CreateTable(ref schema_name, ref table_name, ref schema) => {
         LogicalPlan::CreateTable(schema_name.clone(), table_name.clone(), schema.clone())
+      },
+      LogicalPlan::DeleteFrom(_) => {
+        let child = get_unary!("DeleteFrom", children);
+        LogicalPlan::DeleteFrom(Rc::new(child))
       },
       LogicalPlan::DropSchema(ref schema_info, cascade) => {
         LogicalPlan::DropSchema(schema_info.clone(), *cascade)
@@ -918,6 +932,10 @@ impl TreeNode<LogicalPlan> for LogicalPlan {
       LogicalPlan::UnresolvedCreateTable(ref schema_name, ref table_name, ref fields) => {
         LogicalPlan::UnresolvedCreateTable(schema_name.clone(), table_name.clone(), fields.clone())
       },
+      LogicalPlan::UnresolvedDeleteFrom(_) => {
+        let child = get_unary!("UnresolvedDeleteFrom", children);
+        LogicalPlan::UnresolvedDeleteFrom(Rc::new(child))
+      }
       LogicalPlan::UnresolvedDropSchema(ref schema_name, cascade) => {
         LogicalPlan::UnresolvedDropSchema(schema_name.clone(), *cascade)
       },
@@ -982,6 +1000,7 @@ pub enum PhysicalPlan {
     Rc<String> /* table name */,
     Rc<Fields> /* table schema */,
   ),
+  DeleteFrom(Rc<PhysicalPlan> /* child */),
   DropSchema(Rc<SchemaInfo> /* schema info */, bool /* cascade */),
   DropTable(Rc<SchemaInfo> /* schema info */, Rc<RelationInfo> /* table info */),
   Explain(
@@ -1007,9 +1026,12 @@ impl PhysicalPlan {
   // Returns the output schema of rows produced by this plan node.
   pub fn schema(&self) -> Res<Fields> {
     match self {
-      PhysicalPlan::CreateSchema(_) |
-      PhysicalPlan::CreateTable(_, _, _) |
-      PhysicalPlan::DropSchema(_, _) |
+      PhysicalPlan::CreateSchema(_) => Ok(Fields::new(Vec::new())),
+      PhysicalPlan::CreateTable(_, _, _) => Ok(Fields::new(Vec::new())),
+      PhysicalPlan::DeleteFrom(_) => Ok(Fields::new(vec![
+        Field::new("rows_affected".to_string(), Type::BIGINT, false),
+      ])),
+      PhysicalPlan::DropSchema(_, _) => Ok(Fields::new(Vec::new())),
       PhysicalPlan::DropTable(_, _) => Ok(Fields::new(Vec::new())),
       PhysicalPlan::InsertInto(_, _, _, _) => Ok(Fields::new(vec![
         Field::new("rows_affected".to_string(), Type::BIGINT, false),
@@ -1047,6 +1069,7 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
       PhysicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
         write!(f, "CreateTable({}.{}, {})", schema_name, table_name, fields)
       },
+      PhysicalPlan::DeleteFrom(_) => write!(f, "DeleteFrom"),
       PhysicalPlan::DropSchema(ref schema_info, cascade) => {
         write!(f, "DropSchema({}, {})", schema_info.schema_name(), cascade)
       },
@@ -1094,6 +1117,7 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
     match self {
       PhysicalPlan::CreateSchema(_) => Vec::new(),
       PhysicalPlan::CreateTable(_, _, _) => Vec::new(),
+      PhysicalPlan::DeleteFrom(ref child) => vec![child],
       PhysicalPlan::DropSchema(_, _) => Vec::new(),
       PhysicalPlan::DropTable(_, _) => Vec::new(),
       PhysicalPlan::Explain(_, _, _, ref child) => vec![child],
@@ -1114,6 +1138,10 @@ impl TreeNode<PhysicalPlan> for PhysicalPlan {
       },
       PhysicalPlan::CreateTable(ref schema_name, ref table_name, ref schema) => {
         PhysicalPlan::CreateTable(schema_name.clone(), table_name.clone(), schema.clone())
+      },
+      PhysicalPlan::DeleteFrom(_) => {
+        let child = get_unary!("DeleteFrom", children);
+        PhysicalPlan::DeleteFrom(Rc::new(child))
       },
       PhysicalPlan::DropSchema(ref schema_info, cascade) => {
         PhysicalPlan::DropSchema(schema_info.clone(), *cascade)
@@ -1310,6 +1338,10 @@ pub mod dsl {
       Rc::new(table.to_string()),
       Rc::new(fields)
     )
+  }
+
+  pub fn delete_from(child: LogicalPlan) -> LogicalPlan {
+    LogicalPlan::UnresolvedDeleteFrom(Rc::new(child))
   }
 
   pub fn drop_schema(schema: &str, is_cascade: bool) -> LogicalPlan {

@@ -170,6 +170,17 @@ impl RelationInfo {
     }
   }
 
+  // Returns the index of the field with the given name across user fields followed by
+  // internal fields, or None if no field with that name exists.
+  #[inline]
+  pub fn field_pos(&self, name: &str) -> Option<usize> {
+    let n = self.relation_fields.len();
+    if let Some(pos) = self.relation_fields.get_field_pos(name) {
+      return Some(pos);
+    }
+    self.internal_fields.get_field_pos(name).map(|pos| n + pos)
+  }
+
   // Returns the total number of fields: user fields + internal fields.
   #[inline]
   pub fn num_fields(&self) -> usize {
@@ -754,6 +765,55 @@ pub mod tests {
       ])
     );
     assert_eq!(serde(&relation), relation);
+  }
+
+  #[test]
+  fn test_relation_info_field_at() {
+    let relation = RelationInfo::new(
+      0, 0, String::from("t"), RelationType::TABLE,
+      Fields::new(vec![
+        Field::new("a".to_string(), Type::INT, false),
+        Field::new("b".to_string(), Type::TEXT, true),
+      ])
+    );
+    // User fields at their own indices.
+    assert_eq!(relation.field_at(0).name(), "a");
+    assert_eq!(relation.field_at(0).data_type(), &Type::INT);
+    assert_eq!(relation.field_at(1).name(), "b");
+    assert_eq!(relation.field_at(1).data_type(), &Type::TEXT);
+    // Internal field (_rowid_) follows user fields.
+    assert_eq!(relation.field_at(2).name(), INTERNAL_ROWID_COLUMN_NAME);
+    assert_eq!(relation.field_at(2).data_type(), &Type::BIGINT);
+    assert!(relation.field_at(2).internal());
+  }
+
+  #[test]
+  fn test_relation_info_field_pos() {
+    let relation = RelationInfo::new(
+      0, 0, String::from("t"), RelationType::TABLE,
+      Fields::new(vec![
+        Field::new("a".to_string(), Type::INT, false),
+        Field::new("b".to_string(), Type::TEXT, true),
+      ])
+    );
+    // User fields found at their own positions.
+    assert_eq!(relation.field_pos("a"), Some(0));
+    assert_eq!(relation.field_pos("b"), Some(1));
+    // Internal field found after user fields.
+    assert_eq!(relation.field_pos(INTERNAL_ROWID_COLUMN_NAME), Some(2));
+    // Unknown name returns None.
+    assert_eq!(relation.field_pos("z"), None);
+  }
+
+  #[test]
+  fn test_relation_info_field_pos_system_view_no_internal() {
+    // SYSTEM_VIEW has no internal fields, so only user fields are reachable.
+    let relation = RelationInfo::new(
+      0, 0, String::from("v"), RelationType::SYSTEM_VIEW,
+      Fields::new(vec![Field::new("x".to_string(), Type::INT, false)])
+    );
+    assert_eq!(relation.field_pos("x"), Some(0));
+    assert_eq!(relation.field_pos(INTERNAL_ROWID_COLUMN_NAME), None);
   }
 
   #[test]

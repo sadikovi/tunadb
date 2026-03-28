@@ -29,9 +29,20 @@ fn query_err(db: &mut Database, sql: &str, expected: &str) {
   assert!(msg.contains(expected), "error message {:?} does not contain {:?}", msg, expected);
 }
 
+// Executes multiple SQL statements in the same transaction, then rolls back.
+fn query_txn_rollback(db: &mut Database, stmts: &[&str]) {
+  db.with_transaction(|txn| {
+    for sql in stmts {
+      txn.execute(sql)?.rows.for_each(|r| { r.unwrap(); });
+    }
+    txn.rollback();
+    Ok(())
+  }).unwrap();
+}
+
 // Executes multiple SQL statements in the same transaction and returns
 // the rows from the last one.
-fn query_txn(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
+fn query_txn_commit(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
   db.with_transaction(|txn| {
     let mut rows = Vec::new();
     for (i, sql) in stmts.iter().enumerate() {
@@ -137,7 +148,7 @@ fn test_create_table() {
 #[test]
 fn test_insert_and_select() {
   let mut db = setup();
-  let mut rows = query_txn(&mut db, &[
+  let mut rows = query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT, b TEXT)",
     "INSERT INTO t VALUES (1, 'hello')",
     "INSERT INTO t VALUES (2, 'world')",
@@ -161,7 +172,7 @@ fn test_select_empty_table() {
 #[test]
 fn test_select_with_where() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1)",
     "INSERT INTO t VALUES (2)",
@@ -174,7 +185,7 @@ fn test_select_with_where() {
 #[test]
 fn test_select_with_limit() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1)",
     "INSERT INTO t VALUES (2)",
@@ -187,7 +198,7 @@ fn test_select_with_limit() {
 #[test]
 fn test_select_expression_on_column() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (3)",
   ]);
@@ -198,7 +209,7 @@ fn test_select_expression_on_column() {
 #[test]
 fn test_select_null_column() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT NULL)",
     "INSERT INTO t (a) VALUES (NULL)",
   ]);
@@ -210,7 +221,7 @@ fn test_select_null_column() {
 fn test_insert_explicit_columns() {
   // Insert with explicit column list in reverse order.
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT, b TEXT)",
     "INSERT INTO t (b, a) VALUES ('hello', 42)",
   ]);
@@ -221,7 +232,7 @@ fn test_insert_explicit_columns() {
 #[test]
 fn test_insert_multiple_rows() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1), (2), (3)",
   ]);
@@ -276,7 +287,7 @@ fn test_show_schemas() {
 #[test]
 fn test_show_tables() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t1 (a INT)",
     "CREATE TABLE t2 (b TEXT)",
   ]);
@@ -303,7 +314,7 @@ fn test_information_schema_schemata() {
 #[test]
 fn test_information_schema_relations() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t1 (a INT)",
     "CREATE TABLE t2 (b TEXT)",
   ]);
@@ -318,7 +329,7 @@ fn test_information_schema_relations() {
 #[test]
 fn test_select_all_types() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT, b BIGINT, c FLOAT, d DOUBLE, e BOOL, f TEXT)",
     "INSERT INTO t VALUES (1, 2, CAST(1.5 AS FLOAT), 2.5, TRUE, 'hello')",
   ]);
@@ -362,7 +373,7 @@ fn test_drop_schema() {
 #[test]
 fn test_drop_schema_cascade_drops_tables() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE SCHEMA s",
     "CREATE TABLE s.t (a INT)",
   ]);
@@ -394,7 +405,7 @@ fn test_create_table_duplicate_error() {
 #[test]
 fn test_drop_table() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1)",
   ]);
@@ -429,7 +440,7 @@ fn test_show_schemas_after_drop() {
 #[test]
 fn test_show_tables_after_drop() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t1 (a INT)",
     "CREATE TABLE t2 (b TEXT)",
   ]);
@@ -487,7 +498,7 @@ fn test_describe_table() {
 #[test]
 fn test_describe_table_schema_qualified() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE SCHEMA s",
     "CREATE TABLE s.t (x BIGINT NOT NULL)",
   ]);
@@ -527,7 +538,7 @@ fn test_describe_table_schema_not_found_error() {
 #[test]
 fn test_show_tables_in_schema() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE SCHEMA s",
     "CREATE TABLE s.t1 (a INT)",
     "CREATE TABLE t2 (b TEXT)",
@@ -576,7 +587,7 @@ fn test_insert_not_null_violation_explicit_columns_error() {
 #[test]
 fn test_insert_nullable_column_allows_null() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT NOT NULL, b TEXT)",
     "INSERT INTO t VALUES (1, NULL)",
   ]);
@@ -588,7 +599,7 @@ fn test_insert_nullable_column_allows_null() {
 fn test_insert_not_null_omitted_column_allows_null() {
   // Omitting a nullable column from the explicit list inserts NULL — allowed.
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT NOT NULL, b TEXT)",
     "INSERT INTO t (a) VALUES (42)",
   ]);
@@ -607,7 +618,7 @@ fn test_insert_not_null_omitted_column_error() {
 #[test]
 fn test_explain_returns_plan_column() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT, b TEXT)",
     "INSERT INTO t VALUES (1, 'x')",
   ]);
@@ -682,7 +693,7 @@ fn test_explain_show_tables() {
 #[test]
 fn test_rowid_explicit_select() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (42)",
   ]);
@@ -695,7 +706,7 @@ fn test_rowid_explicit_select() {
 #[test]
 fn test_rowid_not_in_star() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1)",
   ]);
@@ -709,7 +720,7 @@ fn test_rowid_not_in_star() {
 #[test]
 fn test_rowid_unique_per_row() {
   let mut db = setup();
-  query_txn(&mut db, &[
+  query_txn_commit(&mut db, &[
     "CREATE TABLE t (a INT)",
     "INSERT INTO t VALUES (1)",
     "INSERT INTO t VALUES (2)",
@@ -735,4 +746,106 @@ fn test_rowid_reserved_name_in_insert() {
   query(&mut db, "CREATE TABLE t (a INT)");
   query_err(&mut db, "INSERT INTO t (_rowid_) VALUES (1)", "cannot be used in INSERT");
   query_err(&mut db, "INSERT INTO t (a, _rowid_) VALUES (1, 2)", "cannot be used in INSERT");
+}
+
+//=============
+// DELETE FROM
+//=============
+
+#[test]
+fn test_delete_all_rows() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t");
+  assert_rows(&rows, &[&[Val::BigInt(3)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[]);
+}
+
+#[test]
+fn test_delete_with_where() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a > 1");
+  assert_rows(&rows, &[&[Val::BigInt(2)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(1)]]);
+}
+
+#[test]
+fn test_delete_no_match() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a > 100");
+  assert_rows(&rows, &[&[Val::BigInt(0)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(1)], &[Val::Int(2)]]);
+}
+
+#[test]
+fn test_delete_by_rowid() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (10)",
+    "INSERT INTO t VALUES (20)",
+  ]);
+  let rows = query(&mut db, "SELECT _rowid_, a FROM t");
+  let rowid = rows[0].get_i64(0);
+  query(&mut db, &format!("DELETE FROM t WHERE _rowid_ = {}", rowid));
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(20)]]);
+}
+
+#[test]
+fn test_delete_empty_table() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "DELETE FROM t");
+  assert_rows(&rows, &[&[Val::BigInt(0)]]);
+}
+
+#[test]
+fn test_delete_rows_affected() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a = 2");
+  assert_rows(&rows, &[&[Val::BigInt(1)]]);
+}
+
+#[test]
+fn test_delete_rollback() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  query_txn_rollback(&mut db, &["DELETE FROM t"]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[
+    &[Val::Int(1)],
+    &[Val::Int(2)],
+    &[Val::Int(3)],
+  ]);
 }

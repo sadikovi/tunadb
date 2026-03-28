@@ -40,6 +40,7 @@ pub enum TokenType {
   CASE,
   CAST,
   CREATE,
+  DELETE,
   DESCRIBE,
   DISTINCT,
   DROP,
@@ -301,6 +302,8 @@ impl<'a> Scanner<'a> {
       TokenType::CAST
     } else if self.match_keyword(b"CREATE") {
       TokenType::CREATE
+    } else if self.match_keyword(b"DELETE") {
+      TokenType::DELETE
     } else if self.match_keyword(b"DESCRIBE") {
       TokenType::DESCRIBE
     } else if self.match_keyword(b"DISTINCT") {
@@ -1185,6 +1188,32 @@ from
         (TokenType::IDENTIFIER, "c"),
         (TokenType::FROM, "from"),
         (TokenType::IDENTIFIER, "t2"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_scanner_delete() {
+    assert_sql(
+      "delete from t;",
+      vec![
+        (TokenType::DELETE, "delete"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "t"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+    assert_sql(
+      "delete from t where a > 1;",
+      vec![
+        (TokenType::DELETE, "delete"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "t"),
+        (TokenType::WHERE, "where"),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::GREATER_THAN, ">"),
+        (TokenType::NUMBER, "1"),
         (TokenType::SEMICOLON, ";"),
       ]
     );

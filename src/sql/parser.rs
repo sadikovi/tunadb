@@ -634,6 +634,16 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn delete_statement(&mut self) -> Res<LogicalPlan> {
+    self.consume(TokenType::FROM, "Expected FROM keyword")?;
+    let mut from = self.from_statement()?;
+    if self.matches(TokenType::WHERE)? {
+      from = self.where_statement(from)?;
+    }
+    Ok(LogicalPlan::UnresolvedDeleteFrom(Rc::new(from)))
+  }
+
+  #[inline]
   fn create_schema_statement(&mut self) -> Res<LogicalPlan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
     Ok(
@@ -718,6 +728,8 @@ impl<'a> Parser<'a> {
       } else if self.matches(TokenType::TABLE)? {
         stmt = Some(self.create_table_statement()?);
       }
+    } else if self.matches(TokenType::DELETE)? {
+      stmt = Some(self.delete_statement()?);
     } else if self.matches(TokenType::DROP)? {
       if self.matches(TokenType::SCHEMA)? {
         stmt = Some(self.drop_schema_statement()?);
@@ -1771,6 +1783,36 @@ pub mod tests {
     assert_plan(
       "show tables in MySchema",
       LogicalPlan::UnresolvedShowTables(Some(Rc::new("myschema".to_string()))),
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected FROM keyword")]
+  fn test_parser_delete_from_missing_from() {
+    assert_plan("delete t", empty());
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected a table name or schema.table qualifier")]
+  fn test_parser_delete_from_missing_table() {
+    assert_plan("delete from", empty());
+  }
+
+  #[test]
+  fn test_parser_delete_from() {
+    assert_plan(
+      "delete from t",
+      delete_from(from(None, "t", None))
+    );
+
+    assert_plan(
+      "DELETE FROM TEST_SCHEMA.T",
+      delete_from(from(Some("test_schema"), "t", None))
+    );
+
+    assert_plan(
+      "delete from t where a > 1",
+      delete_from(filter(greater_than(identifier("a"), int(1)), from(None, "t", None)))
     );
   }
 

@@ -20,6 +20,9 @@ fn plan_node(logical: &LogicalPlan) -> Res<PhysicalPlan> {
     LogicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
       Ok(PhysicalPlan::CreateTable(schema_name.clone(), table_name.clone(), fields.clone()))
     },
+    LogicalPlan::DeleteFrom(ref child) => {
+      Ok(PhysicalPlan::DeleteFrom(Rc::new(plan_node(child)?)))
+    }
     LogicalPlan::DropSchema(ref schema_info, cascade) => {
       Ok(PhysicalPlan::DropSchema(schema_info.clone(), *cascade))
     },
@@ -264,6 +267,31 @@ mod tests {
           table_info,
           col_positions,
           Rc::new(PhysicalPlan::LocalRelation(source_exprs)),
+        )
+      );
+      assert_eq!(schema.get().len(), 1);
+      assert_eq!(schema.get()[0].name(), "rows_affected");
+    });
+  }
+
+  #[test]
+  fn test_plan_delete_from() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let schema_info = Rc::new(schema_info);
+      let table_info = Rc::new(table_info);
+
+      // DELETE FROM t — child is a bare SeqScan.
+      let logical = LogicalPlan::DeleteFrom(
+        Rc::new(LogicalPlan::TableScan(schema_info.clone(), table_info.clone(), None))
+      );
+      let (schema, physical) = plan(&logical).unwrap();
+      assert_eq!(
+        physical,
+        PhysicalPlan::DeleteFrom(
+          Rc::new(PhysicalPlan::SeqScan(schema_info, table_info))
         )
       );
       assert_eq!(schema.get().len(), 1);

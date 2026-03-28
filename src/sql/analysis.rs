@@ -534,6 +534,9 @@ fn analysis_resolve_nodes(
         Err(err) => Err(err),
       }
     },
+    LogicalPlan::UnresolvedDeleteFrom(ref child) => {
+      Ok(Some(LogicalPlan::DeleteFrom(child.clone())))
+    },
     LogicalPlan::UnresolvedDropSchema(ref schema_name, cascade) => {
       match catalog::get_schema(txn, schema_name) {
         Ok(info) => {
@@ -1652,5 +1655,54 @@ mod tests {
       "expected SQLAnalysisError mentioning schema name, got {:?}",
       result,
     );
+  }
+
+  #[test]
+  fn test_analyse_delete_from() {
+    // DELETE FROM t — resolves to DeleteFrom(Filter?(TableScan)).
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(from(None, "t", None)),
+      )
+    });
+    assert!(
+      matches!(result.unwrap(), LogicalPlan::DeleteFrom(_)),
+      "expected DeleteFrom"
+    );
+  }
+
+  #[test]
+  fn test_analyse_delete_from_with_where() {
+    // DELETE FROM t WHERE a > 1 — child resolves to Filter(TableScan).
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(filter(greater_than(identifier("a"), int(1)), from(None, "t", None))),
+      )
+    });
+    assert!(
+      matches!(result.unwrap(), LogicalPlan::DeleteFrom(_)),
+      "expected DeleteFrom"
+    );
+  }
+
+  #[test]
+  fn test_analyse_delete_from_nonexistent_table_error() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(from(None, "nonexistent", None)),
+      )
+    });
+    assert!(result.is_err());
   }
 }

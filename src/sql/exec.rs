@@ -683,6 +683,7 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
   }
 }
 
+
 // Executes a physical plan inside the given transaction and returns the result
 // to the caller via the session.
 pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> Res<RowIter> {
@@ -706,6 +707,30 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
         Ok(()) => Ok(RowIter::empty()),
         Err(_) => unreachable!("Create table {}: unexpected error", table_name),
       }
+    },
+    PhysicalPlan::DeleteFrom(ref child) => {
+      let mut node = child.as_ref();
+      let table_info = loop {
+        match node {
+          PhysicalPlan::SeqScan(_, ref table_info) => break table_info.clone(),
+          PhysicalPlan::Filter(_, ref child) => node = child.as_ref(),
+          other => unreachable!("DeleteFrom: unexpected plan node {:?}", other),
+        }
+      };
+      let rowid_idx = table_info.field_pos(catalog::INTERNAL_ROWID_COLUMN_NAME)
+        .expect("_rowid_ column not found in table schema");
+      let mut child_iter = execute(session, txn, child)?;
+      let mut rows_affected = 0i64;
+      if let Some(mut set) = catalog::get_relation_data(txn, &table_info) {
+        while let Some(result) = child_iter.next() {
+          let row = result?;
+          set.del(&u64_u8!(row.get_i64(rowid_idx) as u64));
+          rows_affected += 1;
+        }
+      }
+      let mut row = Row::new(1);
+      row.set_i64(0, rows_affected);
+      Ok(RowIter::from_vec(vec![row]))
     },
     PhysicalPlan::DropSchema(ref schema_info, cascade) => {
       match catalog::drop_schema(txn, schema_info.schema_name(), *cascade, false) {
