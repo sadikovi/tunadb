@@ -273,4 +273,29 @@ mod tests {
       assert_eq!(schema.get()[0].name(), "rows_affected");
     });
   }
+
+  #[test]
+  fn test_plan_delete_from() {
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    dbc.with_txn(false, |txn| {
+      let (schema_info, table_info) = catalog::get_relation(&txn, "default", "t").unwrap();
+      let schema_info = Rc::new(schema_info);
+      let table_info = Rc::new(table_info);
+
+      // DELETE FROM t — child is a bare SeqScan.
+      let logical = LogicalPlan::DeleteFrom(
+        Rc::new(LogicalPlan::TableScan(schema_info.clone(), table_info.clone(), None))
+      );
+      let (schema, physical) = plan(&logical).unwrap();
+      assert_eq!(
+        physical,
+        PhysicalPlan::DeleteFrom(
+          Rc::new(PhysicalPlan::SeqScan(schema_info, table_info))
+        )
+      );
+      assert_eq!(schema.get().len(), 1);
+      assert_eq!(schema.get()[0].name(), "rows_affected");
+    });
+  }
 }

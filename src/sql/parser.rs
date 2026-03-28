@@ -1787,6 +1787,36 @@ pub mod tests {
   }
 
   #[test]
+  #[should_panic(expected = "Expected FROM keyword")]
+  fn test_parser_delete_from_missing_from() {
+    assert_plan("delete t", empty());
+  }
+
+  #[test]
+  #[should_panic(expected = "Expected a table name or schema.table qualifier")]
+  fn test_parser_delete_from_missing_table() {
+    assert_plan("delete from", empty());
+  }
+
+  #[test]
+  fn test_parser_delete_from() {
+    assert_plan(
+      "delete from t",
+      delete_from(from(None, "t", None))
+    );
+
+    assert_plan(
+      "DELETE FROM TEST_SCHEMA.T",
+      delete_from(from(Some("test_schema"), "t", None))
+    );
+
+    assert_plan(
+      "delete from t where a > 1",
+      delete_from(filter(greater_than(identifier("a"), int(1)), from(None, "t", None)))
+    );
+  }
+
+  #[test]
   #[should_panic(expected = "Unsupported token 'indexes'")]
   fn test_parser_show_unknown() {
     assert_plan("show indexes", empty());

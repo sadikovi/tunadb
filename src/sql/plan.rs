@@ -1340,6 +1340,10 @@ pub mod dsl {
     )
   }
 
+  pub fn delete_from(child: LogicalPlan) -> LogicalPlan {
+    LogicalPlan::UnresolvedDeleteFrom(Rc::new(child))
+  }
+
   pub fn drop_schema(schema: &str, is_cascade: bool) -> LogicalPlan {
     LogicalPlan::UnresolvedDropSchema(Rc::new(schema.to_string()), is_cascade)
   }

@@ -1194,6 +1194,32 @@ from
   }
 
   #[test]
+  fn test_scanner_delete() {
+    assert_sql(
+      "delete from t;",
+      vec![
+        (TokenType::DELETE, "delete"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "t"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+    assert_sql(
+      "delete from t where a > 1;",
+      vec![
+        (TokenType::DELETE, "delete"),
+        (TokenType::FROM, "from"),
+        (TokenType::IDENTIFIER, "t"),
+        (TokenType::WHERE, "where"),
+        (TokenType::IDENTIFIER, "a"),
+        (TokenType::GREATER_THAN, ">"),
+        (TokenType::NUMBER, "1"),
+        (TokenType::SEMICOLON, ";"),
+      ]
+    );
+  }
+
+  #[test]
   fn test_scanner_show() {
     assert_sql(
       "show schemas",

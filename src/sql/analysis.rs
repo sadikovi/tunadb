@@ -1656,4 +1656,53 @@ mod tests {
       result,
     );
   }
+
+  #[test]
+  fn test_analyse_delete_from() {
+    // DELETE FROM t — resolves to DeleteFrom(Filter?(TableScan)).
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(from(None, "t", None)),
+      )
+    });
+    assert!(
+      matches!(result.unwrap(), LogicalPlan::DeleteFrom(_)),
+      "expected DeleteFrom"
+    );
+  }
+
+  #[test]
+  fn test_analyse_delete_from_with_where() {
+    // DELETE FROM t WHERE a > 1 — child resolves to Filter(TableScan).
+    let mut dbc = init_db();
+    setup_table(&mut dbc, "t", &[("a", Type::INT)]);
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(filter(greater_than(identifier("a"), int(1)), from(None, "t", None))),
+      )
+    });
+    assert!(
+      matches!(result.unwrap(), LogicalPlan::DeleteFrom(_)),
+      "expected DeleteFrom"
+    );
+  }
+
+  #[test]
+  fn test_analyse_delete_from_nonexistent_table_error() {
+    let mut dbc = init_db();
+    let result = dbc.with_txn(false, |txn| {
+      analyse(
+        &Session::builder().build(),
+        &txn,
+        delete_from(from(None, "nonexistent", None)),
+      )
+    });
+    assert!(result.is_err());
+  }
 }
