@@ -683,15 +683,6 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
   }
 }
 
-// Traverses the physical plan tree to find the SeqScan leaf and returns its RelationInfo.
-// Used by DeleteFrom to identify the target table without duplicating it in the plan node.
-fn find_scan_table_info(plan: &PhysicalPlan) -> Rc<RelationInfo> {
-  match plan {
-    PhysicalPlan::SeqScan(_, ref table_info) => table_info.clone(),
-    PhysicalPlan::Filter(_, ref child) => find_scan_table_info(child),
-    other => unreachable!("find_scan_table_info: unexpected plan node {:?}", other),
-  }
-}
 
 // Executes a physical plan inside the given transaction and returns the result
 // to the caller via the session.
@@ -718,7 +709,14 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
       }
     },
     PhysicalPlan::DeleteFrom(ref child) => {
-      let table_info = find_scan_table_info(child);
+      let mut node = child.as_ref();
+      let table_info = loop {
+        match node {
+          PhysicalPlan::SeqScan(_, ref table_info) => break table_info.clone(),
+          PhysicalPlan::Filter(_, ref child) => node = child.as_ref(),
+          other => unreachable!("DeleteFrom: unexpected plan node {:?}", other),
+        }
+      };
       let rowid_idx = table_info.field_pos(catalog::INTERNAL_ROWID_COLUMN_NAME)
         .expect("_rowid_ column not found in table schema");
       let mut child_iter = execute(session, txn, child)?;
