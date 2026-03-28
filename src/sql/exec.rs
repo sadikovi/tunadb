@@ -720,17 +720,13 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
     PhysicalPlan::DeleteFrom(ref child) => {
       let table_info = find_scan_table_info(child);
       let rowid_idx = table_info.relation_fields().len();
-      // Collect all row keys first to avoid mutating the B+tree while iterating.
       let mut child_iter = execute(session, txn, child)?;
-      let mut keys: Vec<u64> = Vec::new();
-      while let Some(result) = child_iter.next() {
-        let row = result?;
-        keys.push(row.get_i64(rowid_idx) as u64);
-      }
-      let rows_affected = keys.len() as i64;
+      let mut rows_affected = 0i64;
       if let Some(mut set) = catalog::get_relation_data(txn, &table_info) {
-        for key in keys {
-          set.del(&u64_u8!(key));
+        while let Some(result) = child_iter.next() {
+          let row = result?;
+          set.del(&u64_u8!(row.get_i64(rowid_idx) as u64));
+          rows_affected += 1;
         }
       }
       let mut row = Row::new(1);
