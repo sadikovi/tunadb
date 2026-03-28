@@ -683,6 +683,16 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
   }
 }
 
+// Traverses the physical plan tree to find the SeqScan leaf and returns its RelationInfo.
+// Used by DeleteFrom to identify the target table without duplicating it in the plan node.
+fn find_scan_table_info(plan: &PhysicalPlan) -> Rc<RelationInfo> {
+  match plan {
+    PhysicalPlan::SeqScan(_, ref table_info) => table_info.clone(),
+    PhysicalPlan::Filter(_, ref child) => find_scan_table_info(child),
+    other => unreachable!("find_scan_table_info: unexpected plan node {:?}", other),
+  }
+}
+
 // Executes a physical plan inside the given transaction and returns the result
 // to the caller via the session.
 pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> Res<RowIter> {
@@ -706,6 +716,26 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
         Ok(()) => Ok(RowIter::empty()),
         Err(_) => unreachable!("Create table {}: unexpected error", table_name),
       }
+    },
+    PhysicalPlan::DeleteFrom(ref child) => {
+      let table_info = find_scan_table_info(child);
+      let rowid_idx = table_info.relation_fields().len();
+      // Collect all row keys first to avoid mutating the B+tree while iterating.
+      let mut child_iter = execute(session, txn, child)?;
+      let mut keys: Vec<u64> = Vec::new();
+      while let Some(result) = child_iter.next() {
+        let row = result?;
+        keys.push(row.get_i64(rowid_idx) as u64);
+      }
+      let rows_affected = keys.len() as i64;
+      if let Some(mut set) = catalog::get_relation_data(txn, &table_info) {
+        for key in keys {
+          set.del(&u64_u8!(key));
+        }
+      }
+      let mut row = Row::new(1);
+      row.set_i64(0, rows_affected);
+      Ok(RowIter::from_vec(vec![row]))
     },
     PhysicalPlan::DropSchema(ref schema_info, cascade) => {
       match catalog::drop_schema(txn, schema_info.schema_name(), *cascade, false) {

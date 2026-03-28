@@ -634,6 +634,16 @@ impl<'a> Parser<'a> {
   }
 
   #[inline]
+  fn delete_statement(&mut self) -> Res<LogicalPlan> {
+    self.consume(TokenType::FROM, "Expected FROM keyword")?;
+    let mut from = self.from_statement()?;
+    if self.matches(TokenType::WHERE)? {
+      from = self.where_statement(from)?;
+    }
+    Ok(LogicalPlan::UnresolvedDeleteFrom(Rc::new(from)))
+  }
+
+  #[inline]
   fn create_schema_statement(&mut self) -> Res<LogicalPlan> {
     let token = self.consume(TokenType::IDENTIFIER, "Expected schema identifier")?;
     Ok(
@@ -718,6 +728,8 @@ impl<'a> Parser<'a> {
       } else if self.matches(TokenType::TABLE)? {
         stmt = Some(self.create_table_statement()?);
       }
+    } else if self.matches(TokenType::DELETE)? {
+      stmt = Some(self.delete_statement()?);
     } else if self.matches(TokenType::DROP)? {
       if self.matches(TokenType::SCHEMA)? {
         stmt = Some(self.drop_schema_statement()?);

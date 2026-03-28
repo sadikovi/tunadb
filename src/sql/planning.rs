@@ -20,6 +20,9 @@ fn plan_node(logical: &LogicalPlan) -> Res<PhysicalPlan> {
     LogicalPlan::CreateTable(ref schema_name, ref table_name, ref fields) => {
       Ok(PhysicalPlan::CreateTable(schema_name.clone(), table_name.clone(), fields.clone()))
     },
+    LogicalPlan::DeleteFrom(ref child) => {
+      Ok(PhysicalPlan::DeleteFrom(Rc::new(plan_node(child)?)))
+    }
     LogicalPlan::DropSchema(ref schema_info, cascade) => {
       Ok(PhysicalPlan::DropSchema(schema_info.clone(), *cascade))
     },

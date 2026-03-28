@@ -40,6 +40,7 @@ pub enum TokenType {
   CASE,
   CAST,
   CREATE,
+  DELETE,
   DESCRIBE,
   DISTINCT,
   DROP,
@@ -301,6 +302,8 @@ impl<'a> Scanner<'a> {
       TokenType::CAST
     } else if self.match_keyword(b"CREATE") {
       TokenType::CREATE
+    } else if self.match_keyword(b"DELETE") {
+      TokenType::DELETE
     } else if self.match_keyword(b"DESCRIBE") {
       TokenType::DESCRIBE
     } else if self.match_keyword(b"DISTINCT") {

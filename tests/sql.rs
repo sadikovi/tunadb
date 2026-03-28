@@ -736,3 +736,87 @@ fn test_rowid_reserved_name_in_insert() {
   query_err(&mut db, "INSERT INTO t (_rowid_) VALUES (1)", "cannot be used in INSERT");
   query_err(&mut db, "INSERT INTO t (a, _rowid_) VALUES (1, 2)", "cannot be used in INSERT");
 }
+
+//===========
+// DELETE FROM
+//===========
+
+#[test]
+fn test_delete_all_rows() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t");
+  assert_rows(&rows, &[&[Val::BigInt(3)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[]);
+}
+
+#[test]
+fn test_delete_with_where() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a > 1");
+  assert_rows(&rows, &[&[Val::BigInt(2)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(1)]]);
+}
+
+#[test]
+fn test_delete_no_match() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a > 100");
+  assert_rows(&rows, &[&[Val::BigInt(0)]]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(1)], &[Val::Int(2)]]);
+}
+
+#[test]
+fn test_delete_by_rowid() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (10)",
+    "INSERT INTO t VALUES (20)",
+  ]);
+  let rows = query(&mut db, "SELECT _rowid_, a FROM t");
+  let rowid = rows[0].get_i64(0);
+  query(&mut db, &format!("DELETE FROM t WHERE _rowid_ = {}", rowid));
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[&[Val::Int(20)]]);
+}
+
+#[test]
+fn test_delete_empty_table() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  let rows = query(&mut db, "DELETE FROM t");
+  assert_rows(&rows, &[&[Val::BigInt(0)]]);
+}
+
+#[test]
+fn test_delete_rows_affected() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(&mut db, "DELETE FROM t WHERE a = 2");
+  assert_rows(&rows, &[&[Val::BigInt(1)]]);
+}

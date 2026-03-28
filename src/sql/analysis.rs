@@ -534,6 +534,9 @@ fn analysis_resolve_nodes(
         Err(err) => Err(err),
       }
     },
+    LogicalPlan::UnresolvedDeleteFrom(ref child) => {
+      Ok(Some(LogicalPlan::DeleteFrom(child.clone())))
+    },
     LogicalPlan::UnresolvedDropSchema(ref schema_name, cascade) => {
       match catalog::get_schema(txn, schema_name) {
         Ok(info) => {
