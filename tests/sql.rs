@@ -723,7 +723,16 @@ fn test_rowid_unique_per_row() {
 }
 
 #[test]
-fn test_rowid_reserved_name_error() {
+fn test_rowid_reserved_name_in_create_table() {
   let mut db = setup();
-  query_err(&mut db, "CREATE TABLE t (_rowid_ INT)", "reserved");
+  query_err(&mut db, "CREATE TABLE t (_rowid_ INT)", "cannot be used in CREATE TABLE");
+  query_err(&mut db, "CREATE TABLE t (a INT, _rowid_ TEXT)", "cannot be used in CREATE TABLE");
+}
+
+#[test]
+fn test_rowid_reserved_name_in_insert() {
+  let mut db = setup();
+  query(&mut db, "CREATE TABLE t (a INT)");
+  query_err(&mut db, "INSERT INTO t (_rowid_) VALUES (1)", "cannot be used in INSERT");
+  query_err(&mut db, "INSERT INTO t (a, _rowid_) VALUES (1, 2)", "cannot be used in INSERT");
 }

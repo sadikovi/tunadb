@@ -94,13 +94,13 @@ pub struct RelationInfo {
   relation_id: u64, // globally unique id
   relation_name: String, // unique within the schema
   relation_type: RelationType,
-  relation_fields: Fields,   // user-defined columns, serialised to disk
-  internal_fields: Fields,   // engine-generated pseudo-columns, computed at construction time
+  relation_fields: Fields, // user-defined columns, serialised to disk
+  internal_fields: Fields, // engine-generated pseudo-columns, computed at construction time
 }
 
 // Computes the internal pseudo-columns for the given relation type.
 // For TABLE relations this is [_rowid_]; for SYSTEM_VIEW there are none.
-fn build_internal_fields(relation_type: RelationType) -> Fields {
+pub fn build_internal_fields(relation_type: RelationType) -> Fields {
   match relation_type {
     RelationType::TABLE => Fields::new(vec![
       Field::new_internal(INTERNAL_ROWID_COLUMN_NAME.to_string(), Type::BIGINT, false),

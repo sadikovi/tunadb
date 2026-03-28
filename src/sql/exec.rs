@@ -664,16 +664,15 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
       for schema in catalog::list_schemas(txn)? {
         let (_, relations) = catalog::list_relations(txn, schema.schema_name())?;
         for relation in relations {
-          let all_fields = relation.relation_fields().get().iter().map(|f| (f, false))
-            .chain(relation.internal_fields().get().iter().map(|f| (f, true)));
-          for (field, internal) in all_fields {
+          for idx in 0..relation.num_fields() {
+            let field = relation.field_at(idx);
             let mut row = Row::new(6);
             row.set_str(0, schema.schema_name());
             row.set_str(1, relation.relation_name());
             row.set_str(2, field.name());
             row.set_str(3, &field.data_type().to_string());
             row.set_str(4, if field.nullable() { "YES" } else { "NO" });
-            row.set_str(5, if internal { "YES" } else { "NO" });
+            row.set_str(5, if field.internal() { "YES" } else { "NO" });
             rows.push(row);
           }
         }
