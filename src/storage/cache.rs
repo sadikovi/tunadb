@@ -391,7 +391,10 @@ impl BlockManager for PageCache {
           let buf = &mut self.buf[off..off + self.page_size];
           assert_eq!(pg::page_type(&buf), pg_type);
           let can_write = Self::resolve_page(pg_type, buf, &vid_to_pid);
-          assert!(can_write, "Could not resolve page with vid={}, off={}, type={:?}", vid, off, pg_type);
+          assert!(
+            can_write,
+            "Could not resolve page with vid={}, off={}, type={:?}", vid, off, pg_type
+          );
           vid_to_pid.insert(vid, self.mngr.write_next(&buf));
 
           // Clean up the state in the cache.
@@ -403,7 +406,10 @@ impl BlockManager for PageCache {
           self.mngr.read(pid, &mut page);
           assert_eq!(pg::page_type(&page), pg_type);
           let can_write = Self::resolve_page(pg_type, &mut page, &vid_to_pid);
-          assert!(can_write, "Could not resolve page with vid={}, pid={}, type={:?}", vid, pid, pg_type);
+          assert!(
+            can_write,
+            "Could not resolve page with vid={}, pid={}, type={:?}", vid, pid, pg_type
+          );
           self.mngr.write(pid, &page);
           vid_to_pid.insert(vid, pid);
 

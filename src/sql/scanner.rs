@@ -589,34 +589,34 @@ pub mod tests {
   #[test]
   fn test_scanner_multiline() {
     let query = "
-select
-       l_returnflag,
-       l_linestatus,
-       sum(l_quantity) as sum_qty,
-       sum(l_extendedprice) as sum_base_price,
+  select
+      l_returnflag,
+      l_linestatus,
+      sum(l_quantity) as sum_qty,
+      sum(l_extendedprice) as sum_base_price,
 
 
-       sum(l_extendedprice * (1-l_discount)) as sum_disc_price,
-       sum(l_extendedprice * (1-l_discount) * (1+l_tax)) as sum_charge,
-       avg(l_quantity) as avg_qty,
-       avg(l_extendedprice) as avg_price,
-       avg(l_discount) as avg_disc,
-       count(*) as count_order
--- comment with new lines \\n \n \n
-from
-       lineitem
+      sum(l_extendedprice * (1-l_discount)) as sum_disc_price,
+      sum(l_extendedprice * (1-l_discount) * (1+l_tax)) as sum_charge,
+      avg(l_quantity) as avg_qty,
+      avg(l_extendedprice) as avg_price,
+      avg(l_discount) as avg_disc,
+      count(*) as count_order
+  -- comment with new lines \\n \n \n
+  from
+      lineitem
   where
-       l_shipdate <= dateadd(day, -90, to_date('1998-12-01'))
-       and l_linestatus =
-       'status1
-        status2'
-    group by
-       l_returnflag,
-       l_linestatus
-    order by
-       l_returnflag,
-       l_linestatus;
-    ";
+      l_shipdate <= dateadd(day, -90, to_date('1998-12-01'))
+      and l_linestatus =
+      'status1
+      status2'
+  group by
+      l_returnflag,
+      l_linestatus
+  order by
+      l_returnflag,
+      l_linestatus;
+";
 
     let tokens = collect_tokens(query);
     // Check that there are no errors during parsing.
@@ -629,52 +629,52 @@ from
     assert_eq!(token.token_type(), TokenType::SELECT);
     assert_eq!(token.line_num(), 1);
     assert_eq!(token.line_pos(), 1);
-    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "select");
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  select");
 
     // FROM token.
     let token = &tokens[78];
     assert_eq!(token.token_type(), TokenType::FROM);
     assert_eq!(token.line_num(), 17);
-    assert_eq!(token.line_pos(), 447);
-    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "from");
+    assert_eq!(token.line_pos(), 441);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  from");
 
     // WHERE token.
     let token = &tokens[80];
     assert_eq!(token.token_type(), TokenType::WHERE);
     assert_eq!(token.line_num(), 19);
-    assert_eq!(token.line_pos(), 468);
+    assert_eq!(token.line_pos(), 463);
     assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  where");
 
     // Multiline string.
     let token = &tokens[98];
     assert_eq!(token.token_type(), TokenType::STRING);
     assert_eq!(token.line_num(), 22);
-    assert_eq!(token.line_pos(), 564);
+    assert_eq!(token.line_pos(), 557);
     assert_eq!(
       &query[token.line_pos()..token.pos() + token.len],
-      "       'status1\n        status2'"
+      "      'status1\n      status2'"
     );
 
     // GROUP token.
     let token = &tokens[99];
     assert_eq!(token.token_type(), TokenType::GROUP);
     assert_eq!(token.line_num(), 24);
-    assert_eq!(token.line_pos(), 597);
-    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "    group");
+    assert_eq!(token.line_pos(), 587);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  group");
 
     // BY token.
     let token = &tokens[100];
     assert_eq!(token.token_type(), TokenType::BY);
     assert_eq!(token.line_num(), 24);
-    assert_eq!(token.line_pos(), 597);
-    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "    group by");
+    assert_eq!(token.line_pos(), 587);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "  group by");
 
     // SEMICOLON token.
     let token = &tokens[109];
     assert_eq!(token.token_type(), TokenType::SEMICOLON);
     assert_eq!(token.line_num(), 29);
-    assert_eq!(token.line_pos(), 685);
-    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "       l_linestatus;");
+    assert_eq!(token.line_pos(), 668);
+    assert_eq!(&query[token.line_pos()..token.pos() + token.len], "      l_linestatus;");
   }
 
   #[test]

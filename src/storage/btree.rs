@@ -26,7 +26,9 @@ enum BTreePut {
 }
 
 // Puts key and value into btree.
-fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]) -> BTreePut {
+fn recur_put(
+  root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, page: &mut [u8]
+) -> BTreePut {
   if root == INVALID_PAGE_ID {
     // Create new leaf page
     pg::leaf_init(page);
@@ -72,7 +74,8 @@ fn recur_put(root: u32, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, pag
         }
       },
       pg::PageType::Internal => {
-        let mut right_page = vec![0u8; mngr.page_size()]; // we reuse right_page as a temporary buffer
+        // We reuse right_page as a temporary buffer.
+        let mut right_page = vec![0u8; mngr.page_size()];
         let ptr = if exists { pos + 1 } else { pos };
 
         match recur_put(pg::internal_get_ptr(&page, ptr), key, val, mngr, &mut right_page) {
@@ -392,7 +395,12 @@ pub struct BTreeIter {
 impl BTreeIter {
   // Creates a new iterator.
   // If start and end keys are not provided, full range is returned.
-  pub fn new(mut root: u32, start_key: Option<&[u8]>, end_key: Option<&[u8]>, mngr: Rc<RefCell<dyn BlockManager>>) -> Self {
+  pub fn new(
+    mut root: u32,
+    start_key: Option<&[u8]>,
+    end_key: Option<&[u8]>,
+    mngr: Rc<RefCell<dyn BlockManager>>
+  ) -> Self {
     let mut stack = Vec::new();
     let (page, pos) = {
       let mngr_mut = &mut *mngr.borrow_mut();
@@ -487,7 +495,9 @@ fn btree_debug_key_str(key: &[u8]) -> String {
   }
 }
 
-fn btree_debug_recur(buf: &mut String, root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, off: usize) {
+fn btree_debug_recur(
+  buf: &mut String, root: u32, page: &mut [u8], mngr: &mut dyn BlockManager, off: usize
+) {
   if root == INVALID_PAGE_ID {
     buf.push_str(&format!("{:>width$} INVALID PAGE", "!", width = off));
     buf.push_str("\n");
@@ -498,7 +508,9 @@ fn btree_debug_recur(buf: &mut String, root: u32, page: &mut [u8], mngr: &mut dy
   let cnt = pg::num_slots(&page);
   match pg::page_type(&page) {
     pg::PageType::Leaf if cnt == 0 => {
-      buf.push_str(&format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "*", root, cnt, width = off));
+      buf.push_str(
+        &format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "*", root, cnt, width = off)
+      );
       buf.push_str("\n");
     },
     pg::PageType::Leaf => {
@@ -518,7 +530,9 @@ fn btree_debug_recur(buf: &mut String, root: u32, page: &mut [u8], mngr: &mut dy
       buf.push_str("\n");
     },
     pg::PageType::Internal if cnt == 0 => {
-      buf.push_str(&format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "+", root, cnt, width = off));
+      buf.push_str(
+        &format!("{:>width$} {} | cnt: {} | min: N/A | max: N/A", "+", root, cnt, width = off)
+      );
       buf.push_str("\n");
     },
     pg::PageType::Internal => {
@@ -957,7 +971,9 @@ mod tests {
 
   #[test]
   fn test_btree_range_invalid_root() {
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut iter = BTreeIter::new(INVALID_PAGE_ID, Some(&[1]), Some(&[2]), mngr);
     assert_eq!(iter.next(), None);
   }
@@ -965,7 +981,9 @@ mod tests {
   #[test]
   fn test_btree_range_no_bounds() {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..100).map(|i| (vec![i], vec![i])).collect();
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut root = INVALID_PAGE_ID;
 
     for i in &input[..] {
@@ -981,7 +999,9 @@ mod tests {
   #[test]
   fn test_btree_range_start_bound() {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i])).collect();
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut root = INVALID_PAGE_ID;
 
     for i in &input[..] {
@@ -997,7 +1017,9 @@ mod tests {
   #[test]
   fn test_btree_range_end_bound() {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i])).collect();
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut root = INVALID_PAGE_ID;
 
     for i in &input[..] {
@@ -1013,7 +1035,9 @@ mod tests {
   #[test]
   fn test_btree_range_both_bounds() {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (0..20).map(|i| (vec![i], vec![i])).collect();
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut root = INVALID_PAGE_ID;
 
     for i in &input[..] {
@@ -1029,7 +1053,9 @@ mod tests {
   #[test]
   fn test_btree_range_outside_of_bounds() {
     let input: Vec<(Vec<u8>, Vec<u8>)> = (10..20).map(|i| (vec![i], vec![i])).collect();
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
     let mut root = INVALID_PAGE_ID;
 
     for i in &input[..] {
@@ -1106,7 +1132,9 @@ mod tests {
       println!("Input: {:?}, page size: {}", input, page_size);
 
       let mut root = INVALID_PAGE_ID;
-      let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(page_size).build()));
+      let mngr = Rc::new(
+        RefCell::new(StorageManager::builder().as_mem(0).with_page_size(page_size).build())
+      );
 
       for i in 0..input.len() {
         let mngr_mut = &mut *mngr.borrow_mut();
@@ -1147,7 +1175,9 @@ mod tests {
       println!("Input: {:?}, page size: {}", input, page_size);
 
       let mut root = INVALID_PAGE_ID;
-      let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(page_size).build()));
+      let mngr = Rc::new(
+        RefCell::new(StorageManager::builder().as_mem(0).with_page_size(page_size).build())
+      );
 
       for i in 0..input.len() {
         let mngr_mut = &mut *mngr.borrow_mut();
@@ -1197,7 +1227,9 @@ mod tests {
       distinct(&input).iter().map(|i| (i.clone(), vec![])).collect();
 
     let mut root = INVALID_PAGE_ID;
-    let mngr = Rc::new(RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build()));
+    let mngr = Rc::new(
+      RefCell::new(StorageManager::builder().as_mem(0).with_page_size(256).build())
+    );
 
     for (key, val) in &exp[..] {
       let mngr_mut = &mut *mngr.borrow_mut();

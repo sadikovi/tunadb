@@ -340,7 +340,7 @@ pub fn create_schema(txn: &TransactionRef, schema_name: &str, optional: bool) ->
   create_schema_internal(&txn, &schema_name, optional)
 }
 
- // Catalog API: Returns schema info for the name if exists.
+// Catalog API: Returns schema info for the name if exists.
 pub fn get_schema(txn: &TransactionRef, schema_name: &str) -> Res<SchemaInfo> {
   let set = get_system_schemas(&txn)?;
   get_schema_internal(&set, &schema_name)

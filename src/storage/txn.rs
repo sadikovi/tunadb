@@ -977,7 +977,10 @@ mod tests {
       assert_eq!(
         t3.btree_debug(),
         format!(
-          " * 2147483652 | cnt: 1 | min: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128 | max: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128\n"
+          " * 2147483652 \
+          | cnt: 1 \
+          | min: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128 \
+          | max: [1, 1, 1, 1, 1, 1, 1, 1] trunc. len=128\n"
         )
       );
     });

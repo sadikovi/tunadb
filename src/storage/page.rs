@@ -172,7 +172,9 @@ fn key_prefix_len(key: &[u8]) -> usize {
 //
 // `to_ptr` is a position of the pointer in the parent that corresponds to `to` page.
 #[inline]
-pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
+pub fn merge(
+  parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], mngr: &mut dyn BlockManager
+) -> bool {
   assert_eq!(page_type(&to), page_type(&from), "Merge: different page type");
 
   match page_type(&to) {
@@ -240,7 +242,9 @@ pub fn merge(parent: &mut [u8], to_ptr: usize, to: &mut [u8], from: &mut [u8], m
 // Returns `true` if steal from left can be performed, otherwise false. If `false` is returned,
 // it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
+pub fn steal_from_left(
+  parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &mut [u8], mngr: &mut dyn BlockManager
+) -> bool {
   assert_eq!(page_type(&to), page_type(&left), "Steal from left: different page type");
 
   let left_cnt = num_slots(&left);
@@ -308,7 +312,9 @@ pub fn steal_from_left(parent: &mut [u8], to_ptr: usize, to: &mut [u8], left: &m
 // Returns `true` if steal from right can be performed, otherwise false. If `false` is returned,
 // it is guaranteed that no pages were modified.
 #[inline]
-pub fn steal_from_right(parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut dyn BlockManager) -> bool {
+pub fn steal_from_right(
+  parent: &mut [u8], to_ptr: usize, to: &mut [u8], right: &mut [u8], mngr: &mut dyn BlockManager
+) -> bool {
   assert_eq!(page_type(&to), page_type(&right), "Steal from right: different page type");
   assert!(num_slots(right) > 0, "Steal from right: right page is empty");
 
@@ -507,14 +513,23 @@ pub fn leaf_can_insert(page: &[u8], key: &[u8], val: &[u8]) -> bool {
 }
 
 #[inline]
-pub fn leaf_insert(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) {
+pub fn leaf_insert(
+  page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager
+) {
   leaf_insert0(page, pos, key, val, mngr, false);
 }
 
 // Internal method to insert a key and value in a leaf page.
 // When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
 //   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
-fn leaf_insert0(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager, adjust_prefix: bool) {
+fn leaf_insert0(
+  page: &mut [u8],
+  pos: usize,
+  key: &[u8],
+  val: &[u8],
+  mngr: &mut dyn BlockManager,
+  adjust_prefix: bool
+) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   // Insert the bytes into the page.
@@ -679,7 +694,9 @@ pub fn leaf_free(page: &mut [u8], mngr: &mut dyn BlockManager) {
   leaf_init(page);
 }
 
-pub fn leaf_update(page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager) {
+pub fn leaf_update(
+  page: &mut [u8], pos: usize, key: &[u8], val: &[u8], mngr: &mut dyn BlockManager
+) {
   leaf_delete(page, pos, mngr);
   leaf_insert0(page, pos, key, val, mngr, true);
 }
@@ -1007,7 +1024,9 @@ pub fn internal_insert(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn B
 // Internal method to insert a key.
 // When `adjust_prefix` flag is true, we adjust the prefix to fit within the page:
 //   min(key.len(), PAGE_MAX_PREFIX_SIZE, free_space)
-fn internal_insert0(page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn BlockManager, adjust_prefix: bool) {
+fn internal_insert0(
+  page: &mut [u8], pos: usize, key: &[u8], mngr: &mut dyn BlockManager, adjust_prefix: bool
+) {
   assert!(pos <= num_slots(&page), "Cannot insert at position {}", pos);
 
   let max_len = max_slot_plus_cell_len(&page);

@@ -556,7 +556,8 @@ impl StorageManager {
       );
 
       let mut len = self.free_list.len();
-      let mut off = META_OFFSET; // the first 12 bytes are reserved for metadata: magic, page id, and count
+      // The first 12 bytes are reserved for metadata: magic, page id, and count.
+      let mut off = META_OFFSET;
       let mut cnt: u32 = 0; // number of pages per meta block
       let mut buf = vec![0u8; self.page_size as usize];
 
