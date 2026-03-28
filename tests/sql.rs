@@ -29,6 +29,17 @@ fn query_err(db: &mut Database, sql: &str, expected: &str) {
   assert!(msg.contains(expected), "error message {:?} does not contain {:?}", msg, expected);
 }
 
+// Executes multiple SQL statements in the same transaction, then rolls back.
+fn query_txn_rollback(db: &mut Database, stmts: &[&str]) {
+  db.with_transaction(|txn| {
+    for sql in stmts {
+      txn.execute(sql)?.rows.for_each(|r| { r.unwrap(); });
+    }
+    txn.rollback();
+    Ok(())
+  }).unwrap();
+}
+
 // Executes multiple SQL statements in the same transaction and returns
 // the rows from the last one.
 fn query_txn(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
@@ -819,4 +830,22 @@ fn test_delete_rows_affected() {
   ]);
   let rows = query(&mut db, "DELETE FROM t WHERE a = 2");
   assert_rows(&rows, &[&[Val::BigInt(1)]]);
+}
+
+#[test]
+fn test_delete_rollback() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  query_txn_rollback(&mut db, &["DELETE FROM t"]);
+  let rows = query(&mut db, "SELECT a FROM t");
+  assert_rows(&rows, &[
+    &[Val::Int(1)],
+    &[Val::Int(2)],
+    &[Val::Int(3)],
+  ]);
 }
