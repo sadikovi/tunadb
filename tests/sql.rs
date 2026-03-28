@@ -1,9 +1,9 @@
 use tunadb::api::Database;
 use tunadb::sql::row::Row;
 
-//===========
+//=========
 // Harness
-//===========
+//=========
 
 fn setup() -> Database {
   Database::open(None).unwrap()
@@ -553,9 +553,9 @@ fn test_information_schema_columns() {
     WHERE table_schema = 'default' AND table_name = 't'";
   let rows = query(&mut db, sql);
   assert_rows(&rows, &[
-    &[Val::Text("a"),        Val::Text("INT"),    Val::Text("YES")],
-    &[Val::Text("b"),        Val::Text("TEXT"),   Val::Text("NO")],
-    &[Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO")],
+    &[Val::Text("a"), Val::Text("INT"), Val::Text("YES")],
+    &[Val::Text("b"), Val::Text("TEXT"), Val::Text("NO")],
+    &[Val::Text("_rowid_"), Val::Text("BIGINT"), Val::Text("NO")],
   ]);
 }
 
@@ -675,9 +675,9 @@ fn test_explain_show_tables() {
   assert!(joined.iter().any(|l| !l.is_empty()), "plan should not be empty: {}", plan);
 }
 
-//===========
+//=========
 // _rowid_
-//===========
+//=========
 
 #[test]
 fn test_rowid_explicit_select() {
