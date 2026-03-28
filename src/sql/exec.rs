@@ -719,7 +719,8 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
     },
     PhysicalPlan::DeleteFrom(ref child) => {
       let table_info = find_scan_table_info(child);
-      let rowid_idx = table_info.relation_fields().len();
+      let rowid_idx = table_info.field_pos(catalog::INTERNAL_ROWID_COLUMN_NAME)
+        .expect("_rowid_ column not found in table schema");
       let mut child_iter = execute(session, txn, child)?;
       let mut rows_affected = 0i64;
       if let Some(mut set) = catalog::get_relation_data(txn, &table_info) {

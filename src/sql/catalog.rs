@@ -176,6 +176,17 @@ impl RelationInfo {
     self.relation_fields.len() + self.internal_fields.len()
   }
 
+  // Returns the index of the field with the given name across user fields followed by
+  // internal fields, or None if no field with that name exists.
+  #[inline]
+  pub fn field_pos(&self, name: &str) -> Option<usize> {
+    let n = self.relation_fields.len();
+    if let Some(pos) = self.relation_fields.get_field_pos(name) {
+      return Some(pos);
+    }
+    self.internal_fields.get_field_pos(name).map(|pos| n + pos)
+  }
+
   // Returns relation name consuming RelationInfo.
   #[inline]
   pub fn into_relation_name(self) -> String {
