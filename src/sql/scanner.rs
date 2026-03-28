@@ -514,7 +514,7 @@ impl<'a> Scanner<'a> {
       }
 
       match self.advance() {
-        c if is_alpha(c) => return self.identifier(),
+        c if is_alpha(c) || c == b'_' => return self.identifier(),
         c if is_digit(c) => return self.number(),
         b'.' => return self.make_token(TokenType::DOT),
         b',' => return self.make_token(TokenType::COMMA),
@@ -825,7 +825,11 @@ from
     assert_sql("abc", vec![(TokenType::IDENTIFIER, "abc")]);
     assert_sql("a123", vec![(TokenType::IDENTIFIER, "a123")]);
     assert_sql("a1_a2", vec![(TokenType::IDENTIFIER, "a1_a2")]);
-    assert_sql("_a123", vec![(TokenType::ERROR, "_"), (TokenType::IDENTIFIER, "a123")]);
+    assert_sql("_a123", vec![(TokenType::IDENTIFIER, "_a123")]);
+    assert_sql("_rowid_", vec![(TokenType::IDENTIFIER, "_rowid_")]);
+    assert_sql("__rowid__", vec![(TokenType::IDENTIFIER, "__rowid__")]);
+    assert_sql("_", vec![(TokenType::IDENTIFIER, "_")]);
+    assert_sql("___", vec![(TokenType::IDENTIFIER, "___")]);
     assert_sql(
       "a-b",
       vec![
