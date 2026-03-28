@@ -4,6 +4,7 @@ use std::rc::Rc;
 use crate::common::error::{Error, Res};
 use crate::sql::catalog::{
   self,
+  RelationInfo,
   RelationType,
   INFORMATION_SCHEMA_COLUMNS,
   INFORMATION_SCHEMA_RELATIONS,
@@ -197,7 +198,7 @@ fn expr_eval(expr: &Expression, row: &Row) -> Res<ExprEvalResult> {
       if row.is_null(idx) {
         return Ok(ExprEvalResult::Null);
       }
-      match table_info.relation_fields().get()[idx].data_type() {
+      match table_info.field_at(idx).data_type() {
         Type::BOOL => Ok(ExprEvalResult::Bool(row.get_bool(idx))),
         Type::INT => Ok(ExprEvalResult::Int(row.get_i32(idx))),
         Type::BIGINT => Ok(ExprEvalResult::BigInt(row.get_i64(idx))),
@@ -480,7 +481,7 @@ pub enum RowIter {
   FilterIter { is_stopped: bool, expr: Rc<Expression>, parent: Box<RowIter> },
   LimitIter { is_stopped: bool, limit: usize, parent: Box<RowIter> },
   ProjectIter { is_stopped: bool, exprs: Rc<Vec<Expression>>, parent: Box<RowIter> },
-  ScanIter { num_fields: usize, iter: BTreeIter },
+  ScanIter { table_info: Rc<RelationInfo>, iter: BTreeIter },
 }
 
 impl RowIter {
@@ -596,8 +597,31 @@ impl Iterator for RowIter {
           None => None,
         }
       },
-      RowIter::ScanIter { num_fields, iter } => {
-        iter.next().map(|(_key, data)| Ok(Row::from_buf(*num_fields, data)))
+      RowIter::ScanIter { table_info, iter } => {
+        iter.next().map(|(key, data)| {
+          let user_row = Row::from_buf(table_info.relation_fields().len(), data);
+          let mut dst = Row::new(table_info.num_fields());
+          for (i, field) in table_info.relation_fields().get().iter().enumerate() {
+            if !user_row.is_null(i) {
+              match field.data_type() {
+                Type::BOOL => dst.set_bool(i, user_row.get_bool(i)),
+                Type::INT => dst.set_i32(i, user_row.get_i32(i)),
+                Type::BIGINT => dst.set_i64(i, user_row.get_i64(i)),
+                Type::FLOAT => dst.set_f32(i, user_row.get_f32(i)),
+                Type::DOUBLE => dst.set_f64(i, user_row.get_f64(i)),
+                Type::TEXT => dst.set_str(i, user_row.get_str(i)),
+                Type::NULL => {},
+                Type::STRUCT(_) => unreachable!("ScanIter: STRUCT fields are not supported"),
+              }
+            }
+          }
+          // Append values for internal fields. Currently only _rowid_ exists,
+          // whose value is the B+tree key.
+          for i in 0..table_info.internal_fields().len() {
+            dst.set_i64(table_info.relation_fields().len() + i, u8_u64!(key) as i64);
+          }
+          Ok(dst)
+        })
       },
     }
   }
@@ -640,13 +664,16 @@ fn scan_system_view(txn: &TransactionRef, view_name: &str) -> Res<RowIter> {
       for schema in catalog::list_schemas(txn)? {
         let (_, relations) = catalog::list_relations(txn, schema.schema_name())?;
         for relation in relations {
-          for field in relation.relation_fields().get() {
-            let mut row = Row::new(5);
+          let all_fields = relation.relation_fields().get().iter().map(|f| (f, false))
+            .chain(relation.internal_fields().get().iter().map(|f| (f, true)));
+          for (field, internal) in all_fields {
+            let mut row = Row::new(6);
             row.set_str(0, schema.schema_name());
             row.set_str(1, relation.relation_name());
             row.set_str(2, field.name());
             row.set_str(3, &field.data_type().to_string());
             row.set_str(4, if field.nullable() { "YES" } else { "NO" });
+            row.set_str(5, if internal { "YES" } else { "NO" });
             rows.push(row);
           }
         }
@@ -794,9 +821,8 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
         RelationType::SYSTEM_VIEW => scan_system_view(txn, table_info.relation_name()),
         RelationType::TABLE => match catalog::get_relation_data(&txn, table_info) {
           Some(mut set) => {
-            let num_fields = table_info.relation_fields().len();
             let iter = set.list(None, None);
-            Ok(RowIter::ScanIter { num_fields, iter })
+            Ok(RowIter::ScanIter { table_info: table_info.clone(), iter })
           },
           None => Ok(RowIter::empty()),
         },

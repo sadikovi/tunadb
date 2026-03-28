@@ -445,11 +445,13 @@ fn test_describe_table() {
   let mut db = setup();
   query(&mut db, "CREATE TABLE t (id INT, name TEXT NOT NULL, score DOUBLE)");
   let rows = query(&mut db, "DESCRIBE t");
-  // Returns one row per column: (table_schema, table_name, column_name, data_type, is_nullable).
+  // Returns one row per column: (table_schema, table_name, column_name, data_type, is_nullable, is_internal).
+  // _rowid_ is an internal pseudo-column appended at the end.
   assert_rows(&rows, &[
-    &[Val::Text("default"), Val::Text("t"), Val::Text("id"),    Val::Text("INT"),    Val::Text("YES")],
-    &[Val::Text("default"), Val::Text("t"), Val::Text("name"),  Val::Text("TEXT"),   Val::Text("NO")],
-    &[Val::Text("default"), Val::Text("t"), Val::Text("score"), Val::Text("DOUBLE"), Val::Text("YES")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("id"),       Val::Text("INT"),    Val::Text("YES"), Val::Text("NO")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("name"),     Val::Text("TEXT"),   Val::Text("NO"),  Val::Text("NO")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("score"),    Val::Text("DOUBLE"), Val::Text("YES"), Val::Text("NO")],
+    &[Val::Text("default"), Val::Text("t"), Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO"),  Val::Text("YES")],
   ]);
 }
 
@@ -462,7 +464,8 @@ fn test_describe_table_schema_qualified() {
   ]);
   let rows = query(&mut db, "DESCRIBE s.t");
   assert_rows(&rows, &[
-    &[Val::Text("s"), Val::Text("t"), Val::Text("x"), Val::Text("BIGINT"), Val::Text("NO")],
+    &[Val::Text("s"), Val::Text("t"), Val::Text("x"),        Val::Text("BIGINT"), Val::Text("NO"), Val::Text("NO")],
+    &[Val::Text("s"), Val::Text("t"), Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO"), Val::Text("YES")],
   ]);
 }
 
@@ -507,8 +510,9 @@ fn test_information_schema_columns() {
     WHERE table_schema = 'default' AND table_name = 't'";
   let rows = query(&mut db, sql);
   assert_rows(&rows, &[
-    &[Val::Text("a"), Val::Text("INT"),  Val::Text("YES")],
-    &[Val::Text("b"), Val::Text("TEXT"), Val::Text("NO")],
+    &[Val::Text("a"),        Val::Text("INT"),    Val::Text("YES")],
+    &[Val::Text("b"),        Val::Text("TEXT"),   Val::Text("NO")],
+    &[Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO")],
   ]);
 }
 
@@ -614,4 +618,57 @@ fn test_explain_show_tables() {
   let joined: Vec<&str> = rows.iter().map(|r| r.get_str(0)).collect();
   let plan = joined.join("\n");
   assert!(joined.iter().any(|l| !l.is_empty()), "plan should not be empty: {}", plan);
+}
+
+//===========
+// _rowid_
+//===========
+
+#[test]
+fn test_rowid_explicit_select() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (42)",
+  ]);
+  // _rowid_ can be selected explicitly and returns a non-null BIGINT value.
+  let rows = query(&mut db, "SELECT _rowid_ FROM t");
+  assert_eq!(rows.len(), 1);
+  assert!(!rows[0].is_null(0));
+}
+
+#[test]
+fn test_rowid_not_in_star() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+  ]);
+  // SELECT * must not include _rowid_.
+  let rows = query(&mut db, "SELECT * FROM t");
+  assert_eq!(rows.len(), 1);
+  assert_eq!(rows[0].num_fields(), 1);
+  assert_eq!(rows[0].get_i32(0), 1);
+}
+
+#[test]
+fn test_rowid_unique_per_row() {
+  let mut db = setup();
+  query_txn(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+  ]);
+  let rows = query(&mut db, "SELECT _rowid_ FROM t");
+  assert_eq!(rows.len(), 2);
+  // Each row must have a distinct rowid.
+  let id0 = rows[0].get_i64(0);
+  let id1 = rows[1].get_i64(0);
+  assert_ne!(id0, id1);
+}
+
+#[test]
+fn test_rowid_reserved_name_error() {
+  let mut db = setup();
+  query_err(&mut db, "CREATE TABLE t (_rowid_ INT)", "reserved");
 }

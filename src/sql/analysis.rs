@@ -332,6 +332,14 @@ fn resolve_expression(
   trees::transform_up(expr, &ExpressionRule::ResolveIdentifiers(input))
 }
 
+// Returns true if the expression is a ColumnRef pointing to an internal pseudo-column.
+fn is_internal_column_ref(expr: &Expression) -> bool {
+  match expr {
+    Expression::ColumnRef(_, ref table_info, _, ref idx) => table_info.field_at(*idx).internal(),
+    _ => false,
+  }
+}
+
 // Resolves single expression into one or more expressions provided the input.
 // Expressions like `Star` could result in more than one expression.
 fn resolve_expressions(
@@ -345,7 +353,11 @@ fn resolve_expressions(
       Expression::Star(ref parts) => {
         for (ctx, input_expr) in input {
           if ctx.matches_suffix(parts) {
-            resolved_expressions.push(input_expr.clone());
+            // Internal pseudo-columns (e.g. _rowid_) are excluded from star expansion.
+            // They can still be selected explicitly by name.
+            if !is_internal_column_ref(input_expr) {
+              resolved_expressions.push(input_expr.clone());
+            }
           }
         }
       },
@@ -498,6 +510,14 @@ fn analysis_resolve_nodes(
           Err(Error::SQLAnalysisError(format!("Schema {} does not exist", schema_name)))
         },
         Err(Error::RelationDoesNotExist(ref schema_name, ref table_name)) => {
+          // Reject reserved internal pseudo-column names.
+          for field in fields.get() {
+            if field.name() == catalog::INTERNAL_ROWID_COLUMN_NAME {
+              return Err(Error::SQLAnalysisError(
+                format!("Column name '{}' is reserved", catalog::INTERNAL_ROWID_COLUMN_NAME)
+              ));
+            }
+          }
           // Validate fields to make sure there are no duplicates.
           assert_unique_fields(fields)?;
           Ok(
