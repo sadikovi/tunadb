@@ -719,12 +719,13 @@ pub fn execute(session: &Session, txn: &TransactionRef, plan: &PhysicalPlan) -> 
     },
     PhysicalPlan::DeleteFrom(ref child) => {
       let table_info = find_scan_table_info(child);
+      let rowid_idx = table_info.relation_fields().len();
       let mut child_iter = execute(session, txn, child)?;
       let mut rows_affected = 0i64;
       if let Some(mut set) = catalog::get_relation_data(txn, &table_info) {
         while let Some(result) = child_iter.next() {
           let row = result?;
-          set.del(&u64_u8!(row.get_i64(row.num_fields() - 1) as u64));
+          set.del(&u64_u8!(row.get_i64(rowid_idx) as u64));
           rows_affected += 1;
         }
       }
