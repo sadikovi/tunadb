@@ -737,9 +737,9 @@ fn test_rowid_reserved_name_in_insert() {
   query_err(&mut db, "INSERT INTO t (a, _rowid_) VALUES (1, 2)", "cannot be used in INSERT");
 }
 
-//===========
+//=============
 // DELETE FROM
-//===========
+//=============
 
 #[test]
 fn test_delete_all_rows() {
