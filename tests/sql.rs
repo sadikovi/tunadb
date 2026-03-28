@@ -445,13 +445,42 @@ fn test_describe_table() {
   let mut db = setup();
   query(&mut db, "CREATE TABLE t (id INT, name TEXT NOT NULL, score DOUBLE)");
   let rows = query(&mut db, "DESCRIBE t");
-  // Returns one row per column: (table_schema, table_name, column_name, data_type, is_nullable, is_internal).
+  // Returns one row per column: (table_schema, table_name, column_name, data_type, is_nullable,
+  // is_internal).
   // _rowid_ is an internal pseudo-column appended at the end.
   assert_rows(&rows, &[
-    &[Val::Text("default"), Val::Text("t"), Val::Text("id"),       Val::Text("INT"),    Val::Text("YES"), Val::Text("NO")],
-    &[Val::Text("default"), Val::Text("t"), Val::Text("name"),     Val::Text("TEXT"),   Val::Text("NO"),  Val::Text("NO")],
-    &[Val::Text("default"), Val::Text("t"), Val::Text("score"),    Val::Text("DOUBLE"), Val::Text("YES"), Val::Text("NO")],
-    &[Val::Text("default"), Val::Text("t"), Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO"),  Val::Text("YES")],
+    &[
+      Val::Text("default"),
+      Val::Text("t"),
+      Val::Text("id"),
+      Val::Text("INT"),
+      Val::Text("YES"),
+      Val::Text("NO")
+    ],
+    &[
+      Val::Text("default"),
+      Val::Text("t"),
+      Val::Text("name"),
+      Val::Text("TEXT"),
+      Val::Text("NO"),
+      Val::Text("NO")
+    ],
+    &[
+      Val::Text("default"),
+      Val::Text("t"),
+      Val::Text("score"),
+      Val::Text("DOUBLE"),
+      Val::Text("YES"),
+      Val::Text("NO")
+    ],
+    &[
+      Val::Text("default"),
+      Val::Text("t"),
+      Val::Text("_rowid_"),
+      Val::Text("BIGINT"),
+      Val::Text("NO"),
+      Val::Text("YES")
+    ],
   ]);
 }
 
@@ -464,8 +493,22 @@ fn test_describe_table_schema_qualified() {
   ]);
   let rows = query(&mut db, "DESCRIBE s.t");
   assert_rows(&rows, &[
-    &[Val::Text("s"), Val::Text("t"), Val::Text("x"),        Val::Text("BIGINT"), Val::Text("NO"), Val::Text("NO")],
-    &[Val::Text("s"), Val::Text("t"), Val::Text("_rowid_"),  Val::Text("BIGINT"), Val::Text("NO"), Val::Text("YES")],
+    &[
+      Val::Text("s"),
+      Val::Text("t"),
+      Val::Text("x"),
+      Val::Text("BIGINT"),
+      Val::Text("NO"),
+      Val::Text("NO")
+    ],
+    &[
+      Val::Text("s"),
+      Val::Text("t"),
+      Val::Text("_rowid_"),
+      Val::Text("BIGINT"),
+      Val::Text("NO"),
+      Val::Text("YES")
+    ],
   ]);
 }
 
@@ -602,11 +645,23 @@ fn test_explain_extended_unresolved_has_unresolved_nodes() {
   let joined = plan.join("\n");
   // Unresolved section uses Unresolved* node names.
   let unresolved_section = joined.split("== Resolved Plan ==").next().unwrap();
-  assert!(unresolved_section.contains("Unresolved"), "expected Unresolved nodes: {}", unresolved_section);
+  assert!(
+    unresolved_section.contains("Unresolved"),
+    "expected Unresolved nodes: {}",
+    unresolved_section
+  );
   // Physical section uses physical node names (no Unresolved prefix).
   let physical_section = joined.split("== Physical Plan ==").nth(1).unwrap();
-  assert!(!physical_section.contains("Unresolved"), "unexpected Unresolved in physical: {}", physical_section);
-  assert!(physical_section.contains("SeqScan"), "expected SeqScan in physical: {}", physical_section);
+  assert!(
+    !physical_section.contains("Unresolved"),
+    "unexpected Unresolved in physical: {}",
+    physical_section
+  );
+  assert!(
+    physical_section.contains("SeqScan"),
+    "expected SeqScan in physical: {}",
+    physical_section
+  );
 }
 
 #[test]
