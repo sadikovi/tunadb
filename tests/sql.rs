@@ -1,4 +1,5 @@
 use tunadb::api::Database;
+use tunadb::common::error::Res;
 use tunadb::sql::row::Row;
 
 //=========
@@ -9,40 +10,9 @@ fn setup() -> Database {
   Database::open(None).unwrap()
 }
 
-// Executes a single SQL statement and returns the result rows.
-fn query(db: &mut Database, sql: &str) -> Vec<Row> {
-  db.with_transaction(|txn| {
-    let result = txn.execute(sql)?;
-    Ok(result.rows.map(|r| r.unwrap()).collect())
-  }).unwrap()
-}
-
-// Executes a single SQL statement and asserts that it returns an error
-// containing the expected substring.
-fn query_err(db: &mut Database, sql: &str, expected: &str) {
-  let result = db.with_transaction(|txn| {
-    let result = txn.execute(sql)?;
-    Ok(result.rows.map(|r| r.unwrap()).collect::<Vec<_>>())
-  });
-  let err = result.expect_err(&format!("expected error for: {}", sql));
-  let msg = err.to_string();
-  assert!(msg.contains(expected), "error message {:?} does not contain {:?}", msg, expected);
-}
-
-// Executes multiple SQL statements in the same transaction, then rolls back.
-fn query_txn_rollback(db: &mut Database, stmts: &[&str]) {
-  db.with_transaction(|txn| {
-    for sql in stmts {
-      txn.execute(sql)?.rows.for_each(|r| { r.unwrap(); });
-    }
-    txn.rollback();
-    Ok(())
-  }).unwrap();
-}
-
 // Executes multiple SQL statements in the same transaction and returns
 // the rows from the last one.
-fn query_txn_commit(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
+fn _execute_commit(db: &mut Database, stmts: &[&str]) -> Res<Vec<Row>> {
   db.with_transaction(|txn| {
     let mut rows = Vec::new();
     for (i, sql) in stmts.iter().enumerate() {
@@ -52,7 +22,44 @@ fn query_txn_commit(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
       }
     }
     Ok(rows)
-  }).unwrap()
+  })
+}
+
+// Executes multiple SQL statements in the same transaction, then rolls back.
+fn _execute_rollback(db: &mut Database, stmts: &[&str]) -> Res<()> {
+  db.with_transaction(|txn| {
+    for sql in stmts {
+      txn.execute(sql)?.rows.for_each(|r| { r.unwrap(); });
+    }
+    txn.rollback();
+    Ok(())
+  })
+}
+
+// Executes a single SQL statement and returns the result rows.
+fn query(db: &mut Database, sql: &str) -> Vec<Row> {
+  _execute_commit(db, &[sql]).unwrap()
+}
+
+// Executes a single SQL statement and asserts that it returns an error
+// containing the expected substring.
+fn query_err(db: &mut Database, sql: &str, expected: &str) {
+  let res = _execute_commit(db, &[sql]);
+  let err = res.expect_err(&format!("expected error for: {}", sql));
+  let msg = err.to_string();
+  assert!(msg.contains(expected), "error message {:?} does not contain {:?}", msg, expected);
+}
+
+// Executes multiple SQL statements in the same transaction and returns
+// the rows from the last one. Panics on error.
+fn query_txn_commit(db: &mut Database, stmts: &[&str]) -> Vec<Row> {
+  _execute_commit(db, stmts).unwrap()
+}
+
+// Executes multiple SQL statements in the same transaction, then rolls back.
+// Panics on error.
+fn query_txn_rollback(db: &mut Database, stmts: &[&str]) {
+  _execute_rollback(db, stmts).unwrap();
 }
 
 //==========
