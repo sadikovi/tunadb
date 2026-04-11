@@ -80,6 +80,19 @@ fn expr_eval(expr: &Expression, row: &Row) -> Res<ExprEvalResult> {
         (l, r) => unreachable!("And: unexpected type combination {:?} AND {:?}", l, r),
       }
     },
+    // Returns the first THEN whose WHEN condition evaluates to TRUE.
+    // If no branch matches and there is no ELSE, returns NULL.
+    Expression::CaseWhen(ref pairs, ref else_expr) => {
+      for (when, then) in pairs.iter() {
+        if expr_eval(when, row)? == ExprEvalResult::Bool(true) {
+          return expr_eval(then, row);
+        }
+      }
+      match else_expr {
+        Some(ref e) => expr_eval(e, row),
+        None => Ok(ExprEvalResult::Null),
+      }
+    },
     // Cast rules follow §4 of SQL_SEMANTICS.md.
     // Widening casts (§4.1) always succeed. Narrowing casts (§4.2) are checked
     // at runtime and return SQLExecutionError on overflow or parse failure.

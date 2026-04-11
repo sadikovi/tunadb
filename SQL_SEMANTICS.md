@@ -383,6 +383,46 @@ Column references into a subquery must be qualified with the subquery alias when
 
 ---
 
+## 15. CASE WHEN
+
+### 15.1 Syntax
+
+```sql
+CASE
+  WHEN condition1 THEN result1
+  WHEN condition2 THEN result2
+  ...
+  [ELSE default]
+END
+```
+
+### 15.2 Evaluation order
+
+Branches are evaluated left-to-right. The first WHEN that evaluates to `TRUE` determines the result; remaining branches are not evaluated.
+
+### 15.3 WHEN condition type
+
+Each WHEN expression must have type `BOOL` after type resolution. A non-`BOOL` condition is a type error.
+
+### 15.4 Result type
+
+All THEN branches and the ELSE branch must have compatible types. The result type is the widest type across all branches using the numeric widening order from Section 3.1. `NULL` literals are compatible with any type. `TEXT` and `BOOL` branches must all be the same type; mixing `TEXT` with a numeric type is an error.
+
+Implicit casts are inserted automatically where a branch is narrower than the result type.
+
+### 15.5 No ELSE clause
+
+When no ELSE is provided and no WHEN branch matches, the result is `NULL`. The result type is still inferred from the THEN branches (or `NULL` if all are `NULL` literals).
+
+### 15.6 Nullability
+
+A `CASE WHEN` expression is nullable if:
+- No `ELSE` clause is present (implicit `NULL` result when nothing matches), or
+- Any `THEN` branch is nullable, or
+- The `ELSE` expression is nullable.
+
+---
+
 ## Appendix: PostgreSQL Compatibility Notes
 
 tunadb follows PostgreSQL semantics with the following intentional differences:

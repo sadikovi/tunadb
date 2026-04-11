@@ -856,3 +856,91 @@ fn test_delete_rollback() {
     &[Val::Int(3)],
   ]);
 }
+
+//===========
+// CASE WHEN
+//===========
+
+#[test]
+fn test_case_when_searched_basic() {
+  let mut db = setup();
+  let rows = query(&mut db, "SELECT CASE WHEN 1 = 1 THEN 'yes' ELSE 'no' END");
+  assert_rows(&rows, &[&[Val::Text("yes")]]);
+}
+
+#[test]
+fn test_case_when_searched_no_match_else() {
+  let mut db = setup();
+  let rows = query(&mut db, "SELECT CASE WHEN 1 = 2 THEN 'yes' ELSE 'no' END");
+  assert_rows(&rows, &[&[Val::Text("no")]]);
+}
+
+#[test]
+fn test_case_when_searched_no_match_no_else() {
+  let mut db = setup();
+  let rows = query(&mut db, "SELECT CASE WHEN 1 = 2 THEN 'yes' END");
+  assert_rows(&rows, &[&[Val::Null]]);
+}
+
+#[test]
+fn test_case_when_searched_multiple_branches() {
+  let mut db = setup();
+  let rows = query(
+    &mut db,
+    "SELECT CASE WHEN 1 = 2 THEN 'a' WHEN 1 = 1 THEN 'b' ELSE 'c' END",
+  );
+  assert_rows(&rows, &[&[Val::Text("b")]]);
+}
+
+
+#[test]
+fn test_case_when_with_column() {
+  let mut db = setup();
+  query_txn_commit(&mut db, &[
+    "CREATE TABLE t (a INT)",
+    "INSERT INTO t VALUES (1)",
+    "INSERT INTO t VALUES (2)",
+    "INSERT INTO t VALUES (3)",
+  ]);
+  let rows = query(
+    &mut db,
+    "SELECT CASE WHEN a = 1 THEN 'one' WHEN a = 2 THEN 'two' ELSE 'other' END FROM t",
+  );
+  assert_rows(&rows, &[
+    &[Val::Text("one")],
+    &[Val::Text("two")],
+    &[Val::Text("other")],
+  ]);
+}
+
+#[test]
+fn test_case_when_type_promotion() {
+  let mut db = setup();
+  // INT and DOUBLE branches: result should be DOUBLE
+  let rows = query(&mut db, "SELECT CASE WHEN true THEN 1 ELSE 2.0 END");
+  assert_rows(&rows, &[&[Val::Double(1.0)]]);
+}
+
+#[test]
+fn test_case_when_null_branch() {
+  let mut db = setup();
+  let rows = query(&mut db, "SELECT CASE WHEN false THEN 'a' ELSE NULL END");
+  assert_rows(&rows, &[&[Val::Null]]);
+}
+
+
+#[test]
+fn test_case_when_err_non_bool_condition() {
+  let mut db = setup();
+  query_err(&mut db, "SELECT CASE WHEN 1 THEN 'a' END", "BOOL type");
+}
+
+#[test]
+fn test_case_when_err_incompatible_branch_types() {
+  let mut db = setup();
+  query_err(
+    &mut db,
+    "SELECT CASE WHEN true THEN 1 ELSE 'text' END",
+    "Incompatible CASE WHEN branch result types",
+  );
+}

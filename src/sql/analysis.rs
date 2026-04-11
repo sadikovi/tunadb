@@ -141,6 +141,80 @@ where
   Ok(Some(make(new_left, new_right)))
 }
 
+// Resolves types for a CASE WHEN expression. Mirrors the pattern used in
+// resolve_types_for_binary_arithmetic: collect all branch types in one pass (validating WHEN
+// conditions along the way), then insert implicit CASTs where a branch is narrower than the
+// result type. Returns Ok(None) when no changes are required.
+fn resolve_types_for_case_when(
+  pairs: &Rc<Vec<(Rc<Expression>, Rc<Expression>)>>,
+  else_expr: &Option<Rc<Expression>>,
+) -> Res<Option<Expression>> {
+  // Single pass: validate WHEN types and collect THEN types; accumulate result_type.
+  let mut result_type = Type::NULL;
+  let mut then_types = Vec::with_capacity(pairs.len());
+  for (when, then) in pairs.iter() {
+    let when_type = when.data_type()?;
+    if when_type != Type::BOOL {
+      return Err(Error::SQLAnalysisExpressionError(
+        format!("CASE WHEN condition must have BOOL type, got {}", when_type)
+      ));
+    }
+    let then_type = then.data_type()?;
+    result_type = if result_type == Type::NULL {
+      then_type.clone()
+    } else if then_type == Type::NULL || then_type == result_type {
+      result_type
+    } else {
+      promote_arithmetic_type(&result_type, &then_type).map_err(|_| {
+        Error::SQLAnalysisExpressionError(
+          format!("Incompatible CASE WHEN branch result types {} and {}", result_type, then_type)
+        )
+      })?
+    };
+    then_types.push(then_type);
+  }
+  let else_type = else_expr.as_ref().map(|e| e.data_type()).transpose()?;
+  if let Some(ref et) = else_type {
+    result_type = if result_type == Type::NULL {
+      et.clone()
+    } else if *et == Type::NULL || *et == result_type {
+      result_type
+    } else {
+      promote_arithmetic_type(&result_type, et).map_err(|_| {
+        Error::SQLAnalysisExpressionError(
+          format!("Incompatible CASE WHEN branch result types {} and {}", result_type, et)
+        )
+      })?
+    };
+  }
+
+  // Insert casts where a branch type is narrower than result_type.
+  let mut changed = false;
+  let mut new_pairs = Vec::with_capacity(pairs.len());
+  for ((when, then), then_type) in pairs.iter().zip(then_types.iter()) {
+    let new_then = if result_type != Type::NULL && then_type != &result_type {
+      changed = true;
+      Rc::new(Expression::Cast(then.clone(), Rc::new(result_type.clone())))
+    } else {
+      then.clone()
+    };
+    new_pairs.push((when.clone(), new_then));
+  }
+  let new_else = match (else_expr, else_type) {
+    (Some(ref e), Some(ref et)) if result_type != Type::NULL && et != &result_type => {
+      changed = true;
+      Some(Rc::new(Expression::Cast(e.clone(), Rc::new(result_type.clone()))))
+    },
+    (other, _) => other.clone(),
+  };
+
+  if changed {
+    Ok(Some(Expression::CaseWhen(Rc::new(new_pairs), new_else)))
+  } else {
+    Ok(None)
+  }
+}
+
 //=======================
 // Expression resolution
 //=======================
@@ -201,6 +275,9 @@ impl<'a> trees::Rule<Expression> for ExpressionRule<'a> {
             } else {
               Ok(None)
             }
+          },
+          Expression::CaseWhen(ref pairs, ref else_expr) => {
+            resolve_types_for_case_when(pairs, else_expr)
           },
           Expression::Cast(ref child, ref tpe) => {
             let from_tpe = child.data_type()?;

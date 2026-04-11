@@ -198,6 +198,10 @@ pub enum Expression {
   Add(Rc<Expression>, Rc<Expression>),
   Alias(Rc<Expression>, Rc<String> /* alias name */),
   And(Rc<Expression>, Rc<Expression>),
+  CaseWhen(
+    Rc<Vec<(Rc<Expression>, Rc<Expression>)>> /* (when, then) pairs */,
+    Option<Rc<Expression>> /* else expression */,
+  ),
   Cast(Rc<Expression>, Rc<Type>),
   Concat(Rc<Expression>, Rc<Expression>),
   ColumnRef(
@@ -239,6 +243,7 @@ impl Expression {
       Expression::Add(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Alias(_, ref name) => name,
       Expression::And(_, _) => DEFAULT_EXPRESSION_NAME,
+      Expression::CaseWhen(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Cast(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::Concat(_, _) => DEFAULT_EXPRESSION_NAME,
       Expression::ColumnRef(_, ref table_info, _, ref idx) => table_info.field_at(*idx).name(),
@@ -277,6 +282,26 @@ impl Expression {
       },
       Expression::Alias(ref child, _) => child.data_type(),
       Expression::And(_, _) => Ok(Type::BOOL),
+      Expression::CaseWhen(ref pairs, ref else_expr) => {
+        let mut result_type = Type::NULL;
+        for (_, then) in pairs.iter() {
+          let then_type = then.data_type()?;
+          if result_type == Type::NULL {
+            result_type = then_type;
+          } else if then_type != Type::NULL && then_type != result_type {
+            result_type = promote_arithmetic_type(&result_type, &then_type)?;
+          }
+        }
+        if let Some(ref e) = else_expr {
+          let else_type = e.data_type()?;
+          if result_type == Type::NULL {
+            result_type = else_type;
+          } else if else_type != Type::NULL && else_type != result_type {
+            result_type = promote_arithmetic_type(&result_type, &else_type)?;
+          }
+        }
+        Ok(result_type)
+      },
       Expression::Cast(_, ref tpe) => Ok(tpe.as_ref().clone()),
       Expression::Concat(_, _) => Ok(Type::TEXT),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
@@ -339,6 +364,18 @@ impl Expression {
       Expression::Add(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::Alias(ref child, _) => child.nullable(),
       Expression::And(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
+      Expression::CaseWhen(ref pairs, ref else_expr) => {
+        // No ELSE clause means NULL is returned when no branch matches.
+        if else_expr.is_none() {
+          return Ok(true);
+        }
+        for (_, then) in pairs.iter() {
+          if then.nullable()? {
+            return Ok(true);
+          }
+        }
+        else_expr.as_ref().unwrap().nullable()
+      },
       Expression::Cast(ref expr, _) => expr.nullable(),
       Expression::Concat(ref left, ref right) => Ok(left.nullable()? || right.nullable()?),
       Expression::ColumnRef(_, ref table_info, _, ref idx) => {
@@ -402,6 +439,20 @@ impl TreeNode<Expression> for Expression {
         write!(f, " as {}", name)
       },
       Expression::And(ref left, ref right) => display_binary!(f, left, "and", right),
+      Expression::CaseWhen(ref pairs, ref else_expr) => {
+        write!(f, "case")?;
+        for (when, then) in pairs.iter() {
+          write!(f, " when ")?;
+          when.display(f)?;
+          write!(f, " then ")?;
+          then.display(f)?;
+        }
+        if let Some(ref e) = else_expr {
+          write!(f, " else ")?;
+          e.display(f)?;
+        }
+        write!(f, " end")
+      },
       Expression::Cast(ref expr, ref tpe) => {
         write!(f, "cast(")?;
         expr.display(f)?;
@@ -455,6 +506,15 @@ impl TreeNode<Expression> for Expression {
       Expression::Add(ref left, ref right) => vec![left, right],
       Expression::Alias(ref child, _) => vec![child],
       Expression::And(ref left, ref right) => vec![left, right],
+      Expression::CaseWhen(ref pairs, ref else_expr) => {
+        let mut out: Vec<&Expression> = Vec::new();
+        for (when, then) in pairs.iter() {
+          out.push(when.as_ref());
+          out.push(then.as_ref());
+        }
+        if let Some(ref e) = else_expr { out.push(e.as_ref()); }
+        out
+      },
       Expression::Cast(ref expr, _) => vec![expr],
       Expression::Concat(ref left, ref right) => vec![left, right],
       Expression::ColumnRef(_, _, _, _) => Vec::new(),
@@ -499,6 +559,18 @@ impl TreeNode<Expression> for Expression {
       Expression::And(_, _) => {
         let (left, right) = get_binary!("And", children);
         Expression::And(Rc::new(left), Rc::new(right))
+      },
+      Expression::CaseWhen(ref pairs, ref else_expr) => {
+        let mut iter = children.into_iter();
+        let new_pairs = pairs.iter()
+          .map(|_| (Rc::new(iter.next().unwrap()), Rc::new(iter.next().unwrap())))
+          .collect();
+        let new_else = if else_expr.is_some() {
+          Some(Rc::new(iter.next().unwrap()))
+        } else {
+          None
+        };
+        Expression::CaseWhen(Rc::new(new_pairs), new_else)
       },
       Expression::Cast(ref expr, ref tpe) => Expression::Cast(expr.clone(), tpe.clone()),
       Expression::Concat(_, _) => {
@@ -1318,6 +1390,16 @@ pub mod dsl {
     Expression::NotEquals(Rc::new(left), Rc::new(right))
   }
 
+  pub fn case_when(
+    pairs: Vec<(Expression, Expression)>,
+    else_expr: Option<Expression>,
+  ) -> Expression {
+    Expression::CaseWhen(
+      Rc::new(pairs.into_iter().map(|(w, t)| (Rc::new(w), Rc::new(t))).collect()),
+      else_expr.map(|e| Rc::new(e)),
+    )
+  }
+
   pub fn less_than_equals(left: Expression, right: Expression) -> Expression {
     Expression::LessThanEquals(Rc::new(left), Rc::new(right))
   }
@@ -1644,6 +1726,53 @@ pub mod tests {
         Rc::new(Expression::LiteralInt(2)),
       ).data_type(),
       Ok(Type::BOOL)
+    );
+
+    // CaseWhen: result type is the widest THEN/ELSE branch type.
+    // Single THEN, no ELSE.
+    assert_eq!(
+      dsl::case_when(
+        vec![(Expression::LiteralBool(true), Expression::LiteralInt(1))],
+        None,
+      ).data_type(),
+      Ok(Type::INT)
+    );
+    // THEN branches of different numeric types widen to the widest.
+    assert_eq!(
+      dsl::case_when(
+        vec![
+          (Expression::LiteralBool(true), Expression::LiteralInt(1)),
+          (Expression::LiteralBool(false), Expression::LiteralDouble(2.0)),
+        ],
+        None,
+      ).data_type(),
+      Ok(Type::DOUBLE)
+    );
+    // ELSE narrows result type when THEN is NULL.
+    assert_eq!(
+      dsl::case_when(
+        vec![(Expression::LiteralBool(true), Expression::Null)],
+        Some(Expression::LiteralBigInt(99)),
+      ).data_type(),
+      Ok(Type::BIGINT)
+    );
+    // All NULL branches → NULL.
+    assert_eq!(
+      dsl::case_when(vec![(Expression::LiteralBool(true), Expression::Null)], None).data_type(),
+      Ok(Type::NULL)
+    );
+    // Incompatible branch types (TEXT vs INT) → error.
+    assert!(
+      dsl::case_when(
+        vec![
+          (Expression::LiteralBool(true), Expression::LiteralInt(1)),
+          (
+            Expression::LiteralBool(false),
+            Expression::LiteralString(Rc::new("x".to_string())),
+          ),
+        ],
+        None,
+      ).data_type().is_err()
     );
   }
 

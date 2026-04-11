@@ -175,6 +175,30 @@ impl<'a> Parser<'a> {
       return Ok(Expression::Cast(Rc::new(expr), Rc::new(tpe)));
     }
 
+    // CASE WHEN expression: CASE WHEN cond THEN result ... [ELSE default] END
+    if self.matches(TokenType::CASE)? {
+      let mut pairs = Vec::new();
+      while self.matches(TokenType::WHEN)? {
+        let when_expr = self.expression()?;
+        self.consume(TokenType::THEN, "Expected THEN after WHEN expression")?;
+        let then_expr = self.expression()?;
+        pairs.push((Rc::new(when_expr), Rc::new(then_expr)));
+      }
+
+      if pairs.is_empty() {
+        return Err(self.error_at(&self.current, "CASE requires at least one WHEN clause"));
+      }
+
+      let else_expr = if self.matches(TokenType::ELSE)? {
+        Some(Rc::new(self.expression()?))
+      } else {
+        None
+      };
+
+      self.consume(TokenType::END, "Expected END to close CASE expression")?;
+      return Ok(Expression::CaseWhen(Rc::new(pairs), else_expr));
+    }
+
     // Global star.
     if self.matches(TokenType::STAR)? {
       return Ok(Expression::Star(Rc::new(Vec::new())));
@@ -1820,5 +1844,22 @@ pub mod tests {
   #[should_panic(expected = "Unsupported token 'indexes'")]
   fn test_parser_show_unknown() {
     assert_plan("show indexes", empty());
+  }
+
+  #[test]
+  fn test_parser_case_when() {
+    // Multiple WHEN branches with an ELSE.
+    assert_plan(
+      "select case when a = 1 then 'one' when a = 2 then 'two' else 'other' end",
+      local(vec![
+        case_when(
+          vec![
+            (equals(identifier("a"), int(1)), string("one")),
+            (equals(identifier("a"), int(2)), string("two")),
+          ],
+          Some(string("other")),
+        )
+      ])
+    );
   }
 }
